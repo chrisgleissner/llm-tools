@@ -45,6 +45,46 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn command_rejects_control_characters_in_mission_identifiers() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &token, "control-id-worker", 0).await;
+    let (status, problem) = api
+        .post(
+            "/api/v1/commands",
+            json!({
+                "target":"w1",
+                "request":{
+                    "schema_version":1,
+                    "operation":"mission.status",
+                    "params":{},
+                    "mission_id":"mission\nforged",
+                    "target":"w1",
+                    "request_id":"control-id-1"
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    assert!(problem["detail"].as_str().unwrap().contains("mission_id"));
+    assert!(env.srv.state.db.command_get("control-id-1").unwrap().is_none());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn event_list_rejects_unknown_query_parameters() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, problem) = api.get("/api/v1/events?unexpected=1").await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    assert_eq!(problem["detail"], "unknown query parameter");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn security_notifications_are_durable_scoped_and_dismissible() {
     let env = boot().await;
     let api = env.admin().await;
@@ -691,6 +731,17 @@ async fn passkey_registration_start_is_bound_to_https_named_origin_and_session()
     // A malformed but structurally valid assertion reaches verification and consumes the
     // single-use ceremony. Replaying the same challenge is rejected as gone.
     let invalid_credential = json!({"id":"AQ","rawId":"AQ","type":"public-key","response":{"attestationObject":"AQ","clientDataJSON":"AQ"}});
+    let (status, body) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/passkeys/registration/finish")
+                .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+                .header("x-csrf-token", api.csrf.as_deref().unwrap())
+                .header("origin", origin)
+                .json(&json!({"challenge_id":format!("{}0", challenge_id),"credential":invalid_credential})),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("64 lowercase hexadecimal"));
     let finish = || {
         api.bare(Method::POST, "/api/v1/auth/passkeys/registration/finish")
             .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))

@@ -939,6 +939,10 @@ fn passkey_ticket_cookie(token: &str) -> String {
     format!("__Host-bridge_passkey={token}; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict")
 }
 
+fn valid_challenge_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegisterStartBody {
@@ -1029,6 +1033,13 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
     let m = parse_body(&body.bytes)?;
     let body: RegisterFinishBody =
         serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
@@ -1222,6 +1233,13 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     let m = parse_body(&body.bytes)?;
     let body: AssertFinishBody =
         serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
@@ -2651,6 +2669,9 @@ async fn mission_task_show(
 }
 
 async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "after" | "limit")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
     let num = |k: &str, default: u64| -> Result<u64, ApiError> {
         q.get(k).map_or(Ok(default), |v| {
             v.parse()
