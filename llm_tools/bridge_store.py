@@ -2001,6 +2001,168 @@ class BridgeStore:
             "observed_at": utc_now(),
         })
 
+    def retention_missions(self, *, finished_before: str | None = None) -> list[dict[str, Any]]:
+        """Finished missions (COMPLETED or CANCELLED) with no unresolved operation, oldest first.
+
+        ``finished_before`` keeps only those whose last update is older than that ISO time. A mission
+        with an active operation is never returned, so retention cannot touch an operation's own rows.
+        """
+        finished = sorted(FINISHED_MISSION_STATUSES)
+        active = sorted(ACTIVE_OPERATION_STATUSES)
+        query = (
+            f"SELECT id,status,updated_at FROM missions m WHERE status IN ({','.join('?' * len(finished))}) "
+            f"AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.mission_id=m.id AND o.status IN ({','.join('?' * len(active))}))"
+        )
+        params: list[Any] = [*finished, *active]
+        if finished_before is not None:
+            query += " AND updated_at<?"
+            params.append(finished_before)
+        return [dict(row) for row in self.db.execute(query + " ORDER BY updated_at,id", params)]
+
+    def prune_retention(
+        self,
+        *,
+        events_before: str | None = None,
+        finished_before: str | None = None,
+        operations_before: str | None = None,
+        chunk: int = 2000,
+        budget_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        """Apply the data-retention rules to finished missions, in ``chunk``-sized transactions.
+
+        Only missions that are COMPLETED or CANCELLED and have no unresolved operation are touched.
+        A mission that is running, paused, stopped, failed or created keeps every row.
+
+        * ``events_before``: diagnostic events (``bridge_events.DIAGNOSTIC_KINDS``) created before this
+          ISO time are deleted. Audit records and audit summaries stay.
+        * ``finished_before``: for a mission last updated before this time, every event except the audit
+          summaries (``bridge_events.AUDIT_SUMMARY_KINDS``) is deleted. Mission and task rows stay.
+        * ``operations_before``: operation and managed-process rows of a finished mission that ended
+          before this time and no longer reference a log file are deleted. The size and SHA-256 of a
+          pruned log stay in the ``operation-log-pruned`` event.
+
+        A cutoff of ``None`` skips its rule. The pass stops after ``budget_seconds``; ``complete`` is false
+        when more remains and the call should be repeated. Returns ``{"missions": {mission_id: {category:
+        count}}, "complete": bool}`` with the categories ``events``, ``finished_mission_events``,
+        ``operations`` and ``managed_processes``.
+        """
+        from .bridge_events import AUDIT_SUMMARY_KINDS, DIAGNOSTIC_KINDS
+
+        summary = sorted(AUDIT_SUMMARY_KINDS)
+        diagnostic = sorted(DIAGNOSTIC_KINDS)
+        active = sorted(ACTIVE_OPERATION_STATUSES)
+        in_active = ",".join("?" * len(active))
+        # Rows that belong to an unresolved operation are never deleted, even if the mission lookup raced.
+        not_active_operation = f"(operation_id IS NULL OR operation_id NOT IN (SELECT id FROM operations WHERE status IN ({in_active})))"
+        deadline = time.monotonic() + max(0.0, budget_seconds)
+        missions: dict[str, dict[str, int]] = {}
+        limit = max(1, int(chunk))
+
+        def run(mission_id: str, category: str, sql: str, params: list[Any]) -> bool:
+            """Delete in chunks; ``False`` when the time budget ran out with rows left."""
+            while True:
+                with self._transaction():
+                    count = max(0, self.db.execute(sql, [*params, limit]).rowcount)
+                if count:
+                    bucket = missions.setdefault(mission_id, {})
+                    bucket[category] = bucket.get(category, 0) + count
+                if count < limit:
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+
+        for mission in self.retention_missions():
+            mission_id = str(mission["id"])
+            steps: list[tuple[str, str, list[Any]]] = []
+            if finished_before is not None and str(mission["updated_at"]) < finished_before:
+                steps.append((
+                    "finished_mission_events",
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=? "
+                    f"AND kind NOT IN ({','.join('?' * len(summary))}) AND {not_active_operation} ORDER BY id LIMIT ?)",
+                    [mission_id, *summary, *active],
+                ))
+            if events_before is not None:
+                steps.append((
+                    "events",
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=? "
+                    f"AND kind IN ({','.join('?' * len(diagnostic))}) AND created_at<? AND {not_active_operation} ORDER BY id LIMIT ?)",
+                    [mission_id, *diagnostic, events_before, *active],
+                ))
+            if operations_before is not None:
+                steps.append((
+                    "managed_processes",
+                    "DELETE FROM managed_processes WHERE id IN (SELECT id FROM managed_processes WHERE mission_id=? "
+                    "AND status NOT IN ('STARTING','PREPARED','RUNNING') AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                    [mission_id, operations_before],
+                ))
+                steps.append((
+                    "operations",
+                    "DELETE FROM operations WHERE id IN (SELECT id FROM operations WHERE mission_id=? AND logs_path IS NULL "
+                    f"AND status NOT IN ({in_active}) AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                    [mission_id, *active, operations_before],
+                ))
+            for category, sql, params in steps:
+                if not run(mission_id, category, sql, params):
+                    return {"missions": missions, "complete": False}
+        return {"missions": missions, "complete": True}
+
+    def operations_with_logs(self, mission_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Operations of a mission that still reference a log file, oldest first."""
+        self._mission_row(mission_id)
+        rows = self.db.execute(
+            "SELECT id,task_id,logs_path FROM operations WHERE mission_id=? AND logs_path IS NOT NULL ORDER BY created_at,id LIMIT ?",
+            (mission_id, int(limit)),
+        )
+        return [dict(row) for row in rows]
+
+    def logs_path_references(self, logs_path: str) -> int:
+        """How many operations (of any mission) still reference exactly this log file."""
+        return int(self.db.execute("SELECT COUNT(*) FROM operations WHERE logs_path=?", (logs_path,)).fetchone()[0])
+
+    def prune_migration_backups(self, keep: int) -> list[Path]:
+        """Delete schema-migration backups beyond the ``keep`` newest; returns the removed paths.
+
+        Each removal is appended to ``migrations.log`` beside the database. A backup that cannot be
+        deleted is skipped and stays listed on the next pass.
+        """
+        if keep < 1:
+            raise ValueError("at least one migration backup must be kept")
+        backups = self._backups()
+        removed: list[Path] = []
+        for _stamp, version, path in backups[: max(0, len(backups) - keep)]:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(path)
+            line = f"{utc_now()} pruned schema {version} backup {path} ({size} bytes); keeping the newest {keep}\n"
+            try:
+                log = os.open(self.path.with_name("migrations.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    os.write(log, line.encode("utf-8"))
+                finally:
+                    os.close(log)
+            except OSError:
+                pass  # the audit event of the pass still records the count
+        return removed
+
+    def record_retention_pruned(self, mission_id: str, result: dict[str, Any]) -> int:
+        """Audit record of a data-retention pass: rows, files and backups removed per category, with the cutoffs used."""
+        deleted = {str(category): int(count) for category, count in dict(result.get("deleted", {})).items() if int(count)}
+        missions = {str(key): {str(c): int(n) for c, n in dict(value).items()} for key, value in list(dict(result.get("missions", {})).items())[:20]}
+        retention: dict[str, Any] = {
+            "cutoffs": {str(key): str(value) for key, value in dict(result.get("cutoffs", {})).items()},
+            "missions": missions,
+            "mission_count": int(result.get("mission_count", len(missions))),
+        }
+        return self.record_runtime_event(mission_id, "events-pruned", {
+            "deleted": deleted,
+            "total": sum(deleted.values()),
+            "retention": retention,
+            "observed_at": utc_now(),
+        })
+
     def refresh_runtime_event(self, event_id: int, data: dict[str, Any]) -> bool:
         """Replace an observation event's payload and time with a newer identical-state observation.
 

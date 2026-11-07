@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any, Callable, cast
 
+from . import bridge_retention
+from . import config as toolconfig
 from .bridge_store import BridgeStore, utc_now
 
 
@@ -195,6 +197,9 @@ class CapacityRefreshWorker:
         self._last_refresh: tuple[str, int] | None = None
         self._refresh_loaded = False
         self._pruned: dict[str, int] = {}
+        self._retention_deleted: dict[str, int] = {}
+        self._retention_missions: dict[str, dict[str, int]] = {}
+        self._retention_cutoffs: dict[str, str] = {}
         self._last_wake_plan: tuple[int | None, bool] | None = None
         self._last_wake_signature: tuple[Any, ...] | None = None
         self._last_clock_pair: tuple[int, tuple[float, float] | None] | None = None
@@ -295,11 +300,20 @@ class CapacityRefreshWorker:
                 self._discard_connection()
                 raise
 
-    def _prune_pass(self) -> bool:
-        """Delete one budgeted slice of expired heartbeats and capacity refreshes; ``True`` when the pass is finished.
+    def _retention_policy(self) -> bridge_retention.RetentionPolicy:
+        """The ``[bridge.retention]`` policy; the defaults when the config file cannot be read or is invalid."""
+        try:
+            return bridge_retention.policy_from_config(toolconfig.load_config())
+        except (SystemExit, OSError, ValueError):
+            return bridge_retention.RetentionPolicy()
 
-        A finished pass that removed anything leaves one ``events-pruned`` audit event
-        with the totals of the whole pass.
+    def _prune_pass(self) -> bool:
+        """Delete one budgeted slice of expired rows; ``True`` when the pass is finished.
+
+        The pass first bounds heartbeats and capacity refreshes (INT-011), then applies the data-retention
+        policy to finished missions and migration backups. A finished pass that removed anything leaves
+        one ``events-pruned`` audit event on this mission with the totals of the whole pass, and one on each
+        finished mission that lost rows or files.
         """
         with self._write_lock:
             if self._stop.is_set():
@@ -311,9 +325,31 @@ class CapacityRefreshWorker:
                     self._pruned[kind] = self._pruned.get(kind, 0) + int(count)
                 if not result["complete"]:
                     return False
+                policy = self._retention_policy()
+                retention = bridge_retention.run_pass(store, policy=policy, budget_seconds=PRUNE_BUDGET_SECONDS)
+                for mission_id, counts in retention["missions"].items():
+                    bucket = self._retention_missions.setdefault(mission_id, {})
+                    for category, count in counts.items():
+                        bucket[category] = bucket.get(category, 0) + int(count)
+                for category, count in retention["deleted"].items():
+                    self._retention_deleted[category] = self._retention_deleted.get(category, 0) + int(count)
+                self._retention_cutoffs = retention["cutoffs"]
+                if not retention["complete"]:
+                    return False
                 if self._pruned:
                     store.record_events_pruned(self.mission_id, {**result, "deleted": self._pruned})
                     self._pruned = {}
+                if self._retention_deleted:
+                    for mission_id, counts in self._retention_missions.items():
+                        if mission_id != self.mission_id:
+                            store.record_retention_pruned(mission_id, {"deleted": counts, "cutoffs": self._retention_cutoffs})
+                    store.record_retention_pruned(self.mission_id, {
+                        "deleted": self._retention_deleted,
+                        "missions": self._retention_missions,
+                        "mission_count": len(self._retention_missions),
+                        "cutoffs": self._retention_cutoffs,
+                    })
+                    self._retention_deleted, self._retention_missions = {}, {}
                 return True
             except sqlite3.Error:
                 self._discard_connection()
