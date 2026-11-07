@@ -108,6 +108,9 @@ let attempts = 0;
 let wanted = false;
 let refreshTimer: number | undefined;
 
+/** True while the stream's first connection attempt is still open: `store.conn` is "offline" then, only because nothing has connected yet. */
+export const streamConnecting = (): boolean => ws?.readyState === WebSocket.CONNECTING;
+
 function setConn(c: ConnState): void {
   if (store.conn === c) return;
   store.conn = c;

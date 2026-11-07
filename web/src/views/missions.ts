@@ -2,9 +2,9 @@
 // collapsed group with a count. State, worker, search and sort are in the URL.
 import * as api from "../api";
 import { debounce, deferSkeleton, disclosure, emptyState, errorBlock, h, searchBox } from "../dom";
-import { store, subscribe } from "../store";
+import { store, streamConnecting, subscribe } from "../store";
 import {
-  attentionGaps, attentionPending, hasLine, hasStatus, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
+  attentionGaps, attentionPending, hasLine, hasStatus, statusPending, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
   type Item, type RowOptions, type RowSpec,
 } from "../rows";
 
@@ -42,7 +42,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   let heldSince = 0;
   let detailTimer = 0;
 
-  const need = h("span", { "data-q": "need-me" });
+  const need = h("span", { "data-q": "need-me" }, "Checking..."); // the answer line has its height from the first paint
   const what = h("span", { "data-q": "what" });
   const next = h("span", { "data-q": "next" });
   const answer = h("p", { class: "answer", "data-l0": "missions.answer", "aria-live": "polite" }, need, what, next);
@@ -123,13 +123,18 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     return { key: item.key, sig: rowSig(item, o), build: () => missionRow(item, o) };
   });
 
-  function fetchDetails(everything: boolean, shown: Item[]): void {
-    if (disposed || store.conn !== "live" || !reply) return;
+  /** The missions whose status is read next: the first gaps in attention, and the running rows shown (a status can turn a running row into one that needs you). */
+  function wanted(shown: Item[]): api.MissionEntry[] {
+    if (!reply) return [];
     const running = shown.filter((i) => i.state.id === "running").slice(0, 8).map((i) => i.entry);
     const gaps = attentionGaps(reply.missions).slice(0, 12);
-    const union = new Map([...gaps, ...running].map((e) => [`${e.worker}/${e.mission.id}`, e]));
-    const s = [...union.values()].filter((e) => everything || !hasStatus(e));
-    const l = running.filter((e) => everything || !hasLine(e));
+    return [...new Map([...gaps, ...running].map((e) => [`${e.worker}/${e.mission.id}`, e])).values()];
+  }
+
+  function fetchDetails(everything: boolean, shown: Item[]): void {
+    if (disposed || store.conn !== "live" || !reply) return;
+    const s = wanted(shown).filter((e) => everything || !hasStatus(e));
+    const l = shown.filter((i) => i.state.id === "running").slice(0, 8).map((i) => i.entry).filter((e) => everything || !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
   }
@@ -149,11 +154,14 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     }
     const items = reply.missions.map(itemOf);
     // The first rows are drawn when the status of the missions that need one has arrived (at most HOLD_MS, nothing shown meanwhile), so a row that turns
-    // out to need the operator is not inserted above rows that are already on screen.
+    // out to need the operator is not inserted above rows that are already on screen. That includes the running rows read after the first
+    // gaps: when a gap turns out to need the operator, the next running rows enter the window of rows that are read, and one of them can need it too.
+    // While the stream is still connecting no mission is eligible for a status read yet (the page is not live), so nothing would be pending.
     if (!released) {
       heldSince ||= Date.now();
-      if (attentionPending(reply.missions) && Date.now() - heldSince < HOLD_MS) {
-        fetchDetails(false, items.filter(matches));
+      const shownNow = items.filter(matches);
+      if (streamConnecting() || wanted(shownNow).some(statusPending) && Date.now() - heldSince < HOLD_MS) {
+        fetchDetails(false, shownNow);
         window.clearTimeout(renderTimer);
         renderTimer = window.setTimeout(render, 100);
         return;

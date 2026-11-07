@@ -186,6 +186,8 @@ export function workOf(e: MissionEntry): Work | null {
 }
 
 export const hasStatus = (e: MissionEntry): boolean => statuses.has(keyOf(e)) || inflight.has(keyOf(e));
+/** True while the mission's attention is unknown and its status read has not arrived (a read still in flight counts as not arrived). */
+export const statusPending = (e: MissionEntry): boolean => eligible(e) && summary(e).attention === undefined && !statuses.has(keyOf(e));
 export const hasLine = (e: MissionEntry): boolean => lines.has(keyOf(e));
 
 export const lastLine = (e: MissionEntry): string => lines.get(keyOf(e))?.line ?? "";
