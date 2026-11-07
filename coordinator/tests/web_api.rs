@@ -72,6 +72,8 @@ async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial()
     assert_eq!(status, 201, "{created}");
     assert_eq!(created["token"]["allowed_cidrs"], json!(["192.0.2.0/24"]));
     let secret = created["secret"].as_str().unwrap();
+    let response = admin.bare(Method::GET, "/api/v1/auth/state").bearer_auth(secret).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 403, "auth/state must enforce token network restrictions too");
     let response = admin.bare(Method::GET, "/api/v1/missions").bearer_auth(secret).send().await.unwrap();
     assert_eq!(response.status().as_u16(), 403);
     let problem: Value = response.json().await.unwrap();

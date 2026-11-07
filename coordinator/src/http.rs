@@ -603,7 +603,28 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
             body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
             body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
         }
-        Ok(Principal::Token { name, scopes: granted, .. }) => {
+        Ok(Principal::Token {
+            name,
+            scopes: granted,
+            allowed_cidrs,
+        }) => {
+            if !allowed_cidrs.is_empty()
+                && !ip
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| crate::client_ip::address_matches_any(address, &allowed_cidrs))
+            {
+                st.db.audit_checked(
+                    &format!("token:{name}"),
+                    "authorization.denied.address",
+                    "method=GET path=/api/v1/auth/state request_id=-",
+                    &ip,
+                )?;
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "token-address-denied",
+                    "request address is outside this token's allowed networks",
+                ));
+            }
             let request_id = headers
                 .get("idempotency-key")
                 .or_else(|| headers.get("x-request-id"))
