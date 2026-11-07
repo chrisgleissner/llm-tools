@@ -249,3 +249,21 @@ In the code: `coordinator/src/passkeys.rs::canonical_origin`, `coordinator/src/c
 `coordinator/src/db.rs::passkey_put_at_origin`, and `coordinator/src/server.rs`; regressions
 are covered by `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs`.
 
+## D17 Require discoverable passkeys (PK-003, PK-004)
+
+The maintained `webauthn-rs` 0.6.2 no-attestation registration method hardcodes
+`require_resident_key(false)`. Its separate resident-key API requires attestation roots and
+rejects synced authenticators, which conflicts with the product's no-attestation and synced
+passkey requirements. Keep upstream's normal passkey API and make a narrow, licensed local
+vendor patch that sets the builder to require resident keys. Enable its conditional UI API
+and start a discoverable authentication ceremony with an empty allow-credentials list and
+user verification required. Before finishing, match the credential ID and verify the fixed
+user handle against the administrator, then use the library's discoverable authentication
+verification. Do not enable synced passkeys through the attestation-only API.
+
+In the code: `coordinator/vendor/webauthn-rs/src/lib.rs` contains the one-line builder patch;
+`coordinator/src/passkeys.rs` starts and finishes the conditional ceremony. The regression
+tests assert required resident keys, conditional mediation and an empty allow list. Completion
+checks the fixed user handle, registered credential ID and user-verification flag; valid
+cryptographic vectors for that path remain required under PK-011.
+

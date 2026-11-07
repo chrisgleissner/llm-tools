@@ -3,8 +3,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
-    Uuid, Webauthn, WebauthnBuilder,
+    CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, RequestChallengeResponse, Uuid, Webauthn, WebauthnBuilder,
 };
 
 pub const CHALLENGE_TTL_SECS: i64 = 300;
@@ -17,6 +17,7 @@ pub const CHALLENGE_BYTES: usize = 32;
 pub enum CeremonyState {
     Registration(PasskeyRegistration),
     Authentication(PasskeyAuthentication),
+    DiscoverableAuthentication(DiscoverableAuthentication),
 }
 
 /// Stored passkey plus fields needed for operator-visible metadata and audit decisions. The
@@ -102,19 +103,33 @@ pub fn finish_registration(wa: &Webauthn, state: &CeremonyState, credential: &Re
 }
 
 pub fn begin_authentication(wa: &Webauthn, credentials: &[Passkey]) -> Result<(RequestChallengeResponse, CeremonyState), String> {
-    let (options, state) = wa.start_passkey_authentication(credentials).map_err(|e| e.to_string())?;
-    Ok((options, CeremonyState::Authentication(state)))
+    let _ = credentials;
+    let (options, state) = wa.start_discoverable_authentication().map_err(|e| e.to_string())?;
+    Ok((options, CeremonyState::DiscoverableAuthentication(state)))
 }
 
 pub fn finish_authentication(
     wa: &Webauthn,
     state: &CeremonyState,
     credential: &PublicKeyCredential,
+    credentials: &[Passkey],
 ) -> Result<webauthn_rs::prelude::AuthenticationResult, String> {
-    let CeremonyState::Authentication(state) = state else {
-        return Err("wrong WebAuthn ceremony type".into());
-    };
-    wa.finish_passkey_authentication(credential, state).map_err(|e| e.to_string())
+    match state {
+        CeremonyState::Authentication(state) => wa.finish_passkey_authentication(credential, state).map_err(|e| e.to_string()),
+        CeremonyState::DiscoverableAuthentication(state) => {
+            let (user_id, credential_id) = wa.identify_discoverable_authentication(credential).map_err(|e| e.to_string())?;
+            if user_id != Uuid::from_u128(1) {
+                return Err("passkey belongs to a different user".into());
+            }
+            let passkey = credentials
+                .iter()
+                .find(|passkey| passkey.cred_id().as_slice() == credential_id)
+                .ok_or_else(|| "discoverable credential is not registered".to_string())?;
+            wa.finish_discoverable_authentication_v2(credential, state.clone(), passkey)
+                .map_err(|e| e.to_string())
+        }
+        CeremonyState::Registration(_) => Err("wrong WebAuthn ceremony type".into()),
+    }
 }
 
 /// Generate an unguessable challenge identifier and 256-bit WebAuthn challenge using the

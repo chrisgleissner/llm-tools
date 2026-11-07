@@ -116,6 +116,19 @@ fn canonical_passkey_origin_is_bound_once_and_cannot_be_changed() {
 }
 
 #[test]
+fn discoverable_authentication_uses_conditional_mediation_without_an_allow_list() {
+    let verifier = bridge_coordinator::passkeys::verifier("https://bridge.example.test").unwrap();
+    let (options, state) = bridge_coordinator::passkeys::begin_authentication(&verifier, &[]).unwrap();
+    let json = serde_json::to_value(options).unwrap();
+    assert_eq!(json["mediation"], "conditional");
+    assert_eq!(json["publicKey"]["userVerification"], "required");
+    assert_eq!(json["publicKey"]["allowCredentials"], serde_json::json!([]));
+    let stored = serde_json::to_string(&state).unwrap();
+    let restored: bridge_coordinator::passkeys::CeremonyState = serde_json::from_str(&stored).unwrap();
+    assert!(matches!(restored, bridge_coordinator::passkeys::CeremonyState::DiscoverableAuthentication(_)));
+}
+
+#[test]
 fn expired_challenge_cannot_be_consumed() {
     let path = db_path();
     let db = Db::open(&path).unwrap();

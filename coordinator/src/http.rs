@@ -968,7 +968,11 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     }
     let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
     let mut records = st.db.passkeys_for_principal(&username)?;
-    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential)
+    let credentials = records
+        .iter()
+        .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
+        .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
+    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential, &credentials)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "webauthn-error", "passkey assertion could not be verified"))?;
     if !result.user_verified() {
         return Err(err(StatusCode::UNAUTHORIZED, "user-verification-required", "passkey did not verify the user"));
