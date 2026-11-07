@@ -3,7 +3,7 @@
 // overflow menu holds only level-1 actions.
 import type { NeedsYou, WorkerInfo } from "../../api";
 import { absTime, button, h, relFromMs, statePill } from "../../dom";
-import { icon } from "../../icons";
+import { icon, type IconName } from "../../icons";
 import { menu, type MenuItem } from "../../menu";
 import type { DerivedState } from "../../state";
 import type { Task } from "./types";
@@ -100,7 +100,9 @@ function retryOrdinal(m: HeaderModel): number | undefined {
 export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[] {
   const why = m.blocked;
   const find = (n: number | undefined) => m.tasks.find((t) => t.ordinal === n);
-  const b = (label: string, action: string, fn: () => void, kind = "", reason = why): HTMLButtonElement => button(label, fn, { kind, action, reason });
+  // Pause and Stop carry an icon: on a phone they show the icon alone (the label stays for screen readers) so the actions fit one row.
+  const icons: Record<string, IconName> = { pause: "pauseBars", stop: "square" };
+  const b = (label: string, action: string, fn: () => void, kind = "", reason = why): HTMLButtonElement => button(label, fn, { kind, action, reason, ...(icons[action] ? { icon: icons[action] } : {}) });
   const out: HTMLElement[] = [];
   const s = m.state.id;
   const status = m.status;

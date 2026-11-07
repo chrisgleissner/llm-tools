@@ -471,6 +471,17 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     wasOnline = now;
   });
 
+  // The session pane takes the height left under the header and the tabs, so its composer is never pushed below the fold (phones and tablets).
+  const measure = (): void => {
+    const top = page.getBoundingClientRect().top;
+    const gap = parseFloat(getComputedStyle(page).rowGap) || 0;
+    const bottom = (tabsEl.offsetHeight ? tabsEl : head).getBoundingClientRect().bottom;
+    page.style.setProperty("--mission-above", `${Math.round(bottom - top + gap)}px`);
+  };
+  const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+  resizeObserver?.observe(head);
+  resizeObserver?.observe(tabsEl);
+
   setTab(tab, false);
   renderHeader();
   renderTasks();
@@ -483,6 +494,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   void loadEvents();
   return () => {
     disposed = true;
+    resizeObserver?.disconnect();
     offStream();
     offStore();
     session?.dispose();
