@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { expect, test, PASSWORD } from "./fixtures";
 import { mockApp } from "./mock";
 import { supportsPasskeysOnHost } from "../src/passkeys";
 
@@ -106,4 +106,146 @@ test("another hostname keeps password sign-in and links to the canonical passkey
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
   await expect(page.locator("#passkey-canonical-link")).toContainText("Passkeys are available at");
   await expect(page.locator("#passkey-canonical-link a")).toHaveAttribute("href", "https://bridge.example.test:8443");
+});
+
+test("Chromium virtual authenticator completes registration and passwordless sign-in", async ({ page, coord, browserName }) => {
+  test.skip(browserName !== "chromium", "Chromium DevTools Protocol provides the virtual authenticator");
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+
+  // The test CA includes localhost as a DNS SAN. Using that name exercises the same secure,
+  // DNS-origin path that passkeys require, while the coordinator still binds only to loopback.
+  const localUrl = coord.url.replace("127.0.0.1", "localhost");
+  await page.goto(localUrl);
+  await expect(page.getByRole("heading", { name: "First-run setup" })).toBeVisible();
+  await page.getByLabel("Setup token").fill(coord.setupToken());
+  await page.getByLabel("Administrator username").fill("admin");
+  await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
+  await page.getByLabel("Repeat password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Create administrator" }).click();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+
+  const registration = await page.evaluate(async () => {
+    const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
+    const started = await fetch("/api/v1/auth/passkeys/registration/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      body: JSON.stringify({ name: "Virtual authenticator" }),
+    });
+    if (!started.ok) throw new Error(`registration start failed: ${started.status} ${await started.text()}`);
+    const ceremony = await started.json() as { challenge_id: string; options: { publicKey: Record<string, unknown> } };
+    const publicKey = ceremony.options.publicKey as Record<string, unknown> & {
+      challenge: string;
+      user: { id: string };
+      excludeCredentials?: Array<{ id: string; type: "public-key"; transports?: AuthenticatorTransport[] }>;
+    };
+    const decode = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+    const credential = await navigator.credentials.create({ publicKey: {
+      ...publicKey,
+      challenge: decode(publicKey.challenge),
+      user: { ...publicKey.user, id: decode(publicKey.user.id) },
+      excludeCredentials: publicKey.excludeCredentials?.map((item) => ({ ...item, id: decode(item.id) })),
+    } as unknown as PublicKeyCredentialCreationOptions }) as PublicKeyCredential;
+    const response = credential.response as AuthenticatorAttestationResponse;
+    const encode = (value: ArrayBuffer | ArrayBufferView) => {
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    };
+    const payload = {
+      challenge_id: ceremony.challenge_id,
+      credential: {
+        id: credential.id,
+        rawId: encode(credential.rawId),
+        type: credential.type,
+        response: {
+          clientDataJSON: encode(response.clientDataJSON),
+          attestationObject: encode(response.attestationObject),
+          transports: response.getTransports(),
+        },
+        clientExtensionResults: credential.getClientExtensionResults(),
+      },
+    };
+    const finished = await fetch("/api/v1/auth/passkeys/registration/finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      body: JSON.stringify(payload),
+    });
+    return { status: finished.status, body: await finished.text() };
+  });
+  expect(registration.status, registration.body).toBe(201);
+
+  await page.evaluate(async () => {
+    const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
+    const response = await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      body: "{}",
+    });
+    if (!response.ok) throw new Error(`sign-out failed: ${response.status}`);
+  });
+  await page.goto(`${localUrl}/login`);
+  await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeVisible();
+  const assertionStatus = await page.evaluate(async () => {
+    const started = await fetch("/api/v1/auth/passkeys/assertion/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!started.ok) throw new Error(`assertion start failed: ${started.status} ${await started.text()}`);
+    const ceremony = await started.json() as { challenge_id: string; options: { publicKey: Record<string, unknown> } };
+    const publicKey = ceremony.options.publicKey as Record<string, unknown> & {
+      challenge: string;
+      allowCredentials?: Array<{ id: string; type: "public-key"; transports?: AuthenticatorTransport[] }>;
+    };
+    const decode = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+    const credential = await navigator.credentials.get({ publicKey: {
+      ...publicKey,
+      challenge: decode(publicKey.challenge),
+      allowCredentials: publicKey.allowCredentials?.map((item) => ({ ...item, id: decode(item.id) })),
+    } as unknown as PublicKeyCredentialRequestOptions }) as PublicKeyCredential;
+    const response = credential.response as AuthenticatorAssertionResponse;
+    const encode = (value: ArrayBuffer | ArrayBufferView) => {
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    };
+    const finished = await fetch("/api/v1/auth/passkeys/assertion/finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challenge_id: ceremony.challenge_id,
+        credential: {
+          id: credential.id,
+          rawId: encode(credential.rawId),
+          type: credential.type,
+          response: {
+            clientDataJSON: encode(response.clientDataJSON),
+            authenticatorData: encode(response.authenticatorData),
+            signature: encode(response.signature),
+            userHandle: response.userHandle ? encode(response.userHandle) : null,
+          },
+          clientExtensionResults: credential.getClientExtensionResults(),
+        },
+      }),
+    });
+    return finished.status;
+  });
+  expect(assertionStatus).toBe(200);
+  await page.goto(`${localUrl}/`);
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await cdp.detach();
 });
