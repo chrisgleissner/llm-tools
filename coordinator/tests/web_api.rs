@@ -74,6 +74,24 @@ async fn command_rejects_control_characters_in_mission_identifiers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn task_mutation_rejects_unknown_json_fields() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &token, "unknown-field-worker", 0).await;
+    let (status, problem) = api
+        .send(
+            api.rb(Method::PATCH, "/api/v1/missions/m1/tasks/2?worker=w1")
+                .json(&json!({"prompt":"safe", "is_admin":true})),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    assert!(problem["detail"].as_str().unwrap().contains("unknown field is_admin"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn event_list_rejects_unknown_query_parameters() {
     let env = boot().await;
     let api = env.admin().await;
