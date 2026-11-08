@@ -635,6 +635,37 @@ async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
         .await
         .unwrap();
     assert_eq!(forbidden_terminal.status().as_u16(), 403);
+    for (method, path) in [
+        (Method::GET, "/api/v1/workers/worker-b/doctor"),
+        (Method::GET, "/api/v1/workers/worker-b/agents"),
+        (Method::GET, "/api/v1/workers/worker-b/sessions"),
+        (Method::GET, "/api/v1/workers/worker-b/usage"),
+        (Method::GET, "/api/v1/workers/worker-b/audit"),
+        (Method::POST, "/api/v1/workers/worker-b/gc"),
+        (Method::POST, "/api/v1/workers/worker-b/restore"),
+        (Method::GET, "/api/v1/missions/private-mission/events?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/operations?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/agents?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/settings?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/rotation?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/proposals?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks/1?worker=worker-b"),
+    ] {
+        let response = admin.bare(method.clone(), path).bearer_auth(token).send().await.unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            403,
+            "worker-bound token must not reach {method} {path}"
+        );
+        let body = response.json::<Value>().await.unwrap();
+        let expected = if path.ends_with("/restore") {
+            "session-required"
+        } else {
+            "token-worker-denied"
+        };
+        assert_eq!(body["code"], expected, "{method} {path}: {body}");
+    }
     let forbidden_create = admin
         .bare(Method::POST, "/api/v1/missions")
         .bearer_auth(token)
