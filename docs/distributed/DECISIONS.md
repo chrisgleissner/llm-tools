@@ -447,6 +447,15 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 
+## D27 Release decisions delegated to the lead (PRD-007, PRD-037, DOG-025)
+
+The operator delegated the remaining open questions: "All other questions answer them like a principal engineer and product owner would". The lead decided:
+
+- PRD-007 soak duration: PR CI keeps the 5-minute soak (job `soak-chaos`), `.github/workflows/soak-nightly.yml` runs 30 minutes, and the 24-hour run is a pre-release step. A 30-minute soak on every PR would add about 25 minutes to each CI run without finding defects the nightly run misses; the nightly run and the pre-release run cover slow growth.
+- Lazy web JavaScript cap: the raise from 97,000 to 101,000 bytes gzip recorded in D17 is accepted. Its cause (the lazily loaded workers, sessions, usage and account views) was measured. Initial caps stay unchanged.
+- PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
+- DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
+
 ## D29 Coordinator backups and database access (DOG-024)
 
 Cause. On the Pi, `backup` ran for more than 35 minutes and the coordinator answered
