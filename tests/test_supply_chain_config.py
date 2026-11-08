@@ -102,6 +102,14 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
     assert "--severity MEDIUM" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow
+    assert "SERVER_CERT_VALID_DAYS: i64 = 365" in (ROOT / "coordinator" / "src" / "certs.rs").read_text()
+    assert "internal_server_certificate_validity_stays_below_398_days" in (
+        ROOT / "coordinator" / "tests" / "certs.rs"
+    ).read_text()
+    assert "openssl ca -batch -config \"$pki/openssl.cnf\" -gencrl" in workflow
+    assert "crlDistributionPoints = URI:http://127.0.0.1:18444/ca.crl" in workflow
+    assert "tls_cert_file =" in workflow and "tls_key_file =" in workflow
+    assert 'python -m http.server 18444 --bind 127.0.0.1 --directory "$pki"' in workflow
     assert 'mutation_limit_per_token = 10000' in workflow
     assert 'mutation_limit_per_address = 10000' in workflow
     assert 'mutation_limit_global = 10000' in workflow

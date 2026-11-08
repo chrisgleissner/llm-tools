@@ -51,6 +51,68 @@ jobs:
           text = text.replace("mutation_limit_global = 600", "mutation_limit_global = 10000")
           config.write_text(text, encoding="utf-8")
           PY
+          # Scan the same rustls listener with a short-lived ECDSA file certificate and a
+          # reachable, CA-signed empty CRL. The coordinator's private-CA leaf is separately
+          # tested to stay below 398 days; public CA revocation is not available for that local
+          # trust anchor.
+          pki="$RUNNER_TEMP/bridge-security-scan/pki"
+          mkdir -p "$pki/newcerts"
+          : > "$pki/index.txt"
+          printf '1000\n' > "$pki/serial"
+          printf '1000\n' > "$pki/crlnumber"
+          cat > "$pki/openssl.cnf" <<EOF
+          [ ca ]
+          default_ca = CA_default
+          [ CA_default ]
+          dir = $pki
+          database = \$dir/index.txt
+          new_certs_dir = \$dir/newcerts
+          certificate = $data/ca.pem
+          private_key = $data/ca.key
+          serial = \$dir/serial
+          crlnumber = \$dir/crlnumber
+          default_md = sha256
+          default_days = 365
+          default_crl_days = 365
+          policy = policy_anything
+          unique_subject = no
+          [ policy_anything ]
+          commonName = supplied
+          [ server_cert ]
+          basicConstraints = critical,CA:false
+          keyUsage = critical,digitalSignature
+          extendedKeyUsage = serverAuth
+          subjectAltName = DNS:localhost,IP:127.0.0.1
+          crlDistributionPoints = URI:http://127.0.0.1:18444/ca.crl
+          EOF
+          openssl ecparam -name prime256v1 -genkey -noout -out "$pki/server.key"
+          openssl req -new -key "$pki/server.key" -out "$pki/server.csr" -subj "/CN=localhost"
+          openssl ca -batch -config "$pki/openssl.cnf" -extensions server_cert \
+            -in "$pki/server.csr" -out "$pki/server.pem"
+          openssl ca -batch -config "$pki/openssl.cnf" -gencrl -out "$pki/ca.crl"
+          python -m http.server 18444 --bind 127.0.0.1 --directory "$pki" \
+            >"$RUNNER_TEMP/bridge-security-crl.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/bridge-security-crl.pid"
+          for attempt in $(seq 1 10); do
+            if curl --silent --show-error --fail http://127.0.0.1:18444/ca.crl >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          test -s "$pki/ca.crl"
+          python - "$data/config.toml" "$pki" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          config = Path(sys.argv[1])
+          pki = Path(sys.argv[2])
+          text = config.read_text(encoding="utf-8")
+          text += f"\ntls_cert_file = {json.dumps(str(pki / 'server.pem'))}\n"
+          text += f"tls_key_file = {json.dumps(str(pki / 'server.key'))}\n"
+          text += 'tls_cert_name = "localhost"\n'
+          config.write_text(text, encoding="utf-8")
+          PY
           token=$("$bin" --data-dir "$data" token create security-scan --scope admin --expires-days 1)
           echo "::add-mask::$token"
           echo "SCAN_TOKEN=$token" >> "$GITHUB_ENV"
@@ -201,4 +263,7 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/bridge-security-scan.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/bridge-security-scan.pid")" 2>/dev/null || true
+          fi
+          if [ -f "$RUNNER_TEMP/bridge-security-crl.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/bridge-security-crl.pid")" 2>/dev/null || true
           fi

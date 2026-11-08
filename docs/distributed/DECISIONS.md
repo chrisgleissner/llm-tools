@@ -363,3 +363,18 @@ In the code: `mutation_limit_global` is loaded and validated by `coordinator/src
 applied by `coordinator/src/http.rs`. Config tests cover the bound and Internet limit; the isolated
 storage-write integration test verifies the runtime setting by submitting 1,000 command requests.
 
+## D26 Test the TLS scanner with a revocable operator-file leaf (SEC2-001)
+
+Keep testssl's medium-severity gate enabled. The coordinator's private CA leaf is a local trust
+anchor and does not publish an OCSP responder or CRL, so scanning that leaf cannot exercise
+revocation lookup. In the isolated CI coordinator only, issue an ECDSA P-256 operator-file leaf
+from that same CA with a reachable, signed empty CRL. This keeps the real rustls listener, TLS
+policy, CA trust and hostname checks in the scan while making the revocation check actionable.
+Separately cap the default locally-issued server leaf at 365 days, below the 398-day medium-alert
+threshold.
+
+In the code: `.github/workflows/security-dynamic.yml` builds and serves the scan CRL and configures
+the file certificate. `coordinator/src/certs.rs::SERVER_CERT_VALID_DAYS` controls the default, and
+`coordinator/tests/certs.rs::internal_server_certificate_validity_stays_below_398_days` fails if
+the limit regresses.
+
