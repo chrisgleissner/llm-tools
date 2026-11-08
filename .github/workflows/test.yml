@@ -241,7 +241,7 @@ jobs:
           npm ci
           npm run build
           npx playwright install --with-deps chromium
-          npx playwright test e2e/redesign/uxr-lighthouse.spec.ts --project=chromium-desktop
+          npx playwright test --project=lighthouse
       - name: Keep the Lighthouse results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

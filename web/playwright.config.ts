@@ -11,6 +11,9 @@ import { defineConfig, devices } from "@playwright/test";
 // process. It has a project of its own that every other project depends on, so Playwright runs it first and alone, before any parallel worker starts.
 const TYPING_SPEC = /redesign[\\/]uxr-typing\.spec\.ts$/;
 const aloneFirst = { dependencies: ["typing-flood"] };
+// T37 (Lighthouse, e2e/redesign/uxr-lighthouse.spec.ts) is a measurement as well: it has a project of its own (`--project=lighthouse`, the CI job `web-lighthouse`) and the
+// standard projects leave it out, so it never runs beside the parallel workers of another project.
+const LIGHTHOUSE_SPEC = /redesign[\\/]uxr-lighthouse\.spec\.ts$/;
 
 // PRD-037 device matrix (docs/distributed/web-design-spec.md section 12, T45): nine more Chromium projects that run
 // only the matrix spec (e2e/redesign/uxr-matrix.spec.ts: fold budgets, no horizontal scroll, target sizes, reflow, axe,
@@ -49,11 +52,12 @@ export default defineConfig({
   use: { ignoreHTTPSErrors: true, trace: "retain-on-failure", screenshot: "only-on-failure", locale: "en-US", timezoneId: "UTC" },
   projects: [
     { name: "typing-flood", testMatch: TYPING_SPEC, use: { ...devices["Pixel 4"] } },
-    { name: "chromium-desktop", testIgnore: TYPING_SPEC, ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
-    { name: "chromium-mobile", testIgnore: TYPING_SPEC, ...aloneFirst, use: { ...devices["Pixel 4"] } },
-    { name: "firefox-desktop", testIgnore: TYPING_SPEC, ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
+    { name: "lighthouse", testMatch: LIGHTHOUSE_SPEC, ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    { name: "chromium-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    { name: "chromium-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Pixel 4"] } },
+    { name: "firefox-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
     // 393x851 CSS px at device scale factor 2.75 (the size the operator asked for); touch enabled.
-    { name: "firefox-mobile", testIgnore: TYPING_SPEC, ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
+    { name: "firefox-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
     matrix(2560, 1440, "desktop"),
     matrix(1280, 720, "desktop"),
     matrix(768, 1024, "tablet"),
