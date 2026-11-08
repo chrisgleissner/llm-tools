@@ -150,10 +150,13 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     return !store.loaded || (Boolean(e) && online() && (e?.mission as { attention?: unknown } | undefined)?.attention === undefined && !["COMPLETED", "CANCELLED"].includes(status()));
   };
   const reveal = (): void => {
-    if (revealed) return;
-    revealed = true;
-    window.clearTimeout(revealTimer);
-    wrap.style.removeProperty("visibility");
+    if (!revealed) {
+      revealed = true;
+      window.clearTimeout(revealTimer);
+      wrap.style.removeProperty("visibility");
+    }
+    // Focus cannot move into a `visibility: hidden` page, so a pending focus request (`?focus=composer`) is applied once the page is shown and the pane is mounted, whichever comes last.
+    if (session && focusWhenMounted) ((focusWhenMounted = false), session.focusComposer());
   };
   wrap.style.visibility = "hidden";
   const revealTimer = window.setTimeout(reveal, REVEAL_MS);
@@ -317,8 +320,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
           sessionKind = "pane";
           sessionSlot.replaceChildren(handle.element);
           handle.setAvailable(online());
-          if (focusWhenMounted) handle.focusComposer();
-          focusWhenMounted = false;
+          if (revealed) reveal();
         })
         .catch(() => {
           sessionMounting = false;
