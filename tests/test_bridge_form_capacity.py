@@ -93,7 +93,11 @@ def test_an_operator_choice_or_configured_rotation_is_never_replaced(tmp_path):
 
 
 def test_read_capacity_reports_only_exhausted_providers(monkeypatch):
-    now = int(time.time())
+    # The clock is pinned through LLM_USAGE_NOW_EPOCH, which read_capacity and the monthly reset
+    # computation both honour. The Copilot monthly reset is the first of the next calendar month, so
+    # its distance from the real clock changes every day (and is under 23 days after the 8th).
+    now = 1_793_880_000  # 2026-11-05 12:00:00 UTC; the next monthly reset is 2026-12-01
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", str(now))
     usage = {
         "copilot": {"available": True, "monthly": {"used": 100.0, "remaining": 0.0, "resets_at": now + 86400 * 24}},
         "codex": {"available": True, "five_hour": {"used": 10.0, "remaining": 90.0, "resets_at": now + 3600}},
@@ -101,7 +105,9 @@ def test_read_capacity_reports_only_exhausted_providers(monkeypatch):
     monkeypatch.setenv("LLM_SCHEDULER_USAGE_JSON", json.dumps(usage))
     found = launcher.read_capacity(("codex", "copilot", "claude"))
     assert set(found) == {"copilot"}
-    assert found["copilot"].resets_at is not None and found["copilot"].resets_at - now > 86400 * 23
+    # A monthly reset far away (more than 23 days, less than a month), not a near window.
+    assert found["copilot"].resets_at is not None
+    assert 86400 * 23 < found["copilot"].resets_at - now < 86400 * 32
 
 
 def test_capacity_reader_hands_the_result_over_once():
