@@ -1367,8 +1367,15 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let mut token_api = env.api();
     token_api.bearer = Some(secret.clone());
 
-    for _ in 0..30 {
-        let (status, _) = token_api.post("/api/v1/commands", json!({})).await;
+    for index in 0..30 {
+        let response = token_api
+            .rb(Method::POST, "/api/v1/commands")
+            .header("idempotency-key", if index == 0 { "audit-request-001" } else { "audit-request-002" })
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
         assert_eq!(status, 400, "malformed request should reach command validation");
     }
     let response = token_api.rb(Method::POST, "/api/v1/commands").json(&json!({})).send().await.unwrap();
@@ -1388,6 +1395,11 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let token_uses: Vec<_> = audit.iter().filter(|row| row["action"] == "token.use").collect();
     assert_eq!(token_uses.iter().filter(|row| row["actor"] == "token:mutator").count(), 32);
     assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
+    assert!(token_uses.iter().any(|row| {
+        row["detail"].as_str().is_some_and(|detail| {
+            detail.contains("scopes=admin") && detail.contains("request_id=audit-request-001")
+        })
+    }));
     assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
     env.stop().await;
 }
