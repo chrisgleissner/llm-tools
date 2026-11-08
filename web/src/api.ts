@@ -239,8 +239,18 @@ export async function mutateMission(target: string, operation: string, missionId
   const action = operation.slice("mission.".length);
   const q = new URLSearchParams({ worker: target });
   const base = `/api/v1/missions/${encodeURIComponent(missionId)}`;
+  return commandOutcome(() => request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() }));
+}
+
+/** Permanently delete a finished or never-started mission (`DELETE /missions/{id}`; the body carries the confirmation). */
+export function deleteMission(target: string, missionId: string, waitMs = 10000): Promise<MutationResult> {
+  const q = new URLSearchParams({ worker: target });
+  return commandOutcome(() => request<CommandRow>("DELETE", `/api/v1/missions/${encodeURIComponent(missionId)}?${q}`, { confirm: true, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() }));
+}
+
+async function commandOutcome(send: () => Promise<CommandRow>): Promise<MutationResult> {
   try {
-    const row = await request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() });
+    const row = await send();
     if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
     const result = row.result;
     if (result?.outcome === "uncertain") return { outcome: "uncertain", message: result.error?.message ?? "The worker could not confirm the command outcome." };

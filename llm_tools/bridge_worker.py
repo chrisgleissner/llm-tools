@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import bridge_commands as commands
-from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
+from .bridge_protocol import MAX_DELETED_MISSIONS_PER_MESSAGE, MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
 from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_states import LIVE_MISSION_STATUSES
 from .bridge_status_bound import mission_digest
@@ -500,6 +500,8 @@ class InFlightBatch:
     seq: int
     after: int
     through: int
+    message_id: str = ""
+    tombstones: tuple[str, ...] = ()  # deleted mission IDs this batch carries; marked replicated once its pong arrives
 
 
 class WorkerSession:
@@ -533,6 +535,7 @@ class WorkerSession:
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
+        self.tombstones_unsupported = False  # the coordinator rejected `deleted_missions` on this connection
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
@@ -674,10 +677,15 @@ class WorkerSession:
             self.generation = generation
             self.cursor = int(message.payload["event_cursor"])
             self.inflight, self.send_not_before = None, 0.0
+            self.tombstones_unsupported = False
             self.pending_pongs.clear()
             self.audit("connection.accepted", generation=generation)
             return []
         if message.type == "error":
+            if self.inflight is not None and self.inflight.tombstones and message.payload.get("in_reply_to") == self.inflight.message_id:
+                # A coordinator from before PRD-038 rejects the unknown field. Keep the tombstones pending
+                # (the pong that follows only clears the batch) and stop offering them on this connection.
+                self.tombstones_unsupported = True
             return []  # never answer an error with an error; that can loop forever
         if self.generation == 0:
             return [self.error("not-welcomed", f"{message.type} before welcome", message.id)]
@@ -795,6 +803,9 @@ class WorkerSession:
     def _pong(self) -> None:
         fenced = self.pending_pongs.popleft() if self.pending_pongs else 0
         if fenced and self.inflight is not None and self.inflight.seq == fenced:
+            if self.inflight.tombstones and not self.tombstones_unsupported:
+                with self.open_store() as store:
+                    store.mark_tombstones_replicated(self.inflight.tombstones)
             self.cursor, self.inflight = self.inflight.through, None
 
     def _nack(self, expected_after: int) -> None:
@@ -848,6 +859,15 @@ class WorkerSession:
         if moment < self.send_not_before:
             return None
         with self.open_store() as store:
+            pending = [] if self.tombstones_unsupported else store.pending_tombstones(MAX_DELETED_MISSIONS_PER_MESSAGE)
+            if pending:
+                # Tombstones travel alone, in an events message that carries no events and moves no cursor, so a
+                # coordinator that rejects the field loses nothing else.
+                batch = self.message("events", {"after": self.cursor, "through": self.cursor, "events": [], "deleted_missions": pending})
+                self.batch_seq += 1
+                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, tuple(pending))
+                self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+                return batch
             events, through = self._replicable_events(store, self.cursor)
             refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
             if through == self.cursor and not refresh_questions:
@@ -885,7 +905,7 @@ class WorkerSession:
         batch = self.message("events", {"after": after, "through": through, "events": events,
                                          "mission_cursor": through, "missions": missions})
         self.batch_seq += 1
-        self.inflight = InFlightBatch(self.batch_seq, after, through)
+        self.inflight = InFlightBatch(self.batch_seq, after, through, batch.id)
         self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
         return batch
 

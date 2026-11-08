@@ -359,6 +359,19 @@ def _mission_control(action: str) -> Handler:
     return handler
 
 
+def _mission_delete(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Delete a finished or never-started mission and its local state; the confirmation is part of the request (PRD-038)."""
+    assert request.mission_id is not None
+    if not params["confirm"]:
+        raise CommandFailure(
+            "confirmation-required",
+            "mission.delete permanently removes the mission, its tasks, events and logs; send confirm: true to proceed",
+        )
+    from .bridge_delete import delete_mission
+
+    return delete_mission(request.mission_id)
+
+
 def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     """Start the worker's existing controller after validating its selected rotation."""
     cli = _cli()
@@ -765,6 +778,8 @@ OPERATIONS: dict[str, OperationSpec] = {
             _mission_control("stop"),
         ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
+        OperationSpec("mission.delete", "Delete a finished or never-started mission and its local state", True, True,
+                      {"confirm": Param(bool, default=False)}, _mission_delete),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(
             "task.list",

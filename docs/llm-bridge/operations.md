@@ -204,7 +204,7 @@ machine-readable form.
 | 1 | Runtime failure: a provider, the controller, the disk or the network failed. `doctor` exits 1 when no provider can run. |
 | 2 | Usage error: unknown command or option, a value that is not valid, a command refused for a managed provider. |
 | 3 | Not found or ambiguous: no such mission, task, ID prefix or folder mission, or a prefix that matches several; also `task output`/`task diff` when there is nothing to show. With `--target`, 3 also means the target did not answer (the request stays queued). |
-| 4 | Wrong state: the mission or task is not in a state that allows the command (`start` on a cancelled mission, `task approve` on a task that is not in review, `finish` without a native provider, `attach` without a station). |
+| 4 | Wrong state: the mission or task is not in a state that allows the command (`start` on a cancelled mission, `task approve` on a task that is not in review, `finish` without a native provider, `attach` without a station, `mission delete` on a running mission). |
 
 With `--json`, an error is printed on standard output (not standard error) as
 
@@ -1209,6 +1209,39 @@ then `set -g status on`. Bridge's `b`/`p` focus and `d` detach shortcuts still
 work while the status row is hidden. An attached 80×24 acceptance session
 verified the child changes from 80×23 to 80×24 and back, and prefix focus changes
 preserve its process identity.
+
+### Deleting a mission
+
+`llm-bridge mission delete ID` permanently removes a mission from this computer. `ID` is the mission ID or a
+unique prefix of three or more characters; the current folder is never used, so the mission must be named
+(`llm-bridge mission delete --mission ID` is the same command).
+
+- Only a mission that never started (`CREATED`) or has ended or been stopped (`COMPLETED`, `FAILED`,
+  `CANCELLED`, `STOPPED`) can be deleted. A `RUNNING`, `PAUSED` or `STOPPING` mission is refused with exit status 4
+  and a message that names the state and the command to use first (`llm-bridge stop --mission ID`, or
+  `llm-bridge cancel --mission ID`). A mission whose controller is still exiting, or whose provider station is still
+  open, is refused the same way; `llm-bridge gc` closes the idle stations of finished missions. Nothing changes when
+  the command refuses.
+- The command asks `Delete mission 9a3c51e0 "name" with its tasks, events and logs? This cannot be undone.` and
+  deletes only after you type `y`. `--yes` skips the question and is required when there is no terminal to ask on
+  (without it the exit status is 2 and nothing is deleted). The refusal for a running mission comes before the
+  question.
+- It removes the mission's rows (tasks, dependencies, amendments, operations, events, queued commands, managed
+  processes and task counters), its directory `runtime/mission-ID` in the state directory (the controller log,
+  provider run logs and verifier files), the lock files, and the socket and configuration file of a station whose server
+  is gone. It never touches the mission's working folder, and files of other missions stay.
+- Deleting twice is not an error in effect: the second command reports `no mission matches ...` with exit status 3,
+  as does an ID prefix that matches nothing. A prefix that matches several missions is also status 3 and lists them.
+- A tombstone (mission ID, name, final state and time, without any content) stays in the database so the
+  coordinator, when the worker is connected to one, can drop its copy even if the worker was offline when the
+  mission was deleted. The worker sends it at the next connection. Tombstones older than 90 days, and all but the
+  newest 1000, are removed. The `mission_tombstones` table is created by the first deletion; the schema version does
+  not change.
+- With a coordinator, `llm-bridge --target NAME mission delete ID` asks in the same way, and the web console shows
+  **Delete mission** on the page of a deletable mission (it asks with the mission title, then returns to the missions
+  list). The REST resource is `DELETE /api/v1/missions/ID?worker=NAME` with the body `{"confirm": true}`; see the
+  [API reference](../distributed/api.md). A running mission is refused there too; with `--target` the worker's refusal
+  is reported with exit status 2, like other refused remote commands.
 
 ## Mission colours, state glyphs and ASCII locales
 

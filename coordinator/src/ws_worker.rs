@@ -446,6 +446,44 @@ fn is_stale_welcome_reply(m: &Message, welcome_id: &str) -> bool {
         && m.payload.get("in_reply_to").and_then(Value::as_str) == Some(welcome_id)
 }
 
+/// The mission a finished `mission.delete` command removed on the worker, or `None` when it did not.
+///
+/// An applied result names the full mission ID. A `not-found` rejection means the worker has no such
+/// mission (for example a redelivery after the first execution's result was lost), so the coordinator's
+/// copy, when it has exactly that ID, is stale and goes too. Any other outcome (refused because the mission
+/// is running, confirmation missing, ...) leaves everything in place.
+fn deleted_mission_of(row: &crate::db::CommandRow, payload: &Value) -> Option<String> {
+    match payload.pointer("/outcome").and_then(Value::as_str) {
+        Some("applied") => payload.pointer("/result/mission_id").and_then(Value::as_str).map(str::to_string),
+        Some("rejected") if payload.pointer("/error/code").and_then(Value::as_str) == Some("not-found") => {
+            row.request.get("mission_id").and_then(Value::as_str).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+/// Tombstone `ids` for `name`, audit the ones that are new and tell connected consoles to re-read the missions.
+fn apply_tombstones(st: &St, name: &str, ids: &[String], via: &str) -> Result<(), rusqlite::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let had_replica: Vec<bool> = ids.iter().map(|id| st.db.mission_known(name, id)).collect::<Result<_, _>>()?;
+    let fresh = st.db.missions_tombstone(name, ids)?;
+    for id in &fresh {
+        st.db.audit(
+            &format!("worker:{name}"),
+            "mission.delete",
+            &format!("worker={name} mission={id} via={via}"),
+            "",
+        );
+    }
+    if !fresh.is_empty() || had_replica.iter().any(|known| *known) {
+        let cursor = st.db.worker_get(name)?.map_or(0, |w| w.event_cursor);
+        st.hub.publish(event_notice(name, cursor, &[], &[]));
+    }
+    Ok(())
+}
+
 /// Handle one validated message after welcome. `Err(())` means a storage failure.
 fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> Result<Vec<String>, ()> {
     let reply = |code: &str, text: &str| Ok(vec![protocol::error_message(worker_id, generation, code, text, Some(&m.id))]);
@@ -469,6 +507,12 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let events = p["events"].as_array().cloned().unwrap_or_default();
             let missions = p.get("missions").and_then(Value::as_array).cloned();
             let mission_cursor = p.get("mission_cursor").and_then(Value::as_u64);
+            // Tombstones first, so the events and summaries of the same message are already filtered by them. A
+            // repeated tombstone (the worker resends until its pong, and after a nack) changes nothing.
+            if let Some(deleted) = p.get("deleted_missions").and_then(Value::as_array) {
+                let ids: Vec<String> = deleted.iter().filter_map(|id| id.as_str().map(str::to_string)).collect();
+                apply_tombstones(st, name, &ids, "worker").map_err(db)?;
+            }
             match st
                 .db
                 .events_store(EventBatch {
@@ -507,6 +551,11 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_done(name, id, &Value::Object(m.payload.clone())).map_err(db)? {
                 st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
+                if row.operation == "mission.delete" {
+                    if let Some(mission_id) = deleted_mission_of(&row, &Value::Object(m.payload.clone())) {
+                        apply_tombstones(st, name, &[mission_id], "command").map_err(db)?;
+                    }
+                }
             }
             Ok(vec![])
         }

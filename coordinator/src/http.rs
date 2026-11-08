@@ -2987,6 +2987,50 @@ async fn mission_action(
     .await
 }
 
+/// `DELETE /api/v1/missions/{id}?worker=NAME` with `{"confirm": true}`: the typed `mission.delete` (PRD-038).
+///
+/// The confirmation is a body field, as for `passkeys/re-enroll`: without it nothing is queued. The worker
+/// refuses a mission that is running, paused or stopping (`conflict`), and the coordinator drops its copy of
+/// the mission when the worker reports the deletion.
+async fn mission_delete_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let m = if body.bytes.is_empty() { Map::new() } else { parse_body(&body.bytes)? };
+    no_extra(&m, &["confirm", "wait_ms"])?;
+    if m.get("confirm") != Some(&Value::Bool(true)) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "confirmation-required",
+            "deleting a mission cannot be undone; send {\"confirm\": true} to confirm",
+        ));
+    }
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: Some(id),
+            operation: "mission.delete".into(),
+            params: Map::from_iter([("confirm".to_string(), Value::Bool(true))]),
+            wait_ms: resource_wait_ms(&m)?,
+        },
+    )
+    .await
+}
+
 async fn suspend_until_credits_resource(
     State(st): State<St>,
     Authed(p, ip): Authed,
@@ -3397,6 +3441,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}", &["DELETE"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/agents", &["GET"], Access::Authed, "read"),
@@ -3598,7 +3643,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/security/notifications", get(list_security_notifications))
         .route("/api/v1/security/notifications/{id}", delete(dismiss_security_notification))
         .route("/api/v1/missions", get(list_missions).post(create_mission_resource))
-        .route("/api/v1/missions/{id}", get(mission_status_resource))
+        .route("/api/v1/missions/{id}", get(mission_status_resource).delete(mission_delete_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
         .route("/api/v1/missions/{id}/agents", get(mission_agents_resource))
