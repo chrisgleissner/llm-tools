@@ -80,7 +80,8 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await openTerminal(second, "#terminal-control");
       await expect(status2).toHaveAttribute("data-mode", "view");
       await expect(status2).toContainText("read only");
-      await expect(status2).toContainText("writer role");
+      // The reason a viewer cannot type is the note beside Take control in the composer, not part of the status line.
+      await expect(second.locator("[data-composer]")).toContainText("writer role");
       await expectScreen(second, "echo:hello"); // fresh snapshot of the shared pane
       await second.locator("#terminal-host .xterm-helper-textarea").focus();
       await second.keyboard.type("blocked");
@@ -137,7 +138,7 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       const status = page.locator("#terminal-status");
       await openTerminal(page, "#terminal-control"); // asking for control is answered with a view-only grant
       await expect(status).toHaveAttribute("data-mode", "view");
-      await expect(status).toContainText("read-only");
+      await expect(page.locator("[data-composer]")).toContainText("read-only");
       await expectScreen(page, "ok");
       st.killStation();
       await expect(status).toHaveAttribute("data-state", "ended", { timeout: 20_000 });
@@ -172,7 +173,9 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await page.goto(`/missions/e2e-worker/${st.missionId}`);
       await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       await st.stopWorker();
-      await expect(page.locator("#terminal-open")).toBeDisabled({ timeout: 20_000 });
+      // With the worker gone Take control is disabled and says so; Watch live is not offered.
+      await expect(page.locator("#terminal-control")).toBeDisabled({ timeout: 20_000 });
+      await expect(page.locator("[data-composer]")).toContainText("offline");
     } finally {
       st.cleanup();
     }
