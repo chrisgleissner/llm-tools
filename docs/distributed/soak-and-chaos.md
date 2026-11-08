@@ -93,7 +93,14 @@ units per hour, for example `--bound-coordinator-rss-kib 4096`):
 | `controllers_rss_kib` | 1536 KiB per controller | 512 KiB per controller | **Per process, not a sum.** Each controller is fitted on its own from `--warmup-seconds` after its first sample, and the median over the controllers is compared with the bound (and the median rise with the floor). A sum jumps when a controller exits or is restarted, and a restarted controller starts a new warm-up. Measured median per-controller slope after warm-up: 0.88 MiB per hour (45-minute run, 25-minute window) and 1.12 MiB per hour (30-minute run, 10-minute window). |
 | `controllers_fds` | 1 per controller | 1 per controller | Same. |
 
-`--bound-<metric>` replaces the per-hour number (per process for the rows that say so). The floors are fixed.
+`--bound-<metric>` replaces the per-hour number (per process for the rows that say so). The floors are fixed, except that
+`--count-floor-multiplier` multiplies the floors of the descriptor and thread rows (`*_fds`, `*_threads`). The default is 1.
+The short end-to-end test (45 seconds, a fit over 30 seconds) uses 8. The coordinator hands an async worker thread to another
+thread for each database call (`db::blocking`), so its thread count rises while calls overlap on the connection mutex and falls
+again after the pool's 10 second idle time. In 31 loaded runs of that test the fitted rise after warm-up reached 6.5 threads for
+the coordinator (floor 4), 3.2 descriptors for the two workers (floor 2) and 3.0 for the four controllers (floor 4), so 4 runs
+failed on a floor that the 20 minute warm-up of a real run makes irrelevant. A leak of tens of threads or descriptors still fails
+the short run.
 
 Ceilings (`dist_harness.DEFAULT_CEILINGS`, not adjustable from the command line; they apply to the largest single process):
 

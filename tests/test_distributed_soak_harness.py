@@ -164,6 +164,18 @@ def test_soak_defaults_are_the_prd_scaled_run():
     assert bridge_soak.validate(args) is None
 
 
+def test_count_floor_multiplier_scales_only_the_descriptor_and_thread_floors():
+    default = bridge_soak.chosen_bounds(bridge_soak.parse_args([]))
+    assert all(default[metric].floor == bound.floor for metric, bound in h.DEFAULT_BOUNDS.items())
+    scaled_args = bridge_soak.parse_args(["--count-floor-multiplier", "8", "--bound-coordinator-threads", "5"])
+    scaled = bridge_soak.chosen_bounds(scaled_args)
+    for metric, bound in h.DEFAULT_BOUNDS.items():
+        counted = metric.endswith(("_fds", "_threads"))
+        assert scaled[metric].floor == bound.floor * (8 if counted else 1), metric
+    assert scaled["coordinator_threads"].per_hour == 5.0 and scaled["coordinator_rss_kib"].per_hour == h.DEFAULT_BOUNDS["coordinator_rss_kib"].per_hour
+    assert "at least 1" in bridge_soak.validate(bridge_soak.parse_args(["--count-floor-multiplier", "0.5"]))
+
+
 def test_effective_warmup_is_the_stated_time_capped_at_two_thirds_of_the_run():
     assert bridge_soak.effective_warmup(2700.0, 0.25, 1200.0) == 1200.0
     assert bridge_soak.effective_warmup(1800.0, 0.25, 1200.0) == 1200.0  # the 30 minute run keeps 10 minutes
@@ -734,7 +746,7 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     started = time.monotonic()
     code = bridge_soak.main([
         "--duration", str(int(scaled(45))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--warmup-seconds", "10", "--limit-every", "20", "--limit-seconds", "8",
-        "--settle-seconds", str(int(scaled(60))), "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
+        "--settle-seconds", str(int(scaled(60))), "--count-floor-multiplier", "8", "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
     ])
     report = json.loads(report_path.read_text())
     failed = [item for item in report["checks"] if item["verdict"] != "pass"]
