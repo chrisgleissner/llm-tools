@@ -158,33 +158,36 @@ jobs:
           shared-key: x86-64-linux-release
       - name: Build the coordinator
         run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
-      - name: Cache Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('web/package-lock.json') }}
-      - name: Type-check, build and run browser tests
+      - name: Type-check and build the web interface
         working-directory: web
         run: |
           npm ci
           npm run typecheck
           npm run build
-          npx playwright install --with-deps chromium firefox
-          # Behaviour, layout, accessibility and mobile tests on all four projects. The screenshot comparison is
-          # skipped here because font rendering differs between machines; it runs in the pinned image below.
-          BRIDGE_SKIP_VISUAL=1 npx playwright test --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile
-      - name: Device matrix (nine viewports, Chromium)
+      - name: Browser tests (official Playwright image)
         working-directory: web
         run: |
-          # PRD-037 T45: fold budgets, reflow, target sizes, axe and keyboard simulation at 2560x1440, 1280x720,
-          # 768x1024, 1024x768, 430x932, 360x640, 320x568 and the landscape phones 740x360 and 568x320.
-          BRIDGE_SKIP_VISUAL=1 npx playwright test --project="matrix-*"
-      - name: Click paths on the two smallest phones (Chromium)
-        working-directory: web
-        run: |
-          # PRD-037 UXR-043 to UXR-046: the inventoried operator tasks (interaction counts), typing above a keyboard that covers half
-          # the screen, and thumb reach, at 320x568 and 360x640. The same specs run at 1440x900 and 353x745 in the step above.
-          BRIDGE_SKIP_VISUAL=1 npx playwright test --project="paths-*"
+          # The layout, accessibility and timing specs of PRD-037 measure text and boxes, so they are calibrated for the fonts of the Playwright
+          # image and cannot pass on a runner with other fonts. The image has no Python and no tmux: the worker and terminal specs get a venv
+          # (the project, installed editable) and tmux inside the container. The screenshot comparison is a step of its own below.
+          version=$(node -p "require('@playwright/test/package.json').version")
+          docker run --rm --ipc=host -e CI=1 -e BRIDGE_SKIP_VISUAL=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+            -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" bash -ec '
+              apt-get update -qq
+              apt-get install -y -qq tmux python3-venv > /dev/null
+              python3 -m venv --clear /work/.venv
+              /work/.venv/bin/python -m pip install -q -e /work
+              /work/.venv/bin/python -c "import llm_tools"
+              playwright="node node_modules/@playwright/test/cli.js test"
+              # Behaviour, layout, accessibility and mobile tests on all four projects.
+              $playwright --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile
+              # PRD-037 T45: the device matrix (nine viewports, Chromium): fold budgets, reflow, target sizes, axe and keyboard simulation at
+              # 2560x1440, 1280x720, 768x1024, 1024x768, 430x932, 360x640, 320x568 and the landscape phones 740x360 and 568x320.
+              $playwright --project="matrix-*"
+              # PRD-037 UXR-043 to UXR-046: the inventoried operator tasks (interaction counts), typing above a keyboard that covers half the
+              # screen, and thumb reach, at 320x568 and 360x640 (the same specs run at 1440x900 and 353x745 above).
+              $playwright --project="paths-*"
+            '
       - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
         working-directory: web
         run: |

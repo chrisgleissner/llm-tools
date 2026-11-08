@@ -36,8 +36,9 @@ const phonePaths = (width: number, height: number) => ({ name: `paths-${width}x$
 
 export default defineConfig({
   testDir: "e2e",
-  // Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows).
-  testIgnore: process.platform === "linux" ? [] : [/screenshots\.spec\.ts$/],
+  // Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows), and so are the PRD-037 acceptance specs in e2e/redesign/: they measure
+  // text, boxes and timing and are calibrated for the Linux fonts of the Playwright image (CI runs them there).
+  testIgnore: process.platform === "linux" ? [] : [/screenshots\.spec\.ts$/, /[\\/]redesign[\\/]/],
   timeout: 90_000,
   expect: {
     timeout: 10_000,

@@ -76,6 +76,8 @@ test.describe("delete mission", () => {
       await page.getByRole("link", { name: "Running mission" }).click();
       await expect(page.getByRole("heading", { name: "Running mission" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+      // The header is drawn again when the task list arrives and an open menu would be closed with it: wait for the list (the tab shows its count).
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
       await page.getByRole("button", { name: "More mission actions" }).click();
       await expect(page.getByRole("menuitem", { name: "Cancel mission" })).toBeVisible();
       await expect(page.locator('[data-action="delete-mission"]')).toHaveCount(0);
@@ -85,6 +87,7 @@ test.describe("delete mission", () => {
       // A never-started mission has it; the dialog names the mission, and going back changes nothing.
       await page.getByRole("link", { name: "Never started mission" }).click();
       await expect(page.getByRole("heading", { name: "Never started mission" })).toBeVisible();
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
       // The action is in the mission's overflow menu (the redesign moved it there from a button beside the other actions).
       const remove = page.locator('[data-action="delete-mission"]');
       const openDelete = async () => {
@@ -132,6 +135,7 @@ test.describe("delete mission", () => {
       await navTo(page, "Missions");
       await page.getByRole("link", { name: "Never started mission" }).click();
       await expect(page.getByRole("heading", { name: "Never started mission" })).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
       // The mission starts running on the worker after the page was drawn: the worker refuses and says why.
       fake.setStatus(fake.idle, "RUNNING");
       await page.getByRole("button", { name: "More mission actions" }).click();
