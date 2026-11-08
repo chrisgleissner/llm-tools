@@ -102,16 +102,39 @@ pub(crate) fn blocking<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
-/// Wraps the body of every `pub fn` of an `impl` block in [`blocking`]; other functions are copied
+/// A database call that takes at least this long (including the wait for the connection) is reported
+/// on stderr with its name, so a request stall can be traced to the call that held the connection.
+const SLOW_CALL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Report a maintenance step that held the connection for [`SLOW_CALL`] or longer.
+fn report_slow_step(step: &str, started: std::time::Instant) {
+    let took = started.elapsed();
+    if took >= SLOW_CALL {
+        eprintln!("slow database maintenance step {step}: {} ms", took.as_millis());
+    }
+}
+
+/// [`blocking`] plus the slow-call report. `maintenance` is a long pass by design and is not reported.
+pub(crate) fn blocking_named<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = blocking(f);
+    let took = started.elapsed();
+    if took >= SLOW_CALL && name != "maintenance" {
+        eprintln!("slow database call {name}: {} ms", took.as_millis());
+    }
+    out
+}
+
+/// Wraps the body of every `pub fn` of an `impl` block in [`blocking_named`]; other functions are copied
 /// unchanged (they are only called from wrapped ones).
 macro_rules! offload_impl {
     () => {};
     ($(#[$m:meta])* pub fn $name:ident ($($args:tt)*) -> $ret:ty $body:block $($rest:tt)*) => {
-        $(#[$m])* pub fn $name($($args)*) -> $ret { $crate::db::blocking(|| -> $ret { $body }) }
+        $(#[$m])* pub fn $name($($args)*) -> $ret { $crate::db::blocking_named(stringify!($name), || -> $ret { $body }) }
         $crate::db::offload_impl! { $($rest)* }
     };
     ($(#[$m:meta])* pub fn $name:ident ($($args:tt)*) $body:block $($rest:tt)*) => {
-        $(#[$m])* pub fn $name($($args)*) { $crate::db::blocking(|| { $body }) }
+        $(#[$m])* pub fn $name($($args)*) { $crate::db::blocking_named(stringify!($name), || { $body }) }
         $crate::db::offload_impl! { $($rest)* }
     };
     ($(#[$m:meta])* $vis:vis fn $name:ident ($($args:tt)*) $(-> $ret:ty)? $body:block $($rest:tt)*) => {
@@ -1861,9 +1884,11 @@ impl Db {
                 }
                 // Each step of this pragma frees one page, so the statement is stepped to its end. The
                 // mutex is held for one small chunk at a time.
+                let started = std::time::Instant::now();
                 let mut st = c.prepare(&format!("PRAGMA incremental_vacuum({VACUUM_CHUNK_PAGES})"))?;
                 let mut rows = st.query([])?;
                 while rows.next()?.is_some() {}
+                report_slow_step("incremental_vacuum", started);
                 drop(rows);
                 drop(st);
                 drop(c);
@@ -1871,7 +1896,9 @@ impl Db {
                 std::thread::sleep(MAINTENANCE_PAUSE);
             }
         }
+        let started = std::time::Instant::now();
         self.c()?.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+        report_slow_step("wal_checkpoint(PASSIVE)", started);
         Ok(())
     }
 

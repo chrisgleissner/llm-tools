@@ -470,7 +470,8 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     assert_eq!(
         health.over_one_second + state.over_one_second,
         0,
-        "a request took 1 s or longer during the backup\n{report}"
+        "a request took 1 s or longer during the backup\n{report}\nserver log: {}",
+        std::fs::read_to_string(&serve_log).unwrap_or_default()
     );
     // The copy is a consistent database that holds at least what the live one held when the backup began.
     let copy = rows(&out);
