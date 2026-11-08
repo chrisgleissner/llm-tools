@@ -368,26 +368,26 @@ def test_mission_list_uses_worker_scoped_resource_route_and_preserves_cli_json(c
 
 
 @pytest.mark.parametrize(
-    "mission",
+    ("row", "expected"),
     [
-        {"id": "m-1", "name": "Example", "status": "RUNNING", "created_at": "now", "updated_at": "now"},
-        {
-            "id": "m-1", "name": "Example", "status": "RUNNING", "created_at": "now",
-            "updated_at": "now", "controller_running": "yes",
-        },
+        ({"worker": "worker-a", "stale": False, "mission": {"id": "m-1", "name": "Example", "status": "RUNNING", "created_at": "now", "updated_at": "now"}}, "incomplete mission summary"),
+        ({"worker": "worker-a", "stale": False, "mission": {"id": "m-1", "name": "Example", "status": "RUNNING", "created_at": "now", "updated_at": "now", "controller_running": "yes"}}, "invalid mission summary"),
+        ({"worker": "worker-a", "stale": False, "mission": None}, "unexpected mission row"),
+        ("invalid row", "unexpected mission row"),
+        ({"worker": "worker-a", "stale": False, "mission": {"id": None, "name": "Example", "status": "RUNNING", "created_at": "now", "updated_at": "now", "controller_running": True}}, "invalid mission summary"),
     ],
 )
-def test_remote_mission_list_rejects_incomplete_or_mistyped_cli_fields(mission, capsys):
+def test_remote_mission_list_rejects_incomplete_or_mistyped_cli_fields(row, expected, capsys):
     api = client({
         ("GET", "/api/v1/missions"): (200, {
-            "missions": [{"worker": "worker-a", "stale": False, "mission": mission}],
+            "missions": [row],
             "next_cursor": None,
         })
     })
 
     assert remote.run_cli("worker-a", args("mission", "list", "--json"), client=api) == 2
     error = capsys.readouterr().err
-    assert "incomplete mission summary" in error or "invalid mission summary" in error
+    assert expected in error
 
 
 def test_main_routes_targets_and_worker_list_to_the_remote_client(capsys):
