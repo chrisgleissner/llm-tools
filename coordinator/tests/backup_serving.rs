@@ -324,10 +324,11 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
         .args(["serve", "--data-dir"])
         .arg(&dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(dir.join("serve.log")).unwrap())
         .spawn()
         .unwrap();
     let _server = Server(child);
+    let serve_log = dir.join("serve.log");
     let started = Instant::now();
     while ops::health(&dir).await.is_err() {
         assert!(started.elapsed() < Duration::from_secs(60), "server did not become healthy");
@@ -343,14 +344,23 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     let stop = Arc::new(AtomicBool::new(false));
     // Pollers: the process health route (no database) and the auth state route (reads the database).
     let poll = |path: &'static str| {
-        let (client, stop) = (client.clone(), stop.clone());
+        let (client, stop, serve_log) = (client.clone(), stop.clone(), serve_log.clone());
         tokio::spawn(async move {
             let mut lat = Latency::default();
             while !stop.load(Ordering::Relaxed) {
                 let at = Instant::now();
                 let r = client.get(format!("https://127.0.0.1:{port}{path}")).send().await;
                 lat.add(at.elapsed());
-                assert!(r.is_ok_and(|r| r.status().is_success()), "{path} failed during the backup");
+                let seen = match &r {
+                    Ok(r) => format!("status {}", r.status()),
+                    Err(e) => format!("error {e:?}"),
+                };
+                assert!(
+                    r.is_ok_and(|r| r.status().is_success()),
+                    "{path} failed during the backup after {:.1} s: {seen}; server log: {}",
+                    at.elapsed().as_secs_f64(),
+                    std::fs::read_to_string(&serve_log).unwrap_or_default()
+                );
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             lat
