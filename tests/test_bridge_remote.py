@@ -390,6 +390,41 @@ def test_remote_mission_list_rejects_incomplete_or_mistyped_cli_fields(row, expe
     assert expected in error
 
 
+def test_remote_mission_list_rejects_a_malformed_page(capsys):
+    api = client({("GET", "/api/v1/missions"): (200, {"missions": "not-a-list"})})
+
+    assert remote.run_cli("worker-a", args("mission", "list", "--json"), client=api) == 2
+    assert "unexpected mission page" in capsys.readouterr().err
+
+
+def test_remote_mission_list_follows_opaque_cursors(capsys):
+    def row(mission_id):
+        return {
+            "worker": "worker-a",
+            "stale": False,
+            "mission": {
+                "id": mission_id,
+                "name": "Example",
+                "status": "RUNNING",
+                "created_at": "2026-11-07T00:00:00Z",
+                "updated_at": "2026-11-08T00:00:00Z",
+                "controller_running": True,
+            },
+        }
+
+    api = client({
+        ("GET", "/api/v1/missions"): [
+            (200, {"missions": [row("m-1")], "next_cursor": "opaque-cursor"}),
+            (200, {"missions": [row("m-2")], "next_cursor": None}),
+        ]
+    })
+
+    assert remote.run_cli("worker-a", args("mission", "list", "--json"), client=api) == 0
+    assert [row["id"] for row in json.loads(capsys.readouterr().out)["missions"]] == ["m-1", "m-2"]
+    assert len(api.opener.calls) == 2
+    assert "cursor=opaque-cursor" in api.opener.calls[1][3]
+
+
 def test_main_routes_targets_and_worker_list_to_the_remote_client(capsys):
     assert main(["--target", "ws", "status", "--mission", "m"]) == 2
     assert "no coordinator is configured" in capsys.readouterr().err
