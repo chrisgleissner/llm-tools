@@ -338,7 +338,10 @@ fn copy_database(src: &Path, tmp: &Path) -> Result<(), String> {
 }
 
 fn sync_file(path: &Path) -> Result<(), String> {
-    std::fs::File::open(path)
+    // Opened for writing without truncation: Windows refuses to flush a handle opened read-only.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
         .and_then(|f| f.sync_all())
         .map_err(|e| format!("cannot sync {}: {e}", path.display()))
 }

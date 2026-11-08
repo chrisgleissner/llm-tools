@@ -92,7 +92,7 @@ def stage_backup(args: argparse.Namespace, stamp: str) -> str:
 
 def remote_size_and_hash(args: argparse.Namespace, remote_file: str) -> tuple[int, str]:
     q = shlex.quote(remote_file)
-    done = run_remote(args, f"stat -c %s {q} && sha256sum {q}", timeout=args.step_timeout)
+    done = run_remote(args, f"wc -c < {q} && (sha256sum {q} || shasum -a 256 {q})", timeout=args.step_timeout)
     if done.returncode != 0:
         raise Stage(EXIT_FETCH, f"cannot read {remote_file} on {args.host}: {done.stderr.decode(errors='replace').strip()}")
     lines = done.stdout.decode().split("\n")
