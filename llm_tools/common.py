@@ -4206,6 +4206,32 @@ def prompt_abort_reason(text: str, default: str = "interactive prompt detected",
     return default
 
 
+PTY_DRAIN_SECONDS = 2.0
+
+
+def drain_pty_master(fd: int, max_seconds: float | None = None) -> Iterator[bytes]:
+    """Yield the bytes still readable from a pty master after its child exited.
+
+    Stops at end of file (Linux and macOS both report it as EIO or an empty
+    read once the slave side is closed and the buffer is empty), or when nothing
+    arrives for a short interval, or after ``max_seconds``. The bound keeps a
+    surviving grandchild that holds the slave open from stalling the caller.
+    """
+    limit = PTY_DRAIN_SECONDS if max_seconds is None else max_seconds
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if fd not in ready:
+            return
+        try:
+            raw = os.read(fd, 65536)
+        except OSError:
+            return
+        if not raw:
+            return
+        yield raw
+
+
 def run_pty_capture(
     argv: Sequence[str],
     cwd: Path,
@@ -4378,6 +4404,18 @@ def run_pty_capture(
                 code = reap(status)
                 if code is not None:
                     exit_code = code
+                if not eof:
+                    # The child can exit with output still unread in the pty
+                    # master: the loop reads at most one chunk per pass and
+                    # checks for exit afterwards. Collect the rest, otherwise
+                    # the last provider output is missing from the capture.
+                    for raw in drain_pty_master(fd):
+                        append_output(raw.decode("utf-8", "replace"))
+                        if stream:
+                            try:
+                                os.write(sys.stdout.fileno(), raw)
+                            except OSError:
+                                stream = False
                 break
     except KeyboardInterrupt:
         exit_code = 130

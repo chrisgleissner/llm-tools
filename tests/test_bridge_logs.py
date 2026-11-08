@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from llm_tools.bridge_logs import _append_rotating, capture_process_output
 from llm_tools.bridge_log_sink import main as log_sink_main
 from llm_tools.bridge_runtime import _prune_old_run_logs
@@ -63,6 +65,40 @@ def test_bridge_headless_pty_capture_keeps_only_bounded_tail(tmp_path: Path) -> 
     assert code == 0
     assert output.stat().st_size < 1200
     assert "FINAL" in text
+    assert "Earlier bytes were discarded" in text
+
+
+def test_pty_capture_collects_output_still_buffered_when_the_child_has_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force the ordering that previously lost the end of the output: the child
+    # has already written everything and exited before the capture loop reads
+    # the pty master for the first time. The first select() call waits until the
+    # child is dead and reports nothing readable, so the loop reaches its exit
+    # check with the whole output unread.
+    pids: list[int] = []
+    real_select = common.select.select
+    calls: list[int] = []
+
+    def select_after_child_exit(rlist, wlist, xlist, timeout=None):  # type: ignore[no-untyped-def]
+        if not calls:
+            calls.append(1)
+            os.waitid(os.P_PID, pids[0], os.WEXITED | os.WNOWAIT)
+            return [], [], []
+        return real_select(rlist, wlist, xlist, timeout)
+
+    monkeypatch.setattr(common.select, "select", select_after_child_exit)
+    code, text = common.run_pty_capture(
+        [sys.executable, "-c", "import sys; sys.stdout.write('a'*6000+'FINAL')"],
+        tmp_path,
+        10,
+        stream=False,
+        auto_confirm=False,
+        on_process_started=pids.append,
+        max_output_bytes=1024,
+    )
+    assert code == 0
+    assert text.rstrip().endswith("FINAL")
     assert "Earlier bytes were discarded" in text
 
 
