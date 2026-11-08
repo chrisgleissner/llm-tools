@@ -1,5 +1,6 @@
 // Shared types of the mission detail page (PRD-037 WP-3).
 import type { NeedsYou } from "../../api";
+import { absTime } from "../../dom";
 
 export interface Task {
   id: number;
@@ -34,9 +35,8 @@ export interface PageCtx {
 }
 
 /** The text of a plain-words age: "14:02 (3m ago)". */
-export function asOfText(ms: number, now = Date.now()): string {
+export function asOfText(ms: number): string {
   if (!ms) return "never";
-  const d = new Date(ms);
-  const age = Math.max(0, Math.round((now - ms) / 60000));
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")} (${age < 1 ? "just now" : `${age}m ago`})`;
+  const age = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  return `${absTime(new Date(ms)).slice(11)} (${age < 1 ? "just now" : `${age}m ago`})`;
 }

@@ -9,10 +9,6 @@ import { menu, type MenuItem } from "./menu";
 import { publishStreamMessage } from "./store";
 import { TERMINAL_THEME } from "./terminal-theme";
 import { say } from "./ui";
-import { ensureXtermCss } from "./xterm-css";
-
-// The stylesheet loads before this module finishes evaluating, so the terminal never measures or paints without its CSS.
-await ensureXtermCss();
 
 export type TermState = "idle" | "connecting" | "live" | "reconnecting" | "ended";
 

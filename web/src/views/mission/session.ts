@@ -1,3 +1,4 @@
+import { ensureXtermCss } from "../../xterm-css";
 // Adapter between the mission page and the session pane (spec 8.2). The pane's xterm.js code is a lazy chunk, so the page reserves
 // the pane's box with `sessionReserve()` (src/session-box.ts) until `loadSession` resolves; both boxes have the same size.
 export interface SessionOpts {
@@ -20,12 +21,12 @@ export interface SessionHandle {
 }
 
 export async function loadSession(workerName: string, missionId: string, opts: SessionOpts): Promise<SessionHandle> {
-  const { sessionPane } = await import("../../session");
+  // The stylesheet and the chunk are fetched together; the pane is built only when both have arrived, so the terminal never measures or paints without its CSS.
+  const [{ sessionPane }] = await Promise.all([import("../../session"), ensureXtermCss()]);
   // Evaluating the terminal chunk is one long task; building the pane is another. Between them the browser handles input and paints (total blocking time, T37).
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  const pane = sessionPane(workerName, missionId, opts.provider ? { provider: opts.provider } : {});
-  let running = opts.running;
-  let available = opts.available;
+  const pane = sessionPane(workerName, missionId, opts);
+  let { running, available } = opts;
   // `openReadOnly` is idempotent. It is asked for on arrival and again only when the mission starts running or the worker comes back,
   // never on every refresh: an operator who chose Disconnect stays disconnected.
   const watch = (): void => {
@@ -35,8 +36,8 @@ export async function loadSession(workerName: string, missionId: string, opts: S
   watch();
   return {
     element: pane.element,
-    focusComposer: () => pane.focusComposer(),
-    takeControl: () => pane.takeControl(),
+    focusComposer: pane.focusComposer,
+    takeControl: pane.takeControl,
     setAvailable: (a) => {
       const back = a && !available;
       available = a;
@@ -48,6 +49,6 @@ export async function loadSession(workerName: string, missionId: string, opts: S
       running = r;
       if (started) watch();
     },
-    dispose: () => pane.dispose(),
+    dispose: pane.dispose,
   };
 }

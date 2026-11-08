@@ -7,8 +7,6 @@ import { icon } from "./icons";
 import { announce, openPanel } from "./ui";
 
 interface Notice { id: string; category: string; created_at: number }
-const read = async (): Promise<Notice[]> => (await api.get<{ notifications: Notice[] }>("/api/v1/security/notifications")).notifications;
-const dismissOne = (id: string): Promise<unknown> => api.del(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
 
 const LABELS: Record<string, string> = {
   new_sign_in_address: "A sign-in came from a new address.",
@@ -26,22 +24,21 @@ export function mountSecurityNotice(button: HTMLElement): () => void {
   const paint = (): void => {
     button.hidden = items.length === 0;
     button.setAttribute("aria-label", `Security notifications, ${items.length}`);
-    button.replaceChildren(icon("alert", 18), h("span", { class: "num" }, String(items.length)));
+    button.replaceChildren(icon("alert", 18), h("span", { class: "num" }, items.length));
     list.replaceChildren(...items.map((item) => {
-      const dismiss = h("button", { class: "btn small ghost", type: "button", "aria-label": "Dismiss security notification" }, "Dismiss");
-      dismiss.addEventListener("click", () => {
-        void dismissOne(item.id).then(() => {
+      const dismiss = (): void => {
+        void api.del(`/api/v1/security/notifications/${encodeURIComponent(item.id)}`).then(() => {
           items = items.filter((x) => x.id !== item.id);
           paint();
           if (items.length === 0) panel?.close();
         }).catch(() => announce("Could not dismiss security notification", "error"));
-      });
-      return h("div", { class: "actions" }, h("span", {}, LABELS[item.category] ?? "A security event occurred."), dismiss);
+      };
+      return h("div", { class: "actions" }, h("span", {}, LABELS[item.category] ?? "A security event occurred."), h("button", { class: "btn small ghost", type: "button", "aria-label": "Dismiss security notification", onclick: dismiss }, "Dismiss"));
     }));
   };
   const refresh = (): void => {
-    void read().then((next) => {
-      items = next;
+    void api.get<{ notifications: Notice[] }>("/api/v1/security/notifications").then(({ notifications }) => {
+      items = notifications;
       paint();
     }).catch(() => {});
   };

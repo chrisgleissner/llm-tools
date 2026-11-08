@@ -1,6 +1,7 @@
 // "About" (spec 8.1, level 1): folder, worker host and address, created time, and the full mission id with Copy.
 import type { WorkerInfo } from "../../api";
 import { h, idChip, timeEl } from "../../dom";
+import { fields } from "./kit";
 
 export interface AboutModel {
   missionId: string;
@@ -28,7 +29,7 @@ export function aboutBlock(): About {
       rows.push(["Worker", [m.workerName, w?.host_name, w?.remote_address].filter(Boolean).join(" · ")]);
       if (m.createdAt) rows.push(["Created", timeEl(m.createdAt)]);
       rows.push(["Mission ID", idChip(m.missionId, "mission ID")]);
-      body.replaceChildren(h("dl", { class: "about-fields" }, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
+      body.replaceChildren(fields("about-fields", rows));
     },
   };
 }

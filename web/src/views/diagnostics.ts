@@ -1,5 +1,6 @@
 import * as api from "../api";
 import { errorBlock, h, deferSkeleton } from "../dom";
+import { apiMsg, facts } from "../kit-b";
 import { store, subscribe } from "../store";
 import { answerLine, plural } from "./remote";
 
@@ -17,7 +18,7 @@ function bytes(n: number): string {
   return `${Math.round(n / 1024)} KB`;
 }
 
-const connText: Record<string, string> = { live: "live", reconnecting: "reconnecting", offline: "offline" };
+const section = (id: string, title: string, ...children: Array<Node | string>): HTMLElement => h("section", { class: "dsection", "aria-labelledby": id }, h("h2", { id }, title), ...children);
 
 export function diagnostics(root: HTMLElement): () => void {
   const answers = answerLine({ what: "Reading coordinator diagnostics.", needMe: "Nothing needs you.", next: "This takes a moment." });
@@ -26,7 +27,7 @@ export function diagnostics(root: HTMLElement): () => void {
   let data: Record<string, unknown> | null = null;
   let error = "";
   const done = deferSkeleton(body, 3);
-  const grid = (label: string, rows: Array<[string, unknown]>) => h("dl", { class: "facts grid", "aria-label": label }, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v === null || v === undefined || v === "" ? "-" : String(v))]));
+  const grid = (label: string, rows: Array<[string, unknown]>) => facts("facts grid", label, rows);
   const render = () => {
     if (error) {
       answers.set({ what: "Coordinator diagnostics could not be loaded.", needMe: "Check that you are still signed in and the coordinator is reachable.", next: "Retry in a moment." });
@@ -34,38 +35,37 @@ export function diagnostics(root: HTMLElement): () => void {
     }
     if (!data) return;
     const d = data;
-    const depths = d["command_queue_depths"] as Record<string, Record<string, number>> | undefined;
-    const queued = depths ? Object.entries(depths).flatMap(([w, s]) => Object.entries(s).map(([k, v]) => ({ w, k, v }))) : [];
-    const waiting = queued.reduce((sum, q) => sum + q.v, 0);
+    const depths = (d["command_queue_depths"] ?? {}) as Record<string, Record<string, number>>;
+    const counts = Object.values(depths).flatMap((states) => Object.values(states));
+    const waiting = counts.reduce((sum, n) => sum + n, 0);
+    const uptime = duration(Number(d["uptime_seconds"] ?? 0));
     answers.set({
-      what: `Coordinator ${String(d["version"] ?? "")} has been up ${duration(Number(d["uptime_seconds"] ?? 0))} with ${plural(Number(d["connected_workers"] ?? 0), "worker")} connected.`,
+      what: `Coordinator ${String(d["version"] ?? "")} has been up ${uptime} with ${plural(Number(d["connected_workers"] ?? 0), "worker")} connected.`,
       needMe: waiting === 0 ? "Nothing needs you." : `${plural(waiting, "command")} ${waiting === 1 ? "is" : "are"} still waiting for a worker.`,
       next: waiting === 0 ? "Nothing to do." : "Check that the workers named under Command queues are online.",
     });
     body.replaceChildren(
-      h(
-        "section",
-        { class: "dsection", "aria-labelledby": "dg-coord" },
-        h("h2", { id: "dg-coord" }, "Coordinator"),
+      section(
+        "dg-coord",
+        "Coordinator",
         grid("Coordinator diagnostics", [
           ["Version", d["version"]],
           ["Protocol", d["protocol_version"]],
-          ["Up for", duration(Number(d["uptime_seconds"] ?? 0))],
+          ["Up for", uptime],
           ["Memory", d["rss_kib"] == null ? null : bytes(Number(d["rss_kib"]) * 1024)],
           ["Database", bytes(Number(d["db_bytes"] ?? 0))],
           ["SQLite", d["sqlite_version"]],
           ["Connected workers", d["connected_workers"]],
         ]),
       ),
-      h(
-        "section",
-        { class: "dsection", "aria-labelledby": "dg-queue" },
-        h("h2", { id: "dg-queue" }, "Command queues"),
-        queued.length > 0
-          ? h("ul", { class: "plain" }, ...Object.entries(depths ?? {}).map(([w, s]) => h("li", {}, h("strong", { class: "nowrap" }, w), ` ${Object.entries(s).map(([k, v]) => `${v} ${k}`).join(", ")}`)))
+      section(
+        "dg-queue",
+        "Command queues",
+        counts.length > 0
+          ? h("ul", { class: "plain" }, ...Object.entries(depths).map(([w, s]) => h("li", {}, h("strong", { class: "nowrap" }, w), ` ${Object.entries(s).map(([k, v]) => `${v} ${k}`).join(", ")}`)))
           : h("p", { class: "muted" }, "No unfinished commands."),
       ),
-      h("section", { class: "dsection", "aria-labelledby": "dg-client" }, h("h2", { id: "dg-client" }, "This browser"), grid("Browser", [["Live stream", connText[store.conn] ?? store.conn], ["Workers known", store.workers.length], ["Missions known", store.missions.length]])),
+      section("dg-client", "This browser", grid("Browser", [["Live stream", store.conn], ["Workers known", store.workers.length], ["Missions known", store.missions.length]])),
     );
   };
   const load = () => {
@@ -74,11 +74,11 @@ export function diagnostics(root: HTMLElement): () => void {
       .get<Record<string, unknown>>("/api/v1/diagnostics")
       .then((d) => {
         data = d;
-        done();
-        render();
       })
       .catch((e) => {
-        error = e instanceof api.ApiError ? e.message : "Cannot load diagnostics.";
+        error = apiMsg(e, "Cannot load diagnostics.");
+      })
+      .finally(() => {
         done();
         render();
       });

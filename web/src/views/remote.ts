@@ -1,8 +1,13 @@
 import * as api from "../api";
-import { absTime, button, deferSkeleton, errorBlock, h, relFromMs, toDate } from "../dom";
-import { icon } from "../icons";
+import { absTime, button, deferSkeleton, emptyState, errorBlock, h, relFromMs, toDate } from "../dom";
+import { icon, type IconName } from "../icons";
 import { store, subscribe, worker } from "../store";
 import { confirmDialog } from "../ui";
+
+type Kid = Parameters<typeof h>[2];
+
+/** An element with one class string and its children. */
+export const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, ...kids: Kid[]): HTMLElementTagNameMap[K] => h(tag, { class: cls }, ...kids);
 
 /** The one-line answer under a page title (spec 3, rule 4): what is happening, whether it needs the operator, what to do next. */
 export interface Answer {
@@ -11,59 +16,75 @@ export interface Answer {
   next: string;
 }
 
+/** An answer for a page where nothing needs the operator. */
+export const calm = (what: string, next: string): Answer => ({ what, needMe: "Nothing needs you.", next });
+
+/** The text with its first letter capitalised. */
+export const cap = (s: string): string => s.replace(/^./, (c) => c.toUpperCase());
+
+/** The message of an API error, else `other`. */
+export const apiMessage = (e: unknown, other = "unexpected error"): string => (e instanceof api.ApiError ? e.message : other);
+
+/** A definition list of `[term, description]` rows. */
+export const facts = (rows: Array<[string, Kid]>): HTMLElement => el("dl", "facts", ...rows.flatMap(([term, text]) => [h("dt", {}, term), h("dd", {}, text)]));
+
 /** A paragraph of three sentences; `set` rewrites them on a refresh without replacing the element (so nothing shifts or loses focus). */
 export function answerLine(initial: Answer): { el: HTMLElement; set: (a: Answer) => void } {
-  const what = h("span", { "data-q": "what" });
-  const needMe = h("span", { "data-q": "need-me" });
-  const next = h("span", { "data-q": "next" });
-  const el = h("p", { class: "answers" }, what, " ", needMe, " ", next);
+  const [what, needMe, next] = ["what", "need-me", "next"].map((q) => h("span", { "data-q": q })) as [HTMLElement, HTMLElement, HTMLElement];
   const set = (a: Answer) => {
     what.textContent = a.what;
     needMe.textContent = a.needMe;
     next.textContent = a.next;
   };
   set(initial);
-  return { el, set };
+  return { el: el("p", "answers", what, " ", needMe, " ", next), set };
 }
+
+/** A `<time>` whose relative text stays current (see `startClock`); `title` is its absolute time. */
+export const when = (d: Date, title?: string): HTMLElement => h("time", { class: "ts", datetime: d.toISOString(), "data-ms": d.getTime(), title }, el("span", "rel", relFromMs(d.getTime())));
 
 /** "prefix 3 min ago": the relative time stays current (see `startClock`), the absolute time is in the title. `empty` is shown for no value. */
 export function ago(value: string | number | null | undefined, prefix = "", empty = "never"): HTMLElement {
   const d = toDate(value);
-  if (!d) return h("span", { class: "nowrap muted" }, empty);
-  const ms = d.getTime();
-  return h("span", { class: "nowrap" }, prefix ? `${prefix} ` : null, h("time", { class: "ts", datetime: d.toISOString(), "data-ms": ms, title: absTime(d) }, h("span", { class: "rel" }, relFromMs(ms))));
+  return d ? el("span", "nowrap", prefix ? `${prefix} ` : null, when(d, absTime(d))) : el("span", "nowrap muted", empty);
 }
 
 /** Local clock time of an epoch in seconds, "14:20". */
-export function clock(epochSeconds: number): string {
-  const d = new Date(epochSeconds * 1000);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
+export const clock = (epochSeconds: number): string => new Date(epochSeconds * 1000).toTimeString().slice(0, 5);
 
 export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /** A row link whose label wraps and is clamped once (spec 6.3); the link itself keeps the minimum target size. */
-export function rowLink(text: string, href: string): HTMLElement {
-  return h("a", { class: "row-link", href, title: text }, h("span", { class: "clamp-2" }, text));
-}
+export const rowLink = (text: string, href: string): HTMLElement => h("a", { class: "row-link", href, title: text }, el("span", "clamp-2", text));
 
 let toggleSeq = 0;
 /**
- * A per-row "Details" control: a button with `aria-expanded` and the block it reveals. The caller places the button in the row's
- * last line and the panel below the row. It replaces a native `<summary>` inside rows because the button label sits in its own
- * element and, in Sessions, the History group already owns the only `<summary>` of its section.
+ * A row of a fleet list with a per-row details control: a button with `aria-expanded` in the row's last line and the block it
+ * reveals below the row. The button replaces a native `<summary>` inside rows because its label sits in its own element and, in
+ * Sessions, the History group already owns the only `<summary>` of its section. `main` is the first line, `info` the facts of
+ * the second line.
  */
-export function toggleDetails(label: string, content: Node): { button: HTMLElement; panel: HTMLElement } {
+export function fleetRow(attrs: Record<string, string>, main: Kid[], info: Kid[], label: string, content: Node): HTMLElement {
   const id = `toggle-${++toggleSeq}`;
   const panel = h("div", { class: "toggle-body", id, hidden: true }, content);
-  const button = h("button", { type: "button", class: "btn ghost small toggle", "aria-expanded": "false", "aria-controls": id }, icon("chevronRight", 16), h("span", {}, label));
-  button.addEventListener("click", () => {
-    const open = panel.hidden;
-    panel.hidden = !open;
-    button.setAttribute("aria-expanded", String(open));
-    button.firstElementChild?.replaceWith(icon(open ? "chevronDown" : "chevronRight", 16));
-  });
-  return { button, panel };
+  const toggle = h(
+    "button",
+    {
+      type: "button",
+      class: "btn ghost small toggle",
+      "aria-expanded": "false",
+      "aria-controls": id,
+      onclick: () => {
+        const open = panel.hidden;
+        panel.hidden = !open;
+        toggle.setAttribute("aria-expanded", String(open));
+        toggle.firstElementChild?.replaceWith(icon(open ? "chevronDown" : "chevronRight", 16));
+      },
+    },
+    icon("chevronRight", 16),
+    h("span", {}, label),
+  );
+  return h("li", { class: "frow", ...attrs }, el("div", "row-main", ...main), el("div", "row-sub small", el("span", "row-facts", ...info), el("span", "row-end", toggle)), panel);
 }
 
 /**
@@ -73,8 +94,6 @@ export function toggleDetails(label: string, content: Node): { button: HTMLEleme
  */
 export function onceDialog(opts: { id: string; title: string; body: Node; warning: string }): HTMLDialogElement {
   document.getElementById(opts.id)?.remove();
-  const dlg = h("dialog", { class: "dialog once", id: opts.id, "aria-labelledby": `${opts.id}-title` });
-  const closeBtn = h("button", { type: "button", class: "btn icon ghost", "aria-label": "Close" }, icon("x", 20));
   let asking = false;
   const ask = async (): Promise<void> => {
     if (asking) return;
@@ -83,16 +102,25 @@ export function onceDialog(opts: { id: string; title: string; body: Node; warnin
     asking = false;
     if (ok !== null) dlg.close();
   };
-  closeBtn.addEventListener("click", () => void ask());
-  dlg.addEventListener("cancel", (e) => {
-    e.preventDefault();
-    void ask();
-  });
-  dlg.addEventListener("click", (e) => {
-    if (e.target === dlg) void ask();
-  });
-  dlg.addEventListener("close", () => dlg.remove());
-  dlg.append(h("div", { class: "dialog-head" }, h("h2", { id: `${opts.id}-title` }, opts.title), closeBtn), h("p", { class: "once-warning", role: "note" }, icon("alert", 18), h("span", {}, opts.warning)), opts.body);
+  const dlg = h(
+    "dialog",
+    {
+      class: "dialog once",
+      id: opts.id,
+      "aria-labelledby": `${opts.id}-title`,
+      oncancel: (e) => {
+        e.preventDefault();
+        void ask();
+      },
+      onclick: (e) => {
+        if (e.target === dlg) void ask();
+      },
+      onclose: () => dlg.remove(),
+    },
+    el("div", "dialog-head", h("h2", { id: `${opts.id}-title` }, opts.title), h("button", { type: "button", class: "btn icon ghost", "aria-label": "Close", onclick: () => void ask() }, icon("x", 20))),
+    h("p", { class: "once-warning", role: "note" }, icon("alert", 18), h("span", {}, opts.warning)),
+    opts.body,
+  );
   document.body.append(dlg);
   dlg.showModal();
   return dlg;
@@ -118,10 +146,13 @@ export interface FleetViewOpts<T> {
   load: (workerName: string) => Promise<T>;
   /** Turn the answers of every online worker into the page content and its one-line answer. */
   render: (ctx: FleetRender<T>) => { answer: Answer; body: Node };
-  /** Content when no worker exists at all. */
-  noWorkers: () => Node;
-  /** Content when every selected worker is offline. */
-  allOffline: (names: string[]) => Node;
+  /** Icon and title of the empty states of the page. */
+  icon: IconName;
+  empty: string;
+  /** Text when no worker exists at all. */
+  none: string;
+  /** What must wait for the offline workers to reconnect, after "must reconnect before ". */
+  offline: string;
   /** What the page reads ("provider capacity"): the answer sentences of the states where nothing was read are built from it. */
   read: string;
 }
@@ -131,18 +162,31 @@ export interface FleetViewOpts<T> {
  * title, the worker filter, Refresh, loading and error states; the page supplies `render`. Content is built from text nodes only.
  */
 export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => void {
-  const select = h("select", { id: "worker-select", name: "worker", "aria-label": "Worker" });
-  const refreshBtn = button("", () => void load(), { kind: "icon", icon: "refresh", label: "Refresh", id: "view-refresh" });
-  const filter = h("div", { class: "fleet-filter" }, select, refreshBtn);
-  const idle = (reason: "loading" | "no-workers" | "offline"): Answer => ({
-    what: reason === "loading" ? `Reading ${opts.read} from the workers.` : reason === "offline" ? `No worker is online, so ${opts.read} cannot be read.` : "No worker is enrolled yet.",
-    needMe: reason === "loading" ? "Nothing needs you." : "A worker has to be online first.",
-    next: reason === "loading" ? "This takes a moment." : "Open Workers to add or check one.",
+  const select = h("select", {
+    id: "worker-select",
+    name: "worker",
+    "aria-label": "Worker",
+    onchange: () => {
+      selected = select.value;
+      history.replaceState(null, "", selected ? `${location.pathname}?worker=${encodeURIComponent(selected)}` : location.pathname);
+      void load();
+    },
   });
-  const answers = answerLine(idle("loading"));
+  const refreshBtn = button("", () => void load(), { kind: "icon", icon: "refresh", label: "Refresh", id: "view-refresh" });
+  const idle = (what: string): Answer => ({ what, needMe: "A worker has to be online first.", next: "Open Workers to add or check one." });
+  const offlineAnswer = idle(`No worker is online, so ${opts.read} cannot be read.`);
+  // Replaces the whole page content with one state: the status line, the answer and the body.
+  const show = (text: string, answer: Answer, content: Node): void => {
+    status.textContent = text;
+    answers.set(answer);
+    body.replaceChildren(content);
+    rendered = true;
+  };
+  const empty = (name: IconName, title: string, text: string, label: string, cls: string): HTMLElement => emptyState({ icon: name, title, text, action: el("div", "actions", h("a", { class: cls, href: "/workers" }, label)) });
+  const answers = answerLine(calm(`Reading ${opts.read} from the workers.`, "This takes a moment."));
   const status = h("p", { class: "muted small", role: "status", id: "view-status" });
   const body = h("div", { id: "view-body", "aria-live": "off" });
-  root.append(h("div", { class: "fleet-head" }, h("h1", {}, opts.title), filter), answers.el, status, body);
+  root.append(el("div", "fleet-head", h("h1", {}, opts.title), el("div", "fleet-filter", select, refreshBtn)), answers.el, status, body);
   let selected = opts.query.get("worker") ?? "";
   let seq = 0;
   let lastNames = "";
@@ -152,8 +196,9 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
 
   const syncOptions = () => {
     const names = store.workers.map((w) => w.name);
-    if (names.join("\n") !== lastNames) {
-      lastNames = names.join("\n");
+    const key = names.join("\n");
+    if (key !== lastNames) {
+      lastNames = key;
       select.replaceChildren(h("option", { value: "" }, "All workers"), ...names.map((n) => h("option", { value: n }, n)));
     }
     if (selected && !names.includes(selected) && store.loaded) selected = "";
@@ -165,11 +210,7 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     const mine = ++seq;
     if (!store.loaded) return;
     if (store.workers.length === 0) {
-      status.textContent = "";
-      answers.set(idle("no-workers"));
-      body.replaceChildren(opts.noWorkers());
-      rendered = true;
-      return;
+      return show("", idle("No worker is enrolled yet."), empty(opts.icon, opts.empty, opts.none, "Go to Workers", "btn primary"));
     }
     const names = selected ? [selected] : store.workers.map((w) => w.name);
     const online = names.filter((n) => worker(n)?.state === "online");
@@ -179,11 +220,8 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
       return;
     }
     if (online.length === 0) {
-      status.textContent = `Worker ${offline.join(", ")} ${offline.length === 1 ? "is" : "are"} offline. Nothing can be read until it reconnects.`;
-      answers.set(idle("offline"));
-      body.replaceChildren(opts.allOffline(offline));
-      rendered = true;
-      return;
+      const list = offline.join(", ");
+      return show(`Worker ${list} ${offline.length === 1 ? "is" : "are"} offline. Nothing can be read until it reconnects.`, offlineAnswer, empty("workers", "No worker is online", `${list} must reconnect before ${opts.offline}.`, "Check Workers", "btn"));
     }
     const done = rendered ? () => {} : deferSkeleton(body, 3);
     refreshBtn.disabled = true;
@@ -196,14 +234,10 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     settled.forEach((s, i) => {
       const name = online[i] as string;
       if (s.status === "fulfilled") results.push({ worker: name, data: s.value });
-      else failed.push(`${name}: ${s.reason instanceof api.ApiError ? s.reason.message : "unexpected error"}`);
+      else failed.push(`${name}: ${apiMessage(s.reason)}`);
     });
     if (results.length === 0) {
-      status.textContent = "";
-      answers.set(idle("offline"));
-      body.replaceChildren(errorBlock({ message: `The worker could not answer. ${failed.join(" ")}`, retry: () => void load(), code: "worker-read-failed" }));
-      rendered = true;
-      return;
+      return show("", offlineAnswer, errorBlock({ message: `The worker could not answer. ${failed.join(" ")}`, retry: () => void load(), code: "worker-read-failed" }));
     }
     const view = opts.render({ results, offline, single: names.length === 1 });
     answers.set(view.answer);
@@ -214,12 +248,6 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     body.replaceChildren(view.body);
     rendered = true;
   }
-
-  select.addEventListener("change", () => {
-    selected = select.value;
-    history.replaceState(null, "", selected ? `${location.pathname}?worker=${encodeURIComponent(selected)}` : location.pathname);
-    void load();
-  });
 
   const sync = () => {
     syncOptions();

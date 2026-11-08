@@ -1,7 +1,6 @@
 // Steer dialogs of the session pane (loaded when the first Steer item is chosen, so they stay out of the terminal chunk).
 import * as api from "./api";
 import { h } from "./dom";
-import { onEvents } from "./events-bus";
 import { announce, confirmDialog, reportOutcome } from "./ui";
 
 export interface SteerTarget {
@@ -16,18 +15,13 @@ export interface SteerTarget {
 /** The event that shows queued steering was applied (see bridge_runtime); review and replace are seen as a new task or a task change. */
 const applied = (kind: api.SteerKind): RegExp =>
   new RegExp(kind === "review" ? "^task-added$" : kind === "replace" ? "^task-status$" : `^steering-${kind.replace("-after-iteration", "").replace("-after-task", "-task")}-(applied|consumed)$`);
-const WHAT = {
-  review: (n: number) => `review of task ${n}`,
-  verify: (n: number) => `verify task ${n} when the run exits`,
-  replace: (n: number) => `new prompt for task ${n}`,
-  "stop-after-task": (n: number) => `stop after task ${n}`,
-};
-const HELP: Partial<Record<api.SteerKind, string>> = {
-  review: "The provider reviews the task again.",
-  verify: "The verifier runs when the run exits.",
-  replace: "The task gets a new prompt.",
-  "stop-after-task": "The mission stops after that task.",
-  handoff: "The next run uses another provider.",
+/** For each kind that asks for input: what it does, the confirm button's label and the sentence for its announcement and chip. */
+const KINDS: Record<Exclude<api.SteerKind, "pause-after-iteration">, [string, string, (target: number | string) => string]> = {
+  review: ["The provider reviews the task again.", "Queue review", (n) => `review of task ${n}`],
+  verify: ["The verifier runs when the run exits.", "Queue verify", (n) => `verify task ${n} when the run exits`],
+  replace: ["The task gets a new prompt.", "Queue new prompt", (n) => `new prompt for task ${n}`],
+  "stop-after-task": ["The mission stops after that task.", "Queue stop", (n) => `stop after task ${n}`],
+  handoff: ["The next run uses another provider.", "Hand off", (route) => `hand off to ${route} at the next safe point`],
 };
 const OPEN = /^(RUNNING|VERIFYING|BLOCKED|READY|QUEUED|PAUSED|CREATED)$/;
 const field = (id: string, label: string, control: HTMLElement): HTMLElement => h("div", { class: "field" }, h("label", { for: id }, label), control);
@@ -38,12 +32,15 @@ function chip(o: SteerTarget, kind: api.SteerKind, text: string): void {
   const node = h("span", { class: "queued-chip" }, `Queued: ${text}`);
   o.chips.append(node);
   o.chips.hidden = false;
-  const stop = onEvents((events) => {
+  const stop = (): void => document.removeEventListener("bridge-events", seen);
+  const seen = (e: Event): void => {
+    const events = (e as CustomEvent<api.BridgeEvent[]>).detail;
     if (!events.some((e) => (e.mission_id ?? o.missionId) === o.missionId && done.test(String(e.kind)))) return;
     node.remove();
     o.chips.hidden = !o.chips.childElementCount;
     stop();
-  });
+  };
+  document.addEventListener("bridge-events", seen);
   o.own(stop);
 }
 
@@ -75,14 +72,14 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
           pick.value = String((["VERIFYING", "RUNNING"].map((st) => list.find((t) => t["status"] === st)).find(Boolean) ?? list[0])?.["ordinal"] ?? "");
           pick.disabled = !list.length;
         });
-    const answer = confirmDialog({ title: label, message: `${HELP[kind]} Applied at the next safe point.`, confirmLabel: handoff ? "Hand off" : `Queue ${{ review: "review", verify: "verify", replace: "new prompt" }[kind as string] ?? "stop"}`, details: h("div", {}, ...body) });
+    const answer = confirmDialog({ title: label, message: `${KINDS[kind][0]} Applied at the next safe point.`, confirmLabel: KINDS[kind][1], details: h("div", {}, ...body) });
     (withPrompt ? text : handoff ? route : pick).focus();
     if ((await answer) === null) return;
     await loaded.catch(() => {});
     const bad = handoff ? !(request.route = route.value.trim()) : !(request.task = Number(pick.value)) || (kind === "replace" && !text.value.trim());
     if (bad) return announce(handoff ? "Name the provider or route to hand off to." : kind === "replace" ? "Replace needs a task and the new prompt." : "This mission has no task to steer.", "rejected");
     if (withPrompt) request.prompt = text.value.trim();
-    what = handoff ? `hand off to ${request.route} at the next safe point` : WHAT[kind as keyof typeof WHAT](request.task!);
+    what = KINDS[kind][2](handoff ? request.route! : request.task!);
   }
   if (reportOutcome(await api.steer(o.workerName, o.missionId, request), `Queued: ${what}`, `queue ${what}`)) chip(o, kind, what);
 }

@@ -7,45 +7,43 @@ export { eventClass, type EventClass };
 export type EventCategory = "task" | "command" | "worker" | "terminal" | "provider" | "system";
 
 const value = (x: unknown, max = 80): string => typeof x === "string" ? x.replace(/[\r\n\t]/g, " ").slice(0, max) : "";
-const taskText = (event: Pick<BridgeEvent, "task_id">): string => event.task_id == null ? "" : `Task ${event.task_id}`;
+
+const ALIAS: Record<string, EventCategory> = { verification: "task", dependency: "task", operation: "provider", capacity: "provider" };
+
+export function eventCategory(kind: string): EventCategory {
+  const word = /^(task|verification|dependency|command|worker|terminal|provider|operation|capacity)-/.exec(kind)?.[1];
+  return word ? ALIAS[word] ?? (word as EventCategory) : "system";
+}
 
 /** One operator-facing event phrase source for overview and mission activity. */
 export function humanizeEvent(event: Pick<BridgeEvent, "kind" | "task_id" | "data">): string {
-  const kind = event.kind;
+  const { kind, task_id: taskId } = event;
   const data = event.data ?? {};
-  const task = taskText(event);
-  const from = value(data["from"], 24);
-  const to = value(data["to"], 24);
-  const transition = from && to ? `${from} → ${to}` : "";
-  const owner = value(data["route"] ?? data["provider"] ?? data["station"] ?? data["route_id"], 40);
-  const model = value(data["model"] ?? data["selected_model"], 40);
-  const reason = value(data["reason"] ?? data["rotation_reason"], 80);
-  const details: string[] = [];
-  if (transition) details.push(transition);
-  if (task && (/^(task-|verification-|dependency-)/.test(kind) || kind === "operation-running")) details.unshift(task);
-  if (owner && kind !== "operation-running") details.push(owner);
-  if (kind.startsWith("worker-") && value(data["name"])) details.push(value(data["name"], 40));
-  if (model) details.push(model);
-  if (kind.startsWith("command-") && value(data["command"])) details.push(value(data["command"]));
-  if (kind === "operation-exited" && Number.isFinite(Number(data["exit_code"]))) details.push(`exit ${String(data["exit_code"]).slice(0, 8)}`);
-  if (reason && (["provider-wait", "provider-handoff", "provider-handoff-exhausted", "operation-uncertain", "operation-aborted-before-launch"].includes(kind) || kind.startsWith("terminal-"))) details.push(reason);
-
+  /** The first of `keys` that is present, as clipped text. */
+  const text = (max: number, ...keys: string[]): string => value(keys.map((key) => data[key]).find((x) => x != null), max);
+  const category = eventCategory(kind);
+  const running = kind === "operation-running";
+  const owner = text(40, "route", "provider", "station", "route_id");
+  const model = text(40, "model", "selected_model");
+  const command = text(80, "command");
+  // A kind without a table entry reads as its own name: "task-added" becomes "Task added".
   const base = TUI_EVENT_PHRASES[kind] ?? kind.replace(/[-_.]/g, " ").replace(/^./, (c) => c.toUpperCase());
-  if (kind.startsWith("command-") && value(data["command"])) return `${base}: ${value(data["command"])}`;
+  if (category === "command" && command) return `${base}: ${command}`;
   if (kind === "provider-selection") return `${base}${owner ? ` ${owner}` : ""}${model ? ` (${model})` : ""}`;
-  if (kind === "operation-running" && owner) details.unshift(owner);
-  if (kind === "mission-created" && value(data["name"])) details.push(value(data["name"], 60));
-  if (kind === "task-added" && value(data["title"])) details.push(value(data["title"], 60));
+  const from = text(24, "from");
+  const to = text(24, "to");
+  const details = [
+    running ? owner : "",
+    taskId != null && (category === "task" || running) ? `Task ${taskId}` : "",
+    from && to ? `${from} → ${to}` : "",
+    running ? "" : owner,
+    category === "worker" ? text(40, "name") : "",
+    model,
+    kind === "operation-exited" && Number.isFinite(Number(data["exit_code"])) ? `exit ${String(data["exit_code"]).slice(0, 8)}` : "",
+    /^(provider-(wait|handoff(-exhausted)?)|operation-(uncertain|aborted-before-launch))$/.test(kind) || category === "terminal" ? text(80, "reason", "rotation_reason") : "",
+    kind === "mission-created" ? text(60, "name") : kind === "task-added" ? text(60, "title") : "",
+  ].filter(Boolean);
   return details.length ? `${base}${base ? " · " : ""}${details.join(" · ")}` : base;
-}
-
-export function eventCategory(kind: string): EventCategory {
-  if (kind.startsWith("task-") || kind.startsWith("verification-") || kind.startsWith("dependency-")) return "task";
-  if (kind.startsWith("command-")) return "command";
-  if (kind.startsWith("worker-")) return "worker";
-  if (kind.startsWith("terminal-")) return "terminal";
-  if (kind.startsWith("provider-") || kind.startsWith("operation-") || kind.startsWith("capacity-")) return "provider";
-  return "system";
 }
 
 export function transitionSummary(data: Record<string, unknown>): string | null {
@@ -63,7 +61,7 @@ export function allowedEventData(data: Record<string, unknown> | null | undefine
   const out: Record<string, string | number | boolean> = {};
   for (const key of RAW_EVENT_FIELDS) {
     const v = data?.[key];
-    if (typeof v === "string") out[key] = v.replace(/[\r\n\t]/g, " ").slice(0, 200);
+    if (typeof v === "string") out[key] = value(v, 200);
     else if (typeof v === "number" || typeof v === "boolean") out[key] = v;
   }
   return out;

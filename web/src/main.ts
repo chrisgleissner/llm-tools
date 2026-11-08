@@ -11,10 +11,10 @@ import { inbox } from "./views/inbox";
 // Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
 // The page module itself, not a wrapper that would import it in turn: a second dynamic import is a second round trip before the page can be drawn (T37). lazyView shows the skeleton.
 const loadMission = withCss("mission", () => import("./views/mission/page"));
-const loadAuth = withCss("auth", () => import("./views/auth"));
+const loadAuth = withCss("auth", () => import("./views/routes"));
 // The account page uses the definition-list rules of the fleet stylesheet (.facts) as well as its own.
 const loadAccount = withCss("fleet", loadAuth);
-const loadFleet = withCss("fleet", () => import("./views/fleet"));
+const loadFleet = withCss("fleet", () => import("./views/routes"));
 
 const app = document.getElementById("app") as HTMLElement;
 let authed = false;
@@ -98,7 +98,7 @@ async function route(): Promise<void> {
     const n = notice;
     notice = null;
     document.title = state.setup_required ? "First-run setup - LLM Bridge" : "Sign in - LLM Bridge";
-    let login: typeof import("./views/auth");
+    let login: typeof import("./views/routes");
     try {
       login = await loadAuth();
     } catch {
@@ -125,7 +125,7 @@ async function route(): Promise<void> {
   }
   if (state.password_change_required) {
     stopLive();
-    let reset: typeof import("./views/auth");
+    let reset: typeof import("./views/routes");
     try {
       reset = await loadAuth();
     } catch {

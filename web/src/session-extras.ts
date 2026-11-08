@@ -7,17 +7,11 @@ import { confirmDialog } from "./ui";
 
 export const transcriptText = (t: Terminal): string => {
   const b = t.buffer.active;
-  const lines: string[] = [];
-  for (let i = 0; i < b.length; i++) lines.push(b.getLine(i)?.translateToString(true) ?? "");
-  while (lines.length && !lines[lines.length - 1]) lines.pop();
-  return lines.join("\n");
+  return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true) ?? "").join("\n").replace(/\n+$/, "");
 };
 
 /** The explicit "resize the shared session to this screen" confirmation. */
-export async function confirmResize(): Promise<boolean> {
-  const answer = confirmDialog({ title: "Resize the session to this screen?", message: "Other viewers and the tmux station will change size.", confirmLabel: "Resize" });
-  return (await answer) !== null;
-}
+export const confirmResize = async (): Promise<boolean> => (await confirmDialog({ title: "Resize the session to this screen?", message: "Other viewers and the tmux station will change size.", confirmLabel: "Resize" })) !== null;
 
 export interface Mode {
   dispose(): void;
@@ -102,6 +96,8 @@ export interface KeyIo {
   writer(): boolean;
 }
 
+const keepFocus = (e: Event): void => e.preventDefault();
+
 /** The on-screen key bar: six keys and "...", which opens a second row. An empty byte string marks a sticky modifier. */
 export function keyBar(bar: HTMLElement, io: KeyIo): { enable(on: boolean, why: string): void; typed(d: string): string } {
   const extra = h("div", { class: "keybar-row", id: "terminal-keys-more", hidden: true });
@@ -112,22 +108,30 @@ export function keyBar(bar: HTMLElement, io: KeyIo): { enable(on: boolean, why: 
   };
   const add = (to: HTMLElement, keys: string[][]): void => {
     for (const [id = "", text = "", label = "", bytes = ""] of keys) {
-      const b = h("button", { type: "button", class: "btn key", id: `key-${id}`, "aria-label": label || null }, text);
-      b.addEventListener("mousedown", (e) => e.preventDefault());
-      b.addEventListener("click", () => {
-        if (!io.writer()) return;
-        if (!bytes) arm(armed === id ? "" : id);
-        else io.write(/^[A-D]$/.test(bytes) ? `${io.appKeys() ? "\x1bO" : "\x1b["}${bytes}` : bytes);
-        io.focus();
-      });
-      if (!bytes) b.setAttribute("aria-pressed", "false");
-      to.append(b);
+      to.append(
+        h(
+          "button",
+          {
+            type: "button",
+            class: "btn key",
+            id: `key-${id}`,
+            "aria-label": label || null,
+            "aria-pressed": bytes ? null : "false",
+            onmousedown: keepFocus,
+            onclick: () => {
+              if (!io.writer()) return;
+              if (!bytes) arm(armed === id ? "" : id);
+              else io.write(/^[A-D]$/.test(bytes) ? `${io.appKeys() ? "\x1bO" : "\x1b["}${bytes}` : bytes);
+              io.focus();
+            },
+          },
+          text,
+        ),
+      );
     }
   };
   add(bar, [["esc", "Esc", "Esc, the Escape key", "\x1b"], ["tab", "Tab", "Tab", "\t"], ["ctrl", "Ctrl", "Ctrl, applies to the next key"], ["alt", "Alt", "Alt, applies to the next key"], ["up", "\u2191", "Arrow up", "A"], ["down", "\u2193", "Arrow down", "B"]]);
-  const more = h("button", { type: "button", class: "btn more", id: "key-more", "aria-label": "More keys", "aria-expanded": "false", "aria-controls": "terminal-keys-more" }, "...");
-  more.addEventListener("mousedown", (e) => e.preventDefault());
-  more.addEventListener("click", () => more.setAttribute("aria-expanded", String((extra.hidden = !extra.hidden) === false)));
+  const more = h("button", { type: "button", class: "btn more", id: "key-more", "aria-label": "More keys", "aria-expanded": "false", "aria-controls": "terminal-keys-more", onmousedown: keepFocus, onclick: () => more.setAttribute("aria-expanded", String((extra.hidden = !extra.hidden) === false)) }, "...");
   add(extra, [["left", "\u2190", "Arrow left", "D"], ["right", "\u2192", "Arrow right", "C"], ["pgup", "PgUp", "PgUp, page up", "\x1b[5~"], ["pgdn", "PgDn", "PgDn, page down", "\x1b[6~"]]);
   bar.append(more, extra);
   return {
