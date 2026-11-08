@@ -40,6 +40,9 @@ ACTIVE_OPERATION_STATUSES = _names(O.INTENT, O.PREPARED, O.RUNNING)
 # Mission statuses that cannot be left, and the same plus FAILED (a failed mission can still be resumed).
 FINISHED_MISSION_STATUSES = _names(M.COMPLETED, M.CANCELLED)
 ENDED_MISSION_STATUSES = _names(M.COMPLETED, M.CANCELLED, M.FAILED)
+# Statuses in which `mission delete` may remove a mission: it never started (CREATED) or it has ended or
+# been stopped. RUNNING, PAUSED and STOPPING missions have a controller and are refused.
+DELETABLE_MISSION_STATUSES = _names(M.CREATED, M.COMPLETED, M.FAILED, M.CANCELLED, M.STOPPED)
 # Statuses in which Bridge closes an idle provider station: ended missions and STOPPED.
 STATION_CLOSING_MISSION_STATUSES = _names(M.COMPLETED, M.CANCELLED, M.FAILED, M.STOPPED)
 # A mission that has not finished and is either created or being worked on.

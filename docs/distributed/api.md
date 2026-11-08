@@ -259,6 +259,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
+| `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
 | `mission colour` | Typed `mission.settings.patch` field `colour`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission color` | Alias of `mission colour`; same typed settings field. |
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
@@ -408,7 +409,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--to` | `mission.steer` typed field `route` for handoff (same as `--route`). |
 | `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
 | `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
-| `--yes` | Confirmation for `cancel`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. |
+| `--yes` | Confirmation for `cancel` and `mission delete`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. `mission delete` always asks (a mission the worker would refuse gets no question, only the refusal), and the prompt names the mission. |
 | `-f` | Short form of `--follow` for `events`. |
 | `-j` | Short form of `--json`. |
 | `-m` | Short form of `--mission`. |
@@ -449,6 +450,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/missions` |
 | `POST /api/v1/missions` |
 | `GET /api/v1/missions/{id}` |
+| `DELETE /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
 | `GET /api/v1/missions/{id}/agents` |

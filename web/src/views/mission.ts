@@ -5,7 +5,7 @@ import { icon } from "../icons";
 import { currentWorkSummary } from "../current-work";
 import { isStale, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
-import { announce, confirmDialog } from "../ui";
+import { announce, announceNextPage, confirmDialog } from "../ui";
 import { eventCategory, humanizeEvent, isPlumbing, transitionSummary, type EventCategory } from "../event-humanizer";
 
 const TASK_PAGE = 25;
@@ -25,6 +25,8 @@ interface Task {
 
 type TaskSort = "ordinal" | "title" | "status" | "priority";
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+/** Missions `mission delete` accepts: never started, or ended or stopped (the same set as the worker). */
+const DELETABLE = new Set(["CREATED", "COMPLETED", "FAILED", "CANCELLED", "STOPPED"]);
 const STATUS_ORDER = ["RUNNING", "VERIFYING", "BLOCKED", "READY", "QUEUED", "PAUSED", "FAILED", "COMPLETED", "CANCELLED"];
 
 export function missionDetail(root: HTMLElement, workerName: string, missionId: string): () => void {
@@ -116,6 +118,30 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     await Promise.all([loadTasks(), loadSnapshot()]);
   }
 
+  /** PRD-038: confirm with the mission title, delete on the worker, then go back to the missions list with a toast. */
+  async function deleteThisMission(): Promise<void> {
+    const title = entry()?.mission?.name || missionId;
+    const ok = await confirmDialog({
+      title: "Delete mission?",
+      message: `Permanently delete mission "${title}" on ${workerName}, with its tasks, events and logs. This cannot be undone.`,
+      confirmLabel: "Delete mission",
+      danger: true,
+    });
+    if (ok === null) return;
+    if (!online()) {
+      announce("Delete mission: the worker is offline.", "failed");
+      return;
+    }
+    const r = await api.deleteMission(workerName, missionId);
+    if (r.outcome !== "applied") {
+      announce("Delete mission.", r.outcome, r.message);
+      return;
+    }
+    announceNextPage(`Deleted mission "${title}".`, "applied");
+    history.pushState(null, "", "/missions");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+
   async function confirmed(task: Task, verb: string, operation: string, opts: { danger?: boolean; reason?: boolean; params?: Record<string, unknown> } = {}): Promise<void> {
     const reason = await confirmDialog({
       title: `${verb} task ${task.ordinal}?`,
@@ -163,6 +189,11 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
           })(),
         { kind: `${danger ? "danger" : kind} small`.trim(), disabled: !online(), title: online() ? undefined : "Worker is offline" },
       );
+    const deleteButton = (): HTMLButtonElement => {
+      const b = button("Delete mission", () => void deleteThisMission(), { kind: "danger small", disabled: !online(), title: online() ? undefined : "Worker is offline" });
+      b.dataset.action = "delete-mission";
+      return b;
+    };
     fill(
       header,
       h("nav", { "aria-label": "Breadcrumb", class: "crumbs" }, h("a", { href: "/missions" }, "Missions"), " / ", h("span", {}, m?.name || missionId)),
@@ -184,6 +215,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       mb("Pause mission", "mission.pause"),
       mb("Continue", "mission.continue"),
       mb("Cancel mission", "mission.cancel", true),
+      m && DELETABLE.has(m.status) ? deleteButton() : null,
       !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
     ].flatMap((node) => node ? [node] : []);
     actionBox.replaceChildren(...actions);

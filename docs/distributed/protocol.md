@@ -58,7 +58,7 @@ whole numbers with `invalid-message`.
 | `command` | coordinator → worker | A `CommandRequest` object. |
 | `command.ack` | worker → coordinator | `request_id`, `status`: `received` or `duplicate`. Acknowledges delivery only. |
 | `command.result` | worker → coordinator | A `CommandResult` object. |
-| `events` | worker → coordinator | `after`, `through`, `events` (ascending by id), optional `mission_cursor` and changed `missions` summaries. A summary-only update has an empty event list and `through == after`; workers use this bounded path to replicate a newly pending provider question that has no Bridge database event. |
+| `events` | worker → coordinator | `after`, `through`, `events` (ascending by id), optional `mission_cursor`, changed `missions` summaries and `deleted_missions` (mission tombstones, see Mission deletion). A summary-only update has an empty event list and `through == after`; workers use this bounded path to replicate a newly pending provider question that has no Bridge database event. |
 | `events.nack` | coordinator → worker | `expected_after`: the coordinator's stored cursor; the worker resends from there. |
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
@@ -181,6 +181,57 @@ it does not resend the full inventory with every task event or heartbeat. The
 coordinator applies summary upserts and cursors atomically. `needs_you` contains
 only the existing status projection's provider message and answer command, not
 terminal content or transcript records.
+
+## Mission deletion (PRD-038)
+
+`llm-bridge mission delete` removes a mission from the worker (database rows, runtime directory with provider
+run logs and verifier files, lock files, the socket of a dead station) and from the coordinator. The change is
+additive to protocol v1: one new operation, `mission.delete`, and one new optional field of `events`.
+
+**Operation.** `mission.delete` is a mutating operation with the parameter `confirm` (boolean). The worker
+rejects a request without `confirm: true` with error code `confirmation-required`. A mission that never started
+or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted and the result is
+`{"status": "DELETED", "mission_id": <full id>, "name", "previous_status", "deleted_at", "removed": {...}}` with
+outcome `applied`. `RUNNING`, `PAUSED` and `STOPPING`, a mission whose controller lock is held and a mission with a
+live provider station are rejected with error code `conflict` and nothing changes. A mission that does not exist
+(an ID or prefix that matches nothing, or a repeated delete) is rejected with `not-found`; a prefix that matches
+several missions is also `not-found`. The operation is advertised only by workers enrolled with `--allow-control`,
+like the other mutating operations.
+
+**Tombstone.** The same transaction that deletes the rows records a tombstone in the worker database (table
+`mission_tombstones`: mission ID, name, final status, deletion time, replication time; created by the first deletion,
+so the Bridge schema number does not change; at most 1000 rows and 90 days are kept). The worker replicates pending
+tombstones in an `events` message that carries them alone:
+
+```json
+{"after": 812, "through": 812, "events": [], "deleted_missions": ["<mission id>", "..."]}
+```
+
+`after` and `through` are the worker's current cursor, so the message moves no cursor. It holds at most 100 mission
+IDs (1-128 characters of `[A-Za-z0-9_.-]`). Like every `events` message it is the one batch in flight, and the
+worker marks the tombstones replicated when the `pong` that follows the message arrives. A tombstone that is not
+confirmed (connection lost, `events.nack`) is sent again after the next welcome.
+
+**Coordinator.** For each ID the coordinator, in one transaction, inserts a tombstone for the pair (worker, mission
+ID), deletes its mission summary and every stored event whose `mission_id` is that ID. It then writes the audit entry
+`mission.delete` (only the first time) and tells browsers to read the mission list again. A repeated tombstone, and a
+tombstone for a mission the coordinator never stored, are accepted and change nothing. While a tombstone exists the
+coordinator drops, without error, every event and every mission summary of that mission in later `events` messages
+(the cursor still advances past them). This is what keeps a batch that was already in flight, or one that an offline
+worker had queued, from bringing the mission back. A `hello` that lists the mission removes its tombstone, because
+the worker's own list is authoritative (for example after the worker restored an older database backup). Tombstones are
+kept for 90 days and at most 10 000 per worker; the oldest go first.
+
+The coordinator also applies the deletion when it sees the result of a `mission.delete` command: for outcome
+`applied` it uses the `mission_id` of the result, and for a `not-found` rejection it uses the request's mission ID
+when that is exactly a stored mission. Consoles therefore see the mission disappear without waiting for the next
+replication. Any other result (`conflict`, `confirmation-required`) leaves the coordinator's copy as it is.
+
+**Older coordinators.** A coordinator from before this change rejects the unknown `deleted_missions` field with an
+`error` message (`invalid-message`, `in_reply_to` the message ID). The worker keeps the tombstones pending, does
+not mark them replicated and stops offering them for the rest of that connection. Nothing else is lost, because
+the tombstone message carries no events. Upgrade the coordinator before the workers; until then the coordinator keeps
+listing the deleted mission as stale.
 
 ## Generation fencing (PROTO-010)
 

@@ -485,3 +485,63 @@ def test_remote_cancel_asks_when_the_worker_cannot_say_whether_the_mission_is_fi
     routes = {("GET", "/api/v1/missions/m1"): (202, {"state": "pending", "result": None})}
     code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
     assert code == 2 and "Pass --yes" in capsys.readouterr().err
+
+
+# --- mission delete (PRD-038): the same confirmation as locally, and DELETE /api/v1/missions/{id} -----------
+
+DELETE_DONE = (200, {"state": "done", "result": {"outcome": "applied", "result": {"status": "DELETED", "mission_id": "m1", "name": "Parser", "detail": 'Deleted mission m1 "Parser" (3 tasks, 40 events, 2 files)'}}})
+DELETE_REFUSED = (200, {"state": "done", "result": {"outcome": "rejected", "result": None,
+                                                     "error": {"code": "conflict", "message": "mission m1 is running, so it cannot be deleted; stop it with: llm-bridge stop --mission m1", "details": {}}}})
+
+
+def _remote_delete(monkeypatch, routes, *argv):
+    api = client(routes)
+    monkeypatch.setattr(remote, "load", lambda env=None: remote.RemoteConfig("https://c:8443", TOKEN))
+    monkeypatch.setattr(remote, "Client", lambda config, **kwargs: api)
+    return main(["--target", "ws", "mission", "delete", *argv]), api
+
+
+def test_remote_delete_with_yes_sends_a_confirmed_delete_request_without_asking(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    code, api = _remote_delete(monkeypatch, {("DELETE", "/api/v1/missions/m1"): DELETE_DONE}, "m1", "--yes")
+    assert code == 0
+    assert 'Deleted mission m1 "Parser"' in capsys.readouterr().out
+    (key, body, headers, url), = api.opener.calls
+    assert key == ("DELETE", "/api/v1/missions/m1") and "worker=ws" in url
+    assert body["confirm"] is True and "yes" not in body  # the flag is never a request field; the confirmation is
+    assert any(name.lower() == "idempotency-key" for name in headers)
+
+
+def test_remote_delete_without_yes_and_without_a_terminal_asks_for_yes_and_sends_nothing(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("COMPLETED"), ("DELETE", "/api/v1/missions/m1"): DELETE_DONE}
+    code, api = _remote_delete(monkeypatch, routes, "--mission", "m1")
+    assert code == 2
+    assert "Pass --yes" in capsys.readouterr().err
+    assert ("DELETE", "/api/v1/missions/m1") not in [call[0] for call in api.opener.calls]
+
+
+@pytest.mark.parametrize(("answer", "code", "deleted"), [("y\n", 0, True), ("\n", 2, False)])
+def test_remote_delete_on_a_terminal_asks_with_the_mission_name(monkeypatch, answer, code, deleted):
+    errors = _Terminal()
+    monkeypatch.setattr("sys.stdin", _Terminal(answer))
+    monkeypatch.setattr("sys.stderr", errors)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("COMPLETED", "Parser"), ("DELETE", "/api/v1/missions/m1"): DELETE_DONE}
+    result, api = _remote_delete(monkeypatch, routes, "m1")
+    assert result == code
+    assert "Parser" in errors.getvalue() and "cannot be undone" in errors.getvalue()
+    assert (("DELETE", "/api/v1/missions/m1") in [call[0] for call in api.opener.calls]) is deleted
+
+
+def test_remote_delete_of_a_running_mission_reports_the_workers_refusal_without_asking(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("RUNNING"), ("DELETE", "/api/v1/missions/m1"): DELETE_REFUSED}
+    code, _api = _remote_delete(monkeypatch, routes, "m1")
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "is running, so it cannot be deleted" in err and "llm-bridge stop --mission m1" in err
+
+
+def test_remote_delete_needs_the_mission_named(monkeypatch, capsys):
+    code, _api = _remote_delete(monkeypatch, {}, "--yes")
+    assert code == 2 and "name the mission to delete" in capsys.readouterr().err

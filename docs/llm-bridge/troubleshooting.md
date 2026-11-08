@@ -222,7 +222,10 @@ Use more characters of the ID, copied from `llm-bridge mission list`.
 
 Exit 4. The mission or task is not in a state that allows the command: `start`
 on a cancelled mission, `task approve` on a task that is not in REVIEW, `finish`
-without a native provider, or `attach` without a station.
+without a native provider, `attach` without a station, or `mission delete` on a
+mission that is running, paused or stopping (stop it first, or cancel it) or that
+still has a controller or an open provider station (`llm-bridge gc` closes the
+idle stations of finished missions).
 
 The message names the state. `llm-bridge status` shows what the mission is doing
 now, and `llm-bridge help states` explains each state. A repeated `pause` or
@@ -236,6 +239,13 @@ on, or two operators changed it at once. Nothing was applied.
 
 Run `llm-bridge task show --task N` to read the current text, then repeat the
 command if it still makes sense.
+
+### confirmation-required
+
+A request to delete a mission (`mission.delete`, or `DELETE /api/v1/missions/ID`) did
+not contain `confirm: true`, so nothing was deleted. The command line never sends this:
+`llm-bridge mission delete` asks first, or takes `--yes`. A script that calls the REST
+resource must send the body `{"confirm": true}`.
 
 ### schema-too-new
 

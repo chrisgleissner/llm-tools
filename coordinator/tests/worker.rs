@@ -513,7 +513,7 @@ async fn request_id_idempotence_and_refusals() {
     assert_eq!((st, body["error"]["code"].as_str()), (409, Some("request-id-conflict")));
     // unsupported operation is refused without sending
     let (st, body) = api
-        .post("/api/v1/commands", json!({"target": "w1", "request": request("u1", "mission.delete")}))
+        .post("/api/v1/commands", json!({"target": "w1", "request": request("u1", "mission.teleport")}))
         .await;
     assert_eq!((st, body["error"]["code"].as_str()), (422, Some("unsupported-operation")));
     assert_eq!(api.get("/api/v1/commands/u1").await.0, 404);

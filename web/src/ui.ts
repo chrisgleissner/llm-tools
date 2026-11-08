@@ -26,10 +26,18 @@ export const OUTCOME_HELP: Record<Outcome, string> = {
   uncertain: "The request may or may not have been applied. Refresh and check before trying again.",
 };
 
+const nextRoute: Array<[string, ToastKind, string]> = [];
+
+/** Toast for the page that is about to replace this one: every route change mounts a fresh toast box, so it is shown once that page is up. */
+export function announceNextPage(message: string, kind: ToastKind = "info", detail = ""): void {
+  nextRoute.push([message, kind, detail]);
+}
+
 export function mountFeedback(root: HTMLElement): void {
   liveRegion = h("div", { id: "live-status", class: "sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true" });
   toastBox = h("div", { id: "toasts", class: "toasts" });
   root.append(liveRegion, toastBox);
+  for (const [message, kind, detail] of nextRoute.splice(0)) announce(message, kind, detail);
 }
 
 hooks.toast = (message) => announce(message);

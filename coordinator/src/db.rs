@@ -354,6 +354,20 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
 
+/// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
+/// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
+/// with `IF NOT EXISTS` on every open instead of by a numbered migration: it adds no column to an existing
+/// table, an older coordinator ignores it and the schema number stays as it was.
+const MISSION_TOMBSTONES: &str = "CREATE TABLE IF NOT EXISTS mission_tombstones(
+  worker TEXT NOT NULL REFERENCES workers(name) ON DELETE CASCADE, mission_id TEXT NOT NULL, deleted_at INTEGER NOT NULL,
+  PRIMARY KEY(worker, mission_id)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS mission_tombstones_age ON mission_tombstones(deleted_at);";
+/// A tombstone is kept this long. A worker replicates it as soon as it is connected, so the window only has
+/// to cover a worker that was offline between deleting the mission and reconnecting.
+pub const TOMBSTONE_KEEP_SECS: i64 = 90 * 86_400;
+/// Tombstones kept per worker; the oldest go first.
+pub const MAX_TOMBSTONES_PER_WORKER: i64 = 10_000;
+
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
@@ -527,6 +541,7 @@ impl Db {
             }
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
         }
+        conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -1308,6 +1323,9 @@ impl Db {
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    // The hello is the worker's own list: a mission it still has is not deleted, whatever an
+                    // older tombstone says (for example after the worker restored an earlier backup).
+                    tx.execute("DELETE FROM mission_tombstones WHERE worker=? AND mission_id=?", params![name, id])?;
                     tx.execute(
                         "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
                         params![name, id, m.to_string()],
@@ -1346,6 +1364,12 @@ impl Db {
         if after != cursor as u64 {
             return Ok(EventsOutcome::Nack { expected: cursor as u64 });
         }
+        let tombstoned: std::collections::HashSet<String> = {
+            let mut st = tx.prepare_cached("SELECT mission_id FROM mission_tombstones WHERE worker=?")?;
+            let rows = st.query_map(params![worker], |r| r.get::<_, String>(0))?;
+            rows.collect::<R<std::collections::HashSet<String>>>()?
+        };
+        let is_tombstoned = |value: &Value| value.get("mission_id").and_then(Value::as_str).is_some_and(|id| tombstoned.contains(id));
         let known = self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).get(worker).copied();
         let known = match known {
             Some(n) => n,
@@ -1354,6 +1378,9 @@ impl Db {
         {
             let mut insert = tx.prepare_cached("INSERT OR REPLACE INTO events(worker, id, body) VALUES(?,?,?)")?;
             for e in events {
+                if is_tombstoned(e) {
+                    continue; // a late replication of a deleted mission; the cursor still moves past it
+                }
                 let id = e.get("id").and_then(Value::as_u64).unwrap_or(0) as i64;
                 insert.execute(params![worker, id, e.to_string()])?;
             }
@@ -1367,6 +1394,9 @@ impl Db {
             )?;
             for mission in missions {
                 if let Some(id) = mission.get("id").and_then(Value::as_str) {
+                    if tombstoned.contains(id) {
+                        continue;
+                    }
                     upsert.execute(params![worker, id, mission.to_string()])?;
                 }
             }
@@ -1376,7 +1406,8 @@ impl Db {
             "UPDATE workers SET event_cursor=?1, last_event_at=?2, mission_cursor=COALESCE(?3, mission_cursor) WHERE name=?4",
             params![through as i64, crate::now(), mission_cursor.map(|m| m as i64), worker],
         )?;
-        let mut count = known + events.len() as u64;
+        let stored = events.iter().filter(|e| !is_tombstoned(e)).count();
+        let mut count = known + stored as u64;
         if count > max {
             // Retention runs in one pass once the cap is exceeded and keeps `max - max / 10` events, so a
             // worker at its cap does not delete a few of the oldest rows (and rebalance the left edge
@@ -1390,10 +1421,69 @@ impl Db {
         }
         tx.commit()?;
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(worker.to_string(), count);
-        Ok(EventsOutcome::Accepted {
-            cursor: through,
-            stored: events.len(),
-        })
+        Ok(EventsOutcome::Accepted { cursor: through, stored })
+    }
+
+    /// Record that `worker` deleted these missions: remove the coordinator's copy (summary and stored events)
+    /// and keep a tombstone. Idempotent: a repeated tombstone changes nothing and is not counted again.
+    /// Returns the identifiers that were tombstoned by this call for the first time.
+    pub fn missions_tombstone(&self, worker: &str, mission_ids: &[String]) -> R<Vec<String>> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let now = crate::now();
+        let mut fresh = Vec::new();
+        let mut removed_events = 0usize;
+        for id in mission_ids {
+            let added = tx.execute(
+                "INSERT OR IGNORE INTO mission_tombstones(worker, mission_id, deleted_at) VALUES(?,?,?)",
+                params![worker, id, now],
+            )?;
+            tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])?;
+            removed_events += tx.execute(
+                "DELETE FROM events WHERE worker=? AND json_extract(body, '$.mission_id')=?",
+                params![worker, id],
+            )?;
+            if added > 0 {
+                fresh.push(id.clone());
+            }
+        }
+        tx.execute("DELETE FROM mission_tombstones WHERE deleted_at < ?", params![now - TOMBSTONE_KEEP_SECS])?;
+        tx.execute(
+            "DELETE FROM mission_tombstones WHERE worker=?1 AND mission_id NOT IN \
+             (SELECT mission_id FROM mission_tombstones WHERE worker=?1 ORDER BY deleted_at DESC, mission_id LIMIT ?2)",
+            params![worker, MAX_TOMBSTONES_PER_WORKER],
+        )?;
+        tx.commit()?;
+        if removed_events > 0 {
+            let mut counts = self.event_counts.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(n) = counts.get_mut(worker) {
+                *n = n.saturating_sub(removed_events as u64);
+            }
+        }
+        Ok(fresh)
+    }
+
+    pub fn mission_tombstoned(&self, worker: &str, mission_id: &str) -> R<bool> {
+        self.c()
+            .query_row(
+                "SELECT 1 FROM mission_tombstones WHERE worker=? AND mission_id=?",
+                params![worker, mission_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+
+    /// Whether the coordinator holds a summary for exactly this mission of this worker.
+    pub fn mission_known(&self, worker: &str, mission_id: &str) -> R<bool> {
+        self.c()
+            .query_row(
+                "SELECT 1 FROM missions WHERE worker=? AND mission_id=?",
+                params![worker, mission_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
     }
 
     pub fn events_list(&self, worker: Option<&str>, after: u64, limit: u64) -> R<Vec<Value>> {
@@ -1573,6 +1663,7 @@ impl Db {
             "DELETE FROM commands WHERE state='done' AND updated_at < ?",
             params![now - COMPLETED_COMMAND_KEEP_SECS],
         )?;
+        c.execute("DELETE FROM mission_tombstones WHERE deleted_at < ?", params![now - TOMBSTONE_KEEP_SECS])?;
         c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
         c.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", params![now])?;
         c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
