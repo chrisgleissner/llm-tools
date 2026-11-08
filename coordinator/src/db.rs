@@ -1552,7 +1552,7 @@ impl Db {
     /// and keep a tombstone. Idempotent: a repeated tombstone changes nothing and is not counted again.
     /// Returns the identifiers that were tombstoned by this call for the first time.
     pub fn missions_tombstone(&self, worker: &str, mission_ids: &[String]) -> R<Vec<String>> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let now = crate::now();
         let mut fresh = Vec::new();
@@ -1588,7 +1588,7 @@ impl Db {
     }
 
     pub fn mission_tombstoned(&self, worker: &str, mission_id: &str) -> R<bool> {
-        self.c()
+        self.c()?
             .query_row(
                 "SELECT 1 FROM mission_tombstones WHERE worker=? AND mission_id=?",
                 params![worker, mission_id],
@@ -1600,7 +1600,7 @@ impl Db {
 
     /// Whether the coordinator holds a summary for exactly this mission of this worker.
     pub fn mission_known(&self, worker: &str, mission_id: &str) -> R<bool> {
-        self.c()
+        self.c()?
             .query_row(
                 "SELECT 1 FROM missions WHERE worker=? AND mission_id=?",
                 params![worker, mission_id],
