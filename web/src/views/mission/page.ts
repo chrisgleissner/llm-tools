@@ -17,6 +17,7 @@ import { SHORTCUT_EVENT } from "../../shell";
 import { sessionReserve } from "../../session-box";
 import { loadSession, type SessionHandle } from "./session";
 import { tasksPanel } from "./tasks";
+import { ensureXtermCss } from "../../xterm-css";
 import { asOfText, type PageCtx, type Tab, type Task } from "./types";
 
 /** Events of one worker after a cursor, read from the coordinator's own store: no command reaches the worker. Each row is `{id, event}`. */
@@ -352,7 +353,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       }
       // The terminal chunk is fetched and evaluated after the header and the tasks were painted: its evaluation is one long task that would otherwise come first (LCP and TBT, T37).
       void afterPaint()
-        .then(() => loadSession(workerName, missionId, { running: st === "RUNNING", available: online(), ...(providerName() ? { provider: providerName() } : {}) }))
+        .then(() => (void ensureXtermCss(), loadSession(workerName, missionId, { running: st === "RUNNING", available: online(), ...(providerName() ? { provider: providerName() } : {}) })))
         .then((handle) => {
           if (disposed) return handle.dispose();
           session = handle;

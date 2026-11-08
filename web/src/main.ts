@@ -4,7 +4,6 @@ import { applyTheme, installShortcuts, savedTheme, shell } from "./shell";
 import { startLive, stopLive, refresh } from "./store";
 import { announce, mountFeedback } from "./ui";
 import { ensureRouteCss, withCss } from "./route-css";
-import { ensureXtermCss } from "./xterm-css";
 import type { NoticeKind } from "./views/login";
 import { missions } from "./views/missions";
 import { inbox } from "./views/inbox";
@@ -155,7 +154,6 @@ async function route(): Promise<void> {
   document.title = "LLM Bridge";
   const m = /^\/missions\/([^/]+)\/([^/]+)$/.exec(path);
   const signedOut = () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." });
-  if (m) void ensureXtermCss();
   try {
     if (path === "/") cleanup = inbox(main);
     else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));

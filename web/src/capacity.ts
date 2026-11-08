@@ -42,6 +42,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   let narrow = false;
   let worker = "";
   let timer = 0;
+  let first_read = 0;
   let disposed = false;
 
   // When the chips do not fit they lose their scope and meter (class "tight"; the scope stays for screen readers).
@@ -73,7 +74,9 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     const first = store.workers.find((w) => w.state === "online")?.name ?? "";
     if (first !== worker) {
       worker = first;
-      if (first) void load();
+      // The read goes to a worker and takes a round trip: it starts after the page has been painted, not before (LCP, T37).
+      window.clearTimeout(first_read);
+      if (first) first_read = window.setTimeout(() => void load(), 400);
     }
   };
   const tick = (): void => {
@@ -93,6 +96,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     el,
     dispose: () => {
       disposed = true;
+      window.clearTimeout(first_read);
       unsubscribe();
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);

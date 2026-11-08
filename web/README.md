@@ -62,6 +62,15 @@ docker run --rm --ipc=host -e CI=1 -e CARGO_TARGET_DIR=/work/coordinator/target 
 CI compares against the committed files in the same image. On any other machine set `BRIDGE_SKIP_VISUAL=1` to skip
 the pixel comparison and keep the axe checks. Update the image tag together with `@playwright/test`.
 
+## Load time
+
+`e2e/redesign/uxr-lighthouse.spec.ts` (T37) runs Lighthouse (mobile preset, simulated 4x CPU and slow 4G) on the Inbox, Missions and a mission page of a seeded
+coordinator and worker: performance 90 or more, accessibility 100, best practices 95 or more, LCP 2.5 s or less, TBT 200 ms or less. The build writes a gzip copy
+of every text asset that the coordinator sends to a client that accepts gzip, and `index.html` preloads the first-load chunks and the sign-in check; the page
+modules do their part: a text that arrives late (the verifier result) has its place from the first paint, the terminal chunk is fetched after the first paint,
+and a route imports its page module directly. `scripts/lighthouse.mjs` repeats a measurement that Lighthouse itself could not record (`NO_NAVSTART`), never one
+that missed a budget. The result varies by about 100 ms between runs, and the run needs a machine without other load.
+
 ## Bundle budget and load time
 
 `e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load. Chunks reachable

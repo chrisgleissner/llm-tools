@@ -1,5 +1,5 @@
 // The xterm.js stylesheet is a separate hashed file (build.mjs defines its URL), so the first load does not carry it.
-// `main.ts` starts the fetch when a mission route opens, in parallel with the terminal chunk; the terminal module awaits it.
+// The mission page starts the fetch together with the terminal chunk, after its first paint; the terminal module awaits it.
 declare const __XTERM_CSS__: string;
 let loading: Promise<void> | null = null;
 
