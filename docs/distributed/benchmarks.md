@@ -438,7 +438,12 @@ to 42450825462), before reads got their own connections:
   without a backup (slowest request 609 ms) and failed with one (a 2.6 s commit while the copy was
   flushed every MiB; a flush is a full drive cache flush there, so the copy flushes every 32 MiB on
   macOS and Windows). The cause of the request stalls was that reads shared the writer's connection;
-  reads now have four read-only connections (decision D29).
+  reads now have four read-only connections (decision D29). After that change both tests passed their
+  control run on macOS Intel and Windows (CI run 42453427529), reads stayed fast, and the remaining slow
+  calls were the worker's own event batch commits (up to 9 s on the Windows runner, the copy at that time
+  running in background I/O mode at 1.4 to 2 MiB/s), which only a faster disk can shorten. The 1 s
+  bound for every request is therefore checked on Linux; on macOS and Windows `/healthz` must stay under
+  1 s and the auth state under 5 s.
 
 The control run shows the database's own retention work after start (the fixture holds
 53,000 finished commands with bulky results) as the main source of the larger figures.
