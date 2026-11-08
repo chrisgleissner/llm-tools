@@ -57,19 +57,30 @@ async fn split_listener_groups_expose_only_the_selected_route_family() {
     let console = address(bridge_coordinator::config::ListenerGroup::ConsoleRest);
     let worker = address(bridge_coordinator::config::ListenerGroup::WorkerChannel);
     let health = address(bridge_coordinator::config::ListenerGroup::Health);
+    let check_headers = |response: reqwest::Response, status: u16| {
+        assert_eq!(response.status().as_u16(), status);
+        let headers = response.headers();
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["strict-transport-security"], "max-age=63072000");
+        assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
+        assert_eq!(headers["cross-origin-resource-policy"], "same-origin");
+        assert_eq!(headers["cross-origin-embedder-policy"], "require-corp");
+        assert!(headers["permissions-policy"].to_str().unwrap().contains("camera=()"));
+        assert_eq!(headers["cache-control"], "no-store");
+    };
 
-    assert_eq!(request(console, "/api/v1/auth/state").send().await.unwrap().status(), 200);
-    let blocked_health = request(console, "/healthz").send().await.unwrap();
-    assert_eq!(blocked_health.status(), 404);
-    assert_eq!(blocked_health.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(request(console, "/api/v1/worker/connect").send().await.unwrap().status(), 404);
+    check_headers(request(console, "/api/v1/auth/state").send().await.unwrap(), 200);
+    check_headers(request(console, "/healthz").send().await.unwrap(), 404);
+    check_headers(request(console, "/api/v1/worker/connect").send().await.unwrap(), 404);
 
-    assert_eq!(request(worker, "/api/v1/auth/state").send().await.unwrap().status(), 404);
-    assert_eq!(request(worker, "/healthz").send().await.unwrap().status(), 404);
-    assert_ne!(request(worker, "/api/v1/worker/connect").send().await.unwrap().status(), 404);
+    check_headers(request(worker, "/api/v1/auth/state").send().await.unwrap(), 404);
+    check_headers(request(worker, "/healthz").send().await.unwrap(), 404);
+    check_headers(request(worker, "/api/v1/worker/connect").send().await.unwrap(), 400);
 
-    assert_eq!(request(health, "/healthz").send().await.unwrap().status(), 200);
-    assert_eq!(request(health, "/api/v1/auth/state").send().await.unwrap().status(), 404);
+    check_headers(request(health, "/healthz").send().await.unwrap(), 200);
+    check_headers(request(health, "/api/v1/auth/state").send().await.unwrap(), 404);
     let info = bridge_coordinator::ops::report(&env.dir, false).unwrap();
     assert!(info.contains("Listener groups:"));
     assert!(info.contains("worker channel: 127.0.0.1:"));
