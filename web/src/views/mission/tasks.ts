@@ -1,7 +1,7 @@
 // The Tasks panel (spec 8.1): TaskRow with at most two visible buttons and an overflow menu, completed tasks grouped under a
 // disclosure, the inline "Add task" field, and the Evidence block of the selected task.
 import * as api from "../../api";
-import { button, disclosure, emptyState, h, hooks, keepFocus, setBusy, statePill } from "../../dom";
+import { button, disclosure, emptyState, h, hooks, patch, setBusy, statePill } from "../../dom";
 import { menu, type MenuItem } from "../../menu";
 import { deriveState } from "../../state";
 import { type TaskActions } from "./actions";
@@ -170,16 +170,11 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
   }
 
   function renderHead(): void {
-    keepFocus(headBox, () =>
-      headBox.replaceChildren(
-        h("h2", { class: "panel-title" }, "Tasks"),
-        button("Add task", () => (form.hidden ? openForm() : closeForm()), { icon: "plus", kind: "small", id: "add-task", reason: ctx.blocked(), action: "add-task" }),
-      ),
-    );
+    patch(headBox, [h("h2", { class: "panel-title" }, "Tasks"), button("Add task", () => (form.hidden ? openForm() : closeForm()), { icon: "plus", kind: "small", id: "add-task", reason: ctx.blocked(), action: "add-task" })]);
   }
 
   function renderList(): void {
-    keepFocus(listBox, () => {
+    {
       const open = data.tasks.filter((t) => t.status !== "COMPLETED");
       const done = data.tasks.filter((t) => t.status === "COMPLETED");
       const nodes: Node[] = [];
@@ -206,8 +201,8 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
         if (open.length > openShown) nodes.push(more(OPEN_PAGE, open.length - openShown, () => ((openShown += OPEN_PAGE), renderList())));
       }
       if (data.total > data.tasks.length) nodes.push(h("p", { class: "notice info" }, `Showing the first ${data.tasks.length} of ${data.total} tasks.`));
-      listBox.replaceChildren(...nodes);
-    });
+      patch(listBox, nodes);
+    }
   }
 
   function renderEvidence(): void {

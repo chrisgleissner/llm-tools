@@ -1,6 +1,6 @@
 // Overflow menu (spec 6.2). One component for the account menu, the mission header menu, the task row menu and the Inbox row menu.
 // A menu holds level-1 actions only: anything needed in the current state (Approve, Pause, Stop, Retry) stays a visible button.
-import { h } from "./dom";
+import { h, liveOf } from "./dom";
 import { icon, type IconName } from "./icons";
 import { openPanel } from "./ui";
 
@@ -79,12 +79,14 @@ export function menu(trigger: MenuTrigger, items: MenuItem[]): HTMLElement {
     ? h("button", { type: "button", class: `btn ${trigger.kind ?? ""}`.trim(), id: trigger.id, "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": trigger.label }, trigger.icon ? icon(trigger.icon, 18) : null, h("span", {}, trigger.text))
     : h("button", { type: "button", class: `btn icon ${trigger.kind ?? "ghost"}`.trim(), id: trigger.id, "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": trigger.label, title: trigger.label }, icon(trigger.icon ?? "more", 20));
   const wrap = h("div", { class: "menu" }, btn);
+  // A refresh that patches the row in place hands the new items to this menu (see `morph`): the items are read when the menu opens.
+  liveOf(wrap)["items"] = items;
   let pop: HTMLElement | null = null;
   let sheet: HTMLDialogElement | null = null;
 
   const build = (close: () => void): HTMLElement => {
     const list = h("div", { role: "menu", "aria-label": trigger.label });
-    for (const entry of ordered(items)) list.append(entry === "separator" ? h("hr", { class: "menu-sep", role: "separator" }) : itemButton(entry, close));
+    for (const entry of ordered(liveOf(wrap)["items"] as MenuItem[])) list.append(entry === "separator" ? h("hr", { class: "menu-sep", role: "separator" }) : itemButton(entry, close));
     list.addEventListener("keydown", (e) => navigate(list, e));
     return list;
   };
@@ -128,7 +130,7 @@ export function menu(trigger: MenuTrigger, items: MenuItem[]): HTMLElement {
       (list.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)'))?.focus();
       return;
     }
-    pop = h("div", { class: "menu-popover" }, build(() => close(false)));
+    pop = h("div", { class: "menu-popover", "data-keep": "" }, build(() => close(false)));
     wrap.append(pop);
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", onKey, true);

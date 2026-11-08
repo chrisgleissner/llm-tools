@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { absTime, button, deferSkeleton, emptyState, errorBlock, h, relFromMs, toDate } from "../dom";
+import { absTime, button, deferSkeleton, emptyState, errorBlock, h, patch, relFromMs, toDate } from "../dom";
 import { icon, type IconName } from "../icons";
 import { store, subscribe, worker } from "../store";
 import { confirmDialog } from "../ui";
@@ -57,7 +57,6 @@ export const plural = (n: number, one: string, many = `${one}s`): string => `${n
 /** A row link whose label wraps and is clamped once (spec 6.3); the link itself keeps the minimum target size. */
 export const rowLink = (text: string, href: string): HTMLElement => h("a", { class: "row-link", href, title: text }, el("span", "clamp-2", text));
 
-let toggleSeq = 0;
 /**
  * A row of a fleet list with a per-row details control: a button with `aria-expanded` in the row's last line and the block it
  * reveals below the row. The button replaces a native `<summary>` inside rows because its label sits in its own element and, in
@@ -65,8 +64,9 @@ let toggleSeq = 0;
  * the second line.
  */
 export function fleetRow(attrs: Record<string, string>, main: Kid[], info: Kid[], label: string, content: Node): HTMLElement {
-  const id = `toggle-${++toggleSeq}`;
-  const panel = h("div", { class: "toggle-body", id, hidden: true }, content);
+  const id = `toggle-${attrs["data-entity"] ?? attrs["data-worker"] ?? label}`;
+  // The panel and the button own their open state (see `morph`), so a refresh keeps an open row open; the handler finds the panel from the button.
+  const panel = h("div", { class: "toggle-body", id, hidden: true, "data-own": "" }, content);
   const toggle = h(
     "button",
     {
@@ -74,11 +74,14 @@ export function fleetRow(attrs: Record<string, string>, main: Kid[], info: Kid[]
       class: "btn ghost small toggle",
       "aria-expanded": "false",
       "aria-controls": id,
-      onclick: () => {
-        const open = panel.hidden;
-        panel.hidden = !open;
-        toggle.setAttribute("aria-expanded", String(open));
-        toggle.firstElementChild?.replaceWith(icon(open ? "chevronDown" : "chevronRight", 16));
+      "data-leaf": "",
+      onclick: (e) => {
+        const button = e.currentTarget as HTMLElement;
+        const body = document.getElementById(id) as HTMLElement;
+        const open = body.hidden;
+        body.hidden = !open;
+        button.setAttribute("aria-expanded", String(open));
+        button.firstElementChild?.replaceWith(icon(open ? "chevronDown" : "chevronRight", 16));
       },
     },
     icon("chevronRight", 16),
@@ -179,7 +182,7 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
   const show = (text: string, answer: Answer, content: Node): void => {
     status.textContent = text;
     answers.set(answer);
-    body.replaceChildren(content);
+    patch(body, [content]);
     rendered = true;
   };
   const empty = (name: IconName, title: string, text: string, label: string, cls: string): HTMLElement => emptyState({ icon: name, title, text, action: el("div", "actions", h("a", { class: cls, href: "/workers" }, label)) });
@@ -245,7 +248,7 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
       ...(offline.length > 0 ? ["Not shown (offline): ", ...offline.flatMap((n, i) => [i ? ", " : "", h("a", { href: "/workers" }, n)]), ". "] : []),
       failed.length > 0 ? `Could not read ${failed.join("; ")}.` : "",
     );
-    body.replaceChildren(view.body);
+    patch(body, [view.body]);
     rendered = true;
   }
 

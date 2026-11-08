@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { button, copyButton, copyText, emptyState, field, h, hooks, idChip, keepFocus, statePill } from "../dom";
+import { button, copyButton, copyText, emptyState, field, h, hooks, idChip, patch, statePill } from "../dom";
 import { btn } from "../kit-b";
 import { menu } from "../menu";
 import { refresh, store, subscribe, workerDerived } from "../store";
@@ -116,11 +116,11 @@ export function workers(root: HTMLElement): () => void {
     if (store.workers.length === 0) {
       const loaded = store.loaded;
       answers.set(loaded ? { what: "No workers are enrolled.", needMe: "A worker has to be enrolled before missions can run.", next: "Add one, then enrol it on its machine." } : loading);
-      body.replaceChildren(
+      patch(body, [
         loaded
           ? emptyState({ icon: "workers", title: "No workers enrolled", text: "A worker runs missions on a machine and reports them here. Add one, then enrol it on that machine with the command shown afterwards.", action: el("div", "actions", button("Add worker", addDialog, { kind: "primary", icon: "plus" })) })
           : h("p", { class: "muted" }, "Loading..."),
-      );
+      ]);
       return;
     }
     const sorted = [...store.workers].sort((a, b) => workerDerived(a).rank - workerDerived(b).rank || a.name.localeCompare(b.name));
@@ -131,10 +131,9 @@ export function workers(root: HTMLElement): () => void {
       needMe: ok ? "Nothing needs you." : `${offline.map((w) => w.name).join(", ")} ${offline.length === 1 ? "is" : "are"} offline.`,
       next: ok ? "Nothing to do." : `Start llm-bridge worker run on ${offline[0]?.host_name || offline[0]?.name}.`,
     });
-    body.replaceChildren(h("ul", { class: "frows", "aria-label": "Workers", "data-section": "workers" }, ...sorted.map(workerRow)));
+    patch(body, [h("ul", { class: "frows", "aria-label": "Workers", "data-section": "workers" }, ...sorted.map(workerRow))]);
   };
-  const render = () => keepFocus(body, renderNow);
-  const un = subscribe(render);
-  render();
+  const un = subscribe(renderNow);
+  renderNow();
   return un;
 }

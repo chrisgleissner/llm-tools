@@ -9,12 +9,61 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = 
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (v === null || v === undefined || v === false) continue;
-    if (typeof v === "function") el.addEventListener(k.replace(/^on/, ""), v);
+    if (typeof v === "function") on(el, k.slice(2), v);
     else if (v === true) el.setAttribute(k, "");
     else el.setAttribute(k, String(v));
   }
   append(el, children);
   return el;
+}
+
+type Live = Record<string, unknown>;
+/** What `morph` carries from a freshly built element to the element it keeps: listeners (`on:<type>`) and values a component reads later (the items of a menu). */
+export const liveOf = (el: Element): Live => ((el as Element & { live?: Live }).live ??= {});
+
+/** A listener that `morph` can replace: the element keeps one dispatcher per event type and the dispatcher calls the latest function. */
+export function on(el: Element, type: string, fn: EventListener): void {
+  const live = liveOf(el);
+  const key = `on:${type}`;
+  if (!live[key]) el.addEventListener(type, (e) => (live[key] as EventListener)(e));
+  live[key] = fn;
+}
+
+// Attributes the user changes by using the element (a menu or details opens, a button toggles a panel). `data-own` marks an element that owns its `hidden` as well.
+const OWN = ["open", "aria-expanded"];
+const identity = (n: Node): string => (n instanceof Element ? n.tagName + (["data-row-key", "data-entity", "data-action", "id", "class"].map((a) => n.getAttribute(a)).find(Boolean) ?? "") : "#");
+
+/**
+ * Bring `old` in line with `fresh`, keeping the elements of `old`: a live refresh patches text and attributes where they are, so an
+ * element the pointer or the keyboard focus is on is never replaced (a click whose pointer-down and pointer-up straddle a redraw would be lost).
+ */
+export function morph(old: Node, fresh: Node): void {
+  if (!(old instanceof Element) || !(fresh instanceof Element)) {
+    if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue;
+    return;
+  }
+  const own = (name: string): boolean => OWN.includes(name) || (name === "hidden" && old.hasAttribute("data-own"));
+  for (const name of old.getAttributeNames()) if (!fresh.hasAttribute(name) && !own(name)) old.removeAttribute(name);
+  for (const name of fresh.getAttributeNames()) if (!own(name) && old.getAttribute(name) !== fresh.getAttribute(name)) old.setAttribute(name, fresh.getAttribute(name) ?? "");
+  for (const [key, value] of Object.entries(liveOf(fresh))) {
+    if (key.startsWith("on:")) on(old, key.slice(3), value as EventListener);
+    else liveOf(old)[key] = value;
+  }
+  if (!old.hasAttribute("data-leaf")) patch(old, [...fresh.childNodes]);
+}
+
+/** Make the children of `parent` the nodes `kids`: a child with the same identity is kept and morphed, the others are inserted or removed. A node marked `data-keep` stays. */
+export function patch(parent: Element, kids: Node[]): void {
+  const old = [...parent.childNodes];
+  let at = parent.firstChild;
+  for (const kid of kids) {
+    const i = old.findIndex((o) => identity(o) === identity(kid));
+    const node = i < 0 ? kid : (old.splice(i, 1)[0] as Node);
+    if (node !== kid) morph(node, kid);
+    if (node === at) at = at.nextSibling;
+    else parent.insertBefore(node, at);
+  }
+  for (const node of old) if (!(node instanceof Element && node.hasAttribute("data-keep"))) node.remove();
 }
 
 export function append(el: Element, children: Child[]): void {
@@ -148,7 +197,7 @@ export interface ButtonOpts {
   id?: string;
 }
 
-export function button(label: string, onclick: () => void, opts: ButtonOpts = {}): HTMLButtonElement {
+export function button(label: string, onclick: (e: Event) => void, opts: ButtonOpts = {}): HTMLButtonElement {
   const disabled = opts.disabled || Boolean(opts.reason);
   const b = h(
     "button",
@@ -156,7 +205,7 @@ export function button(label: string, onclick: () => void, opts: ButtonOpts = {}
     opts.icon ? icon(opts.icon, 18) : null,
     label ? h("span", {}, label) : null,
   );
-  b.addEventListener("click", onclick);
+  on(b, "click", onclick);
   return b;
 }
 

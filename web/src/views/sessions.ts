@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { disclosure, emptyState, h, idChip, pager, statePill } from "../dom";
+import { disclosure, emptyState, h, idChip, pager, patch, statePill } from "../dom";
 import { deriveState, type DerivedState } from "../state";
 import { ago, calm, cap, el, facts, fleetRow, fleetView, plural, rowLink, type Answer, type FleetRender } from "./remote";
 
@@ -108,7 +108,7 @@ export function sessions(root: HTMLElement, query: URLSearchParams): () => void 
     },
     render: (ctx) => {
       const view = render(ctx, paging);
-      paging.redraw = () => document.getElementById("view-body")?.replaceChildren(render(ctx, paging).body);
+      paging.redraw = () => patch(document.getElementById("view-body") as HTMLElement, [render(ctx, paging).body]);
       return view;
     },
     icon: "sessions",

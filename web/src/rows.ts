@@ -3,7 +3,7 @@
 // focus and layout when a live refresh changes only a few rows.
 import * as api from "./api";
 import type { MissionEntry, NeedsYou } from "./api";
-import { button, copyText, h, setBusy } from "./dom";
+import { button, copyText, h, morph, on, setBusy } from "./dom";
 import { icon } from "./icons";
 import { menu } from "./menu";
 import { compactAge, type DerivedState } from "./state";
@@ -383,10 +383,11 @@ function inlineActions(item: Item, done: () => void): HTMLElement[] {
   const task = item.attention?.tasks?.[0];
   const open = (label = "Open", extra = "") => h("a", { class: `btn small ${extra}`.trim(), href: missionHref(e), "data-action": "open", "aria-label": `${label} ${e.mission.name || "mission"}` }, h("span", {}, label));
   const act = (label: string, run: () => Promise<void>, o: { kind?: string; action: string; busy?: boolean; n?: number }): HTMLButtonElement => {
-    const b = button(label, () => {
-      // Approve and Reject open a dialog first; only a direct action (Retry) shows the button as working.
-      if (o.busy) setBusy(b, true);
-      void run().finally(() => setBusy(b, false));
+    const b = button(label, (ev) => {
+      // Approve and Reject open a dialog first; only a direct action (Retry) shows the button as working. The row may be patched in place meanwhile: the button comes from the event, not from this closure.
+      const pressed = ev.currentTarget as HTMLButtonElement;
+      if (o.busy) setBusy(pressed, true);
+      void run().finally(() => setBusy(pressed, false));
     }, { kind: `${o.kind ?? ""} small`.trim(), reason: why, action: o.action });
     b.setAttribute("aria-label", `${label} task ${o.n ?? task} of ${e.mission.name || "mission"}`);
     return b;
@@ -457,10 +458,10 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
   actions.length ? h("div", { class: "row-actions" }, ...actions) : null,
   h("div", { class: "row-menu" }, rowMenu(item)));
   if (o.onSelect) {
-    li.addEventListener("click", (ev) => {
+    on(li, "click", (ev) => {
       if (!(ev.target as HTMLElement).closest("a, button, summary, [role=menu]")) o.onSelect?.(item);
     });
-    li.addEventListener("focusin", () => o.onSelect?.(item));
+    on(li, "focusin", () => o.onSelect?.(item));
   }
   return li;
 }
@@ -473,21 +474,15 @@ export interface RowSpec {
   build: () => HTMLElement;
 }
 
-function focusPath(el: Element, root: Element): string {
-  const own = (el as HTMLElement).dataset["action"] ?? (el.getAttribute("aria-haspopup") ? "menu" : el.classList.contains("row-title") ? "title" : "");
-  return root.contains(el) ? own : "";
-}
-
 /**
- * Bring `parent` in line with `specs` without rebuilding unchanged rows: a row whose signature is the same stays in place (focus,
- * scroll position and layout are untouched), a changed row is replaced and focus moves to the same control, and rows that left are removed.
+ * Bring `parent` in line with `specs` without rebuilding rows: a row whose signature is the same is left alone, a changed row is patched in place with `morph`
+ * (the element under the pointer or the focus stays the same element), and rows that left are removed.
  */
 export function reconcile(parent: HTMLElement, specs: RowSpec[]): void {
   const active = document.activeElement as HTMLElement | null;
   const existing = new Map<string, HTMLElement>();
   for (const el of Array.from(parent.children) as HTMLElement[]) if (el.dataset["rowKey"]) existing.set(el.dataset["rowKey"], el);
   let cursor: Element | null = parent.firstElementChild;
-  let refocus: { row: string; control: string } | null = null;
   for (const spec of specs) {
     let el = existing.get(spec.key);
     existing.delete(spec.key);
@@ -495,20 +490,12 @@ export function reconcile(parent: HTMLElement, specs: RowSpec[]): void {
       const fresh = spec.build();
       fresh.dataset["rowKey"] = spec.key;
       fresh.dataset["rowSig"] = spec.sig;
-      if (el) {
-        if (active && el.contains(active)) refocus = { row: spec.key, control: focusPath(active, el) };
-        if (el === cursor) cursor = el.nextElementSibling;
-        el.remove();
-      }
-      el = fresh;
-      parent.insertBefore(el, cursor);
-    } else if (el === cursor) cursor = cursor.nextElementSibling;
+      if (el) morph(el, fresh);
+      else el = fresh;
+    }
+    if (el === cursor) cursor = el.nextElementSibling;
     else parent.insertBefore(el, cursor);
   }
   for (const el of existing.values()) el.remove();
-  if (refocus) {
-    const row = Array.from(parent.children).find((c) => (c as HTMLElement).dataset["rowKey"] === refocus!.row);
-    const control = row?.querySelector<HTMLElement>(refocus.control === "title" ? ".row-title" : refocus.control === "menu" ? "[aria-haspopup]" : `[data-action="${refocus.control}"]`) ?? row?.querySelector<HTMLElement>(".row-title");
-    control?.focus({ preventScroll: true });
-  } else if (active && active.isConnected && document.activeElement !== active) active.focus({ preventScroll: true });
+  if (active?.isConnected && document.activeElement !== active) active.focus({ preventScroll: true });
 }
