@@ -450,6 +450,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/auth/passkeys/registration/start` |
 | `POST /api/v1/auth/passkeys/registration/finish` |
 | `GET /api/v1/auth/passkeys` |
+| `PATCH /api/v1/auth/passkeys/{id}` |
+| `DELETE /api/v1/auth/passkeys/{id}` |
 | `GET /api/v1/auth/sessions` |
 | `DELETE /api/v1/auth/sessions/{id}` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
