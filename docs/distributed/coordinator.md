@@ -400,6 +400,14 @@ revoked and added again receives a generation above every earlier one),
 `known_addrs` and `meta` (schema version 2). Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
 session and API tokens are 32 random bytes stored as SHA-256 hashes.
 
+## Static files and compression
+
+The web build writes a gzip copy next to every text asset (`app-HASH.js.gz`, `index.html.gz`, stylesheets, JSON). A request that accepts gzip (`Accept-Encoding`,
+not `gzip;q=0`) for an HTML, JavaScript, CSS, SVG or JSON file gets the `.gz` copy with `Content-Encoding: gzip`; every response for such a type carries
+`Vary: Accept-Encoding`. The copy is read through the same check as any file (inside the web root after canonicalisation). A file without a copy, and a client
+that does not accept gzip, get the plain file. The coordinator does not compress anything itself, so a web directory built by an older release is served as before.
+The first load is about 75% smaller for a client that accepts gzip, which matters on a slow link (PRD-037 T37).
+
 ## Content Security Policy
 
 Static files are served with `default-src 'self'`, `script-src 'self'` and

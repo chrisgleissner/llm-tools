@@ -509,6 +509,44 @@ counts against the lazy caps. Code that leaves the first-load bundle also compre
 chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
 The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
 
+## D29 Merging main into the web redesign: digest and attention, notices, load time and the lazy JavaScript cap (PRD-037, PRD-038, UXR-032, UXR-039)
+
+The redesign branch was merged with main after PR #35 (the release, with the DOG-021 mission digest and the coordinator's change notices) and PR #68 (mission delete).
+This entry records what the merge decided.
+
+| # | Decision | Change | Guarded by |
+|---|---|---|---|
+| 1 | One list answers what a row needs | A worker sends both `attention` (PRD-037 WP-7, for every mission that is not completed or cancelled, with the bounded message) and the digest (`task_counts`, `current_task`, `station`, `model`, `needs_kind`, `needs_tasks`, and `needs_you` for a live mission). `store.listedNeeds` reads `attention` first, then `needs_you` or `needs_kind`; only a mission for which the list says neither (a worker that predates both) is read with `mission.status`, at most 12 at a time. | `web/e2e/link-traffic.spec.ts`, `web/e2e/worker.spec.ts`, `tests/test_bridge_mission_summary.py`, `tests/test_bridge_worker.py` |
+| 2 | The mission page asks a worker only for tasks | Its status is drawn from the digest of the list entry, its events come from `GET /api/v1/events` of the coordinator, and a change notice that names the mission reads the new events; the tasks are read again only for a notice with the mission in `task_missions` and when the digest of the mission changed. A notice with `truncated` reads the events as well. A worker without the digest is asked for the status as before. | `web/e2e/link-traffic.spec.ts` (the count of status reads is 0), `uxr-fresh-eyes.spec.ts` F9 for both kinds of worker |
+| 3 | The activity line of a running row | `mission.activity_line` (spec DEV-5) is still asked for each running row, once, when the row's update time or current task changed, and for every row on the 30 s refresh of the page; a change notice alone does not ask again. | `web/e2e/link-traffic.spec.ts` |
+| 4 | Delete mission is in the overflow menu | `data-action="delete-mission"`, danger style, only for CREATED, COMPLETED, FAILED, CANCELLED and STOPPED, disabled with the reason when the worker is unreachable. The confirmation says "Delete mission?", names the mission and the worker and says that it cannot be undone. After the delete the console shows the missions list with a toast that survives the route change. | `web/e2e/mission-delete.spec.ts` |
+| 5 | Security notices | They are behind a header button with their count (a banner above the page moved the content after load: CLS 0.17 in Lighthouse). The code is a separate chunk, fetched after the first paint. | `web/e2e/auth-ux.spec.ts`, `web/e2e/passkey-login.spec.ts` |
+| 6 | Load time (T37) | A late sentence about the verifier or a late terminal chunk set the largest contentful paint. The sentence has its line from the first paint; the verifier text of an Inbox row is a box of its own; the terminal chunk is fetched 100 ms after the second frame and its evaluation and the building of the pane are two tasks; the mission route imports its page module directly; `index.html` preloads the first-load chunks and the sign-in check; the build writes a gzip copy of every text asset and the coordinator sends it to a client that accepts gzip (`coordinator/src/web.rs`, `tests/web.rs`). | `web/e2e/redesign/uxr-lighthouse.spec.ts`, `coordinator/tests/web.rs`, `uxr-text.spec.ts` (T08) |
+
+Lighthouse (mobile preset, simulated throttling, Playwright image, one run per page; each run varies by about 100 ms):
+
+| Page | Before the fixes (merge head) | Now |
+|---|---:|---:|
+| Inbox | LCP 2944 ms, performance 85, CLS 0.169 | LCP 2131 and 2137 ms, performance 98, CLS 0.004 |
+| Missions | LCP 2858 ms, performance 86 | LCP 1962 and 1976 ms, performance 98 and 99 |
+| Mission page | LCP 6098 ms, performance 72, TBT 230 ms | LCP 2332 and 2347 ms, performance 96 and 97, TBT 93 and 100 ms, CLS 0.007 |
+
+The lazy JavaScript cap is not met (UXR-039). Measured with `web/e2e/budget.spec.ts` after the merge, with the caps of `web/budget.json` unchanged:
+
+| Measure | Before the merge (D28) | Now | Cap |
+|---|---:|---:|---:|
+| Initial JavaScript raw / gzip | 80464 / 31326 | 81786 / 31457 | 91000 / 31750 |
+| Initial CSS raw / gzip | 33949 / 7550 | 33997 / 7576 | 34000 / 9000 |
+| Terminal chunk raw / gzip | 355631 / 92441 | 355660 / 92450 | 360000 / 93000 |
+| Route JavaScript raw / gzip | 93984 / 36138 | 107343 raw and 41458 gzip bytes | 94000 / 38700 |
+| Route CSS raw / gzip | 18358 / 4869 | 18358 / 4869 | 18400 / 4900 |
+
+Main added about 10.5 KB of route JavaScript (passkey sign-in and registration helpers, the account page's passkey list, address reset and token restrictions, the sign-in
+page's passkey button and canonical-address hint) and this merge added about 2 KB (security notices, mission delete, the digest and event handling of the mission page).
+The route JavaScript had 16 raw bytes of room before the merge, so no part of that can be absorbed. What fits was moved or shortened: the reads that only a lazy
+view needs left the first-load modules, the lists compare whole summaries, two rules of the stylesheet were merged. The caps were not raised; raising them needs a
+decision of the lead. The figures that the caps would have to take for this branch to pass are 107400 raw and 41500 gzip bytes for the route JavaScript.
+
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 
 The soaks showed `llm-bridge worker run` processes growing by 2.5 and then 1.9 MiB per hour after warm-up (about 48 MiB per day). The

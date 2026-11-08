@@ -687,7 +687,7 @@ WUX findings closed by this design (test or section): WUX-001 (8.1, T10, T13), 0
 
 The questions of the design phase were answered by the operator and the overseer; D28 in `DECISIONS.md` records them with the six redesign decisions.
 
-1. **Backend fields for the Inbox.** Done by WP-7: the mission summary carries `attention` and `task_counts`, and `mission.activity_line` returns the one-line "doing now" text. The DOG-021 digest covers the heartbeat and replication point; the Inbox rows switch to the digest after PR #35 merges. Until then the fan-out of up to 12 status reads stays as the fallback for an older worker.
+1. **Backend fields for the Inbox.** Done by WP-7: the mission summary carries `attention` and `task_counts`, and `mission.activity_line` returns the one-line "doing now" text. The DOG-021 digest covers the heartbeat and replication point. The Inbox, Missions and the shell's attention count read `attention` and the digest of the mission list (D29); the fan-out of up to 12 status reads is only the fallback for a worker that sends neither.
 2. **Bundle caps.** Approved: a separate `routes` cap in `budget.json` at the figures measured in D18; the initial caps stay unchanged.
 3. **Free-text steering API.** Not in 1.5.0. A web "message to the provider" without taking control needs a new typed operation; it is a follow-up.
 4. **Mission creation and snooze (DEV-10, DEV-11).** Both stay out of PRD-037.
