@@ -180,6 +180,8 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         shutdown: shutdown_rx.clone(),
         web_dir,
     });
+    // Each connection has at most one database call in flight, so a burst can queue `max_connections` callers.
+    state.db.set_max_lock_waiters(state.cfg.max_connections.saturating_add(32));
     let lock = crate::ops::lock_data_dir(data_dir)?;
     let limits = ConnLimits {
         max_connections: state.cfg.max_connections,

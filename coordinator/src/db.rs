@@ -146,9 +146,14 @@ pub(crate) use offload_impl;
 
 /// Longest a caller waits for the connection before getting a busy error.
 static LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(3_000);
-/// Callers allowed to wait for the connection at once. Each waiter occupies a thread that the
-/// runtime handed over, so the number is bounded.
-pub const MAX_LOCK_WAITERS: usize = 48;
+/// Callers allowed to wait for the connection at once when the server has not set its own limit. Every
+/// connection has at most one request or worker message in flight, and the default `max_connections`
+/// is 256, so a burst can legitimately put 256 callers in the queue; the margin covers the retention
+/// pass and the background tasks. Each waiter occupies a thread that the runtime handed over (the
+/// blocking pool allows 512), so the number stays bounded.
+pub const DEFAULT_MAX_LOCK_WAITERS: usize = 288;
+/// Upper limit for [`Db::set_max_lock_waiters`], below the 512 threads of tokio's blocking pool.
+pub const LOCK_WAITERS_CEILING: usize = 480;
 
 pub fn lock_wait() -> std::time::Duration {
     std::time::Duration::from_millis(LOCK_WAIT_MS.load(Ordering::Relaxed))
@@ -173,9 +178,126 @@ pub fn is_busy(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// The connection while a caller holds it. It records how long it was held, so the longest hold and the
+/// most callers ever waiting at once can be read back ([`Db::lock_stats`]). Dropping it hands the
+/// connection to the caller that has waited longest.
+pub struct ConnGuard<'a> {
+    inner: Option<MutexGuard<'a, Connection>>,
+    gate: &'a Gate,
+    stats: &'a LockStats,
+    since: std::time::Instant,
+}
+
+impl std::ops::Deref for ConnGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.inner.as_deref().expect("guard holds the connection until it is dropped")
+    }
+}
+
+impl std::ops::DerefMut for ConnGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.inner.as_deref_mut().expect("guard holds the connection until it is dropped")
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.stats.max_hold_us.fetch_max(self.since.elapsed().as_micros() as u64, Ordering::Relaxed);
+        drop(self.inner.take()); // release the connection first, then wake the next caller
+        self.gate.release();
+    }
+}
+
+/// First-come first-served admission to the connection. A caller that cannot get it at once joins a
+/// queue and sleeps on its own condition variable; the caller that releases the connection wakes only
+/// the head of the queue. (A polling `try_lock` loop is not fair: callers that arrive later take the
+/// connection ahead of a sleeping poller, and on Windows a short sleep lasts about 15 ms, so a burst
+/// of requests queued up faster than it drained.)
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+}
+
+#[derive(Default)]
+struct GateState {
+    held: bool,
+    next_ticket: u64,
+    queue: std::collections::VecDeque<(u64, std::sync::Arc<std::sync::Condvar>)>,
+}
+
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn waiting(&self) -> usize {
+        self.state().queue.len()
+    }
+
+    fn release(&self) {
+        let mut st = self.state();
+        st.held = false;
+        if let Some((_, cv)) = st.queue.front() {
+            cv.notify_one();
+        }
+    }
+
+    /// Wait for the connection for at most `wait`; refuse at once when `max_waiters` callers are queued.
+    fn enter(&self, wait: std::time::Duration, max_waiters: usize, stats: &LockStats) -> R<()> {
+        let mut st = self.state();
+        if !st.held && st.queue.is_empty() {
+            st.held = true;
+            return Ok(());
+        }
+        if st.queue.len() >= max_waiters {
+            return Err(busy("too many requests are waiting for the database"));
+        }
+        let ticket = st.next_ticket;
+        st.next_ticket += 1;
+        let cv = std::sync::Arc::new(std::sync::Condvar::new());
+        st.queue.push_back((ticket, cv.clone()));
+        stats.peak_waiters.fetch_max(st.queue.len(), Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if !st.held && st.queue.front().is_some_and(|(t, _)| *t == ticket) {
+                st.queue.pop_front();
+                st.held = true;
+                return Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                st.queue.retain(|(t, _)| *t != ticket);
+                if !st.held {
+                    if let Some((_, next)) = st.queue.front() {
+                        next.notify_one(); // this caller was the head and the connection is free
+                    }
+                }
+                return Err(busy("the database is busy (a write is taking too long)"));
+            }
+            st = cv.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+}
+
+#[derive(Default)]
+struct LockStats {
+    max_hold_us: AtomicU64,
+    peak_waiters: AtomicUsize,
+}
+
+/// Longest time one caller held the connection, and the most callers that waited for it at once.
+#[derive(Debug, Clone, Copy)]
+pub struct LockSnapshot {
+    pub max_hold: std::time::Duration,
+    pub peak_waiters: usize,
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
-    waiters: AtomicUsize,
+    gate: Gate,
+    max_waiters: AtomicUsize,
+    stats: LockStats,
     path: PathBuf,
     /// Stored event rows per worker, kept so that retention does not have to count them on every batch.
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
@@ -660,44 +782,41 @@ impl Db {
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
-            waiters: AtomicUsize::new(0),
+            gate: Gate::default(),
+            max_waiters: AtomicUsize::new(DEFAULT_MAX_LOCK_WAITERS),
+            stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
         })
     }
 
     /// The connection, waiting at most [`lock_wait`] for it. A caller that waits longer, or that finds
-    /// [`MAX_LOCK_WAITERS`] others already waiting, gets a busy error (HTTP 503) instead of queueing
+    /// the waiter limit already queued, gets a busy error (HTTP 503) instead of queueing
     /// without bound behind a slow commit.
-    pub(crate) fn c(&self) -> R<MutexGuard<'_, Connection>> {
-        match self.conn.try_lock() {
-            Ok(g) => return Ok(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => {}
-        }
-        struct Waiting<'a>(&'a AtomicUsize);
-        impl Drop for Waiting<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-        let _waiting = Waiting(&self.waiters);
-        if self.waiters.fetch_add(1, Ordering::Relaxed) >= MAX_LOCK_WAITERS {
-            return Err(busy("too many requests are waiting for the database"));
-        }
-        let deadline = std::time::Instant::now() + lock_wait();
-        let mut pause = std::time::Duration::from_micros(200);
-        loop {
-            match self.conn.try_lock() {
-                Ok(g) => return Ok(g),
-                Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(busy("the database is busy (a write is taking too long)"));
-            }
-            std::thread::sleep(pause);
-            pause = (pause * 2).min(std::time::Duration::from_millis(5));
+    pub(crate) fn c(&self) -> R<ConnGuard<'_>> {
+        self.gate.enter(lock_wait(), self.max_waiters.load(Ordering::Relaxed), &self.stats)?;
+        // The gate admits one caller at a time, so this lock is never contended. A mutex poisoned by a
+        // handler that panicked is recovered.
+        let inner = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(ConnGuard { inner: Some(inner), gate: &self.gate, stats: &self.stats, since: std::time::Instant::now() })
+    }
+
+    /// Set how many callers may wait for the connection at once (the server uses `max_connections` plus a
+    /// margin, because every connection has at most one call in flight).
+    pub fn set_max_lock_waiters(&self, n: usize) {
+        self.max_waiters.store(n.clamp(1, LOCK_WAITERS_CEILING), Ordering::Relaxed);
+    }
+
+    /// Callers waiting for the connection now.
+    pub fn lock_waiting(&self) -> usize {
+        self.gate.waiting()
+    }
+
+    /// Statistics of the connection lock since the process started.
+    pub fn lock_stats(&self) -> LockSnapshot {
+        LockSnapshot {
+            max_hold: std::time::Duration::from_micros(self.stats.max_hold_us.load(Ordering::Relaxed)),
+            peak_waiters: self.stats.peak_waiters.load(Ordering::Relaxed),
         }
     }
 
@@ -2140,15 +2259,15 @@ mod lock_wait_tests {
 
         // More waiters than the queue allows are refused at once.
         set_lock_wait(Duration::from_secs(5));
-        let waiting: Vec<_> = (0..MAX_LOCK_WAITERS)
+        let waiting: Vec<_> = (0..DEFAULT_MAX_LOCK_WAITERS)
             .map(|_| {
                 let db = db.clone();
                 std::thread::spawn(move || db.worker_get("w"))
             })
             .collect();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while db.waiters.load(Ordering::Relaxed) < MAX_LOCK_WAITERS {
-            assert!(Instant::now() < deadline, "waiters never queued: {}", db.waiters.load(Ordering::Relaxed));
+        while db.lock_waiting() < DEFAULT_MAX_LOCK_WAITERS {
+            assert!(Instant::now() < deadline, "waiters never queued: {}", db.lock_waiting());
             std::thread::sleep(Duration::from_millis(5));
         }
         let started = Instant::now();
@@ -2164,9 +2283,34 @@ mod lock_wait_tests {
         for w in waiting {
             assert!(w.join().unwrap().is_ok());
         }
-        assert_eq!(db.waiters.load(Ordering::Relaxed), 0);
+        assert_eq!(db.lock_waiting(), 0);
         assert!(db.worker_get("w").unwrap().is_none());
         set_lock_wait(Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn callers_are_served_in_the_order_they_arrived() {
+        let (dir, db) = open();
+        let db = std::sync::Arc::new(db);
+        let held = db.c().unwrap();
+        let order = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut threads = Vec::new();
+        for i in 0..6 {
+            let (caller, order) = (db.clone(), order.clone());
+            threads.push(std::thread::spawn(move || {
+                let _c = caller.c().unwrap();
+                order.lock().unwrap().push(i);
+            }));
+            while db.lock_waiting() < i + 1 {
+                std::thread::sleep(Duration::from_millis(2)); // the next caller starts after this one queued
+            }
+        }
+        drop(held);
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

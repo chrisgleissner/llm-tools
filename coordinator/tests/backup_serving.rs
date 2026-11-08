@@ -19,12 +19,14 @@
 //! (default: only `--assume-mb-s 100`, so the product's 6 MiB/s write cap applies), `BACKUP_TEST_OUT` a file that
 //! receives the measurements, `BACKUP_TEST_KEEP` a directory to keep the generated database in.
 //!
-//! The test runs on Linux only (`cargo test -- --ignored` runs it elsewhere). The backup lowers its own
-//! I/O priority with the Linux idle class, and the hosted macOS and Windows runners have no equivalent:
-//! there a commit by the coordinator took 1.1 to 3 s while the copy was written (the slow call was the
-//! event batch commit itself, `/healthz` stayed under 10 ms), and requests that waited for the database
-//! connection behind it timed out with 503 `database-busy` after the 3 s wait. `tests/backup.rs` and
-//! `tests/db_stall.rs` cover backup correctness and runtime-thread independence on every platform.
+//! The test is ignored on Windows (`cargo test -- --ignored` runs it). On the hosted Windows runners the
+//! same traffic without any backup (`BACKUP_TEST_CONTROL=1`, CI run 42450825462) already showed event batch
+//! commits of 0.8 to 3 s (`slow database call events_store` in the server log) and 503 `database-busy` for
+//! the requests queued behind them, while `/healthz` stayed fast: the runner's disk cannot sustain the
+//! coordinator's synchronous commits for this fixture, whatever else runs. The same control run on the
+//! hosted macOS runner stayed under 1 s (slowest request 609 ms). `tests/backup.rs`, `tests/db_stall.rs` and
+//! `tests/db_lock_burst.rs` cover backup correctness and independence of the runtime and the connection queue
+//! from a slow database on every platform.
 mod common;
 use bridge_coordinator::{db::Db, db_path, ops};
 use common::*;
@@ -300,6 +302,7 @@ fn rows(path: &Path) -> (i64, i64, i64) {
     (n("events"), n("commands"), n("audit"))
 }
 
+#[cfg_attr(windows, ignore = "the hosted Windows disk stalls commits without any backup; see the module comment")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backup_of_a_large_database_does_not_stop_serving() {
     scenario(
@@ -309,20 +312,7 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     .await;
 }
 
-// DIAGNOSTIC (temporary): the same traffic without a backup, on every platform but Linux. It always
-// fails, with the measurements as the message, so the CI log shows them.
-#[cfg(not(target_os = "linux"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn diagnostic_control_run_without_a_backup() {
-    let out = std::env::temp_dir().join(format!("control-report-{}.txt", std::process::id()));
-    scenario(true, Some(out.clone())).await;
-    panic!("CONTROL RUN (no backup): {}", std::fs::read_to_string(out).unwrap_or_default());
-}
-
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 async fn scenario(control: bool, out_file: Option<PathBuf>) {
-    let _serial = SERIAL.lock().await; // two coordinators writing at once would disturb each other's timings
     let bin = std::env::var("BACKUP_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
     let old_binary = bin != BIN;
     let flags: Vec<String> = match std::env::var("BACKUP_TEST_FLAGS") {

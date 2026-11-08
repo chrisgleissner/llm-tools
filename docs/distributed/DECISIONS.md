@@ -505,8 +505,11 @@ the old code did not run a 300 ms timer for 4.7 s. Every public `Db` method now 
 through `db::blocking`, which uses `tokio::task::block_in_place` on a multi-thread runtime,
 so the worker hands its core to another thread while the call waits or commits (a
 `macro_rules!` wraps the whole `impl Db`, so no call site changed). The connection
-mutex is taken with a wait limit (3 s, `db::set_lock_wait` for tests) and at most 48
-callers may wait; beyond either the caller gets `SQLITE_BUSY`, which HTTP and the worker
+is handed out first come first served through a queue (`db::Gate`; each waiter sleeps on
+its own condition variable and the releasing caller wakes only the head of the queue). A
+caller waits at most 3 s (`db::set_lock_wait` for tests) and at most `max_connections` + 32
+callers may wait (every connection has one call in flight; 288 by default); beyond either
+the caller gets `SQLITE_BUSY`, which HTTP and the worker
 upgrade report as 503 `database-busy` with `Retry-After`, and the worker channel closes
 with 1011 and reconnects. `/healthz` never touches the database. Rejected: a dedicated
 database thread with a queue (every call site would have to become async, and the
@@ -515,6 +518,20 @@ connection mutex is recovered, and the waiter count is released on every exit pa
 serving continues when the slow commit ends; `coordinator/tests/db_stall.rs` checks that,
 and the unit tests in `db.rs` (`lock_wait_tests`) check the bounds.
 
-Remaining limit: a commit that holds the mutex for longer than the wait still makes
+The first version of this bound polled `try_lock` with a short sleep and allowed 48 waiters.
+That was wrong in two ways, found when the login-burst test in `hardening.rs` (60 concurrent
+sign-ins) answered 503 on the Windows runners and `coordinator/tests/db_lock_burst.rs` showed
+the same on Linux: 2 of 60 requests refused with `too many requests are waiting`, peak 49
+waiters, while the longest hold of the connection was 0.23 ms. Nothing slow runs under the
+connection on the login path (the password hash runs in `verify_blocking`, outside it; the
+locked sections are one read, one small write and the audit insert). A burst of N requests
+queues about N callers at once because they all arrive within a millisecond, and polling made
+the queue drain slowly and unfairly (on Windows a sleep lasts about 15 ms; with a 15 ms floor on
+Linux 7 of 60 were refused). Measured after the change: bursts of 60, 256 and 288 requests
+queue a peak of 56, 247 and 260 callers, none is refused, longest hold 0.8 to 3.6 ms. The limit
+now follows `max_connections` (the number of calls that can be in flight), clamped to 480 so the
+waiting threads stay below the 512 of tokio's blocking pool.
+
+Remaining limit: a commit that holds the connection for longer than the wait still makes
 database-backed requests answer 503 for its duration. Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.
