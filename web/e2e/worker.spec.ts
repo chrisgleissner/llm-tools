@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { Locator } from "@playwright/test";
 import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test, type Coordinator } from "./fixtures";
 
 const repo = resolve(import.meta.dirname, "../..");
@@ -13,6 +14,24 @@ function cleanEnv(state: string): NodeJS.ProcessEnv {
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("LLM_") && k !== "TMUX" && k !== "TMUX_PANE") env[k] = v;
   env["LLM_BRIDGE_STATE_DIR"] = state;
   return env;
+}
+
+/**
+ * Click a button in the tasks table until its effect is visible.
+ *
+ * After every task action the mission page redraws the tasks table several times in about half a second (the reply
+ * to the action, the coordinator's change notice, the changed mission digest). A redraw replaces the buttons. When
+ * it lands between the mouse-down and the mouse-up of a click, the browser never fires the click event (seen on
+ * Firefox, about 1 run in 20 under load). The status badge already shows the new state at the first redraw, so
+ * waiting for the badge does not wait for the last redraw. The effect of the click is the reliable signal: repeat the
+ * click while the effect is absent, and never click again once it holds.
+ */
+async function clickUntil(button: Locator, effect: (timeout: number) => Promise<void>): Promise<void> {
+  const holds = () => effect(100).then(() => true, () => false);
+  await expect(async () => {
+    if (!(await holds()) && (await button.count()) > 0) await button.click({ timeout: 2_000 });
+    await effect(2_000);
+  }).toPass({ timeout: 20_000 });
 }
 
 interface Fake {
@@ -91,27 +110,26 @@ test.describe("with a connected worker", () => {
 
       // Pause task 2 (round trip through coordinator, worker, SQLite and back).
       const second = page.locator("#tasks-table tbody tr", { hasText: "Second task" });
-      await second.getByRole("button", { name: "Pause" }).click();
-      await expect(second.locator(".badge")).toHaveText("paused", { timeout: 20_000 });
+      const badge = second.locator(".badge");
+      await clickUntil(second.getByRole("button", { name: "Pause" }), (timeout) => expect(badge).toHaveText("paused", { timeout }));
       await expect(page.locator(".toast", { hasText: /Pause task 2/ })).toBeVisible();
-      await second.getByRole("button", { name: "Resume" }).click();
-      await expect(second.locator(".badge")).not.toHaveText("paused", { timeout: 20_000 });
+      await clickUntil(second.getByRole("button", { name: "Resume" }), (timeout) => expect(badge).toHaveText("ready", { timeout }));
 
       // Destructive action: cancel asks for confirmation; declining changes nothing.
-      await second.getByRole("button", { name: "Cancel" }).click();
+      const cancel = second.getByRole("button", { name: "Cancel" });
       const dialog = page.getByRole("dialog");
-      await expect(dialog).toBeVisible();
+      await clickUntil(cancel, (timeout) => expect(dialog).toBeVisible({ timeout }));
       await expectAccessible(page, "confirmation dialog");
       await dialog.getByRole("button", { name: "Go back" }).click();
       await expect(dialog).toBeHidden();
-      await expect(second.locator(".badge")).not.toHaveText("cancelled");
-      await second.getByRole("button", { name: "Cancel" }).click();
+      await expect(badge).toHaveText("ready");
+      await clickUntil(cancel, (timeout) => expect(dialog).toBeVisible({ timeout }));
       await page.keyboard.press("Escape");
       await expect(dialog).toBeHidden();
-      await expect(second.locator(".badge")).not.toHaveText("cancelled");
-      await second.getByRole("button", { name: "Cancel" }).click();
+      await expect(badge).toHaveText("ready");
+      await clickUntil(cancel, (timeout) => expect(dialog).toBeVisible({ timeout }));
       await page.locator("#dialog-confirm").click();
-      await expect(second.locator(".badge")).toHaveText("cancelled", { timeout: 20_000 });
+      await expect(badge).toHaveText("cancelled", { timeout: 20_000 });
 
       // Stop the worker: the mission and worker become stale/offline while the page is open.
       await fake.stopWorker();
