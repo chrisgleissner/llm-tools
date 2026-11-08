@@ -71,7 +71,7 @@ test.describe("sessions and usage views", () => {
       await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
       const row = page.locator('[data-entity^="session:"]').first();
       await expect(row).toBeVisible({ timeout: 20_000 });
-      await expect(row).toContainText("codex");
+      await expect(row).toContainText(/codex/i);
       await row.getByRole("button", { name: "Details" }).click();
       await expect(row.locator(`code[title="${SESSION_ID}"]`)).toBeVisible();
       await expect(row.getByRole("link", { name: "Session mission" })).toBeVisible();

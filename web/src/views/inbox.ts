@@ -95,11 +95,11 @@ export function inbox(root: HTMLElement): () => void {
   }
 
   /** Read what the visible rows need: all of it after a change, only what is missing after a plain render. */
-  function fetchDetails(everything: boolean): void {
+  function fetchDetails(everything: boolean, allLines = false): void {
     if (disposed || store.conn !== "live" || !store.loaded) return;
     const t = targets(all());
     const s = everything ? t.statuses : t.statuses.filter((e) => !hasStatus(e));
-    const l = everything ? t.lines : t.lines.filter((e) => !hasLine(e));
+    const l = allLines ? t.lines : t.lines.filter((e) => !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
     void loadRowEvidence(needsOrder(all()).filter((i) => expandedOlder || !isOlderFailure(i)).slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
@@ -284,7 +284,7 @@ export function inbox(root: HTMLElement): () => void {
   const clock = window.setInterval(() => {
     if (document.visibilityState !== "visible") return;
     render();
-    fetchDetails(true);
+    fetchDetails(true, true);
     void renderPreview();
   }, 30000);
 

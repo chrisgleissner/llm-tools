@@ -566,13 +566,17 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   let wasOnline = online();
   let viewKey = "";
-  let workKey = "";
+  // The tasks are read again when the replicated digest of this mission changed (status, task counts, current task, what needs the
+  // operator), never on a timer. The status itself is drawn from the digest.
+  const workSig = (): string => {
+    const m = entry()?.mission;
+    return m ? JSON.stringify([m.status, m.task_counts, m.current_task, m.needs_kind, m.needs_you?.message, m.attention, m.station, m.model]) : "";
+  };
+  let workKey = workSig();
   const offStore = subscribe(() => {
     stamp();
     const e = entry();
-    // The tasks are read again when the replicated digest of this mission changed (status, task counts, current task, what needs the
-    // operator), never on a timer. The status itself is drawn from the digest.
-    const nextWork = e ? JSON.stringify([e.mission.status, e.mission.task_counts, e.mission.current_task, e.mission.needs_kind, e.mission.needs_you?.message, e.mission.attention, e.mission.station, e.mission.model]) : "";
+    const nextWork = workSig();
     if (nextWork !== workKey) {
       const first = workKey === "";
       workKey = nextWork;

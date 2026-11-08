@@ -97,7 +97,7 @@ test.describe("with a connected worker", () => {
       await second.getByRole("button", { name: "More actions for task 2" }).click();
       await page.getByRole("menuitem", { name: "Pause task" }).click();
       await expect(second.locator(".pill")).toHaveText("Paused", { timeout: 20_000 });
-      await expect(page.locator(".toast", { hasText: /Pause task 2/ })).toBeVisible();
+      await expect(page.locator(".toast", { hasText: /Paused task 2/ })).toBeVisible();
       await second.getByRole("button", { name: "Resume task 2" }).click();
       await expect(second.locator(".pill")).not.toHaveText("Paused", { timeout: 20_000 });
 

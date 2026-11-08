@@ -111,6 +111,7 @@ export async function loadLines(entries: MissionEntry[], stop: () => boolean = (
         const r = (row.result?.result ?? {}) as Record<string, unknown>;
         const line = r["available"] === true && typeof r["line"] === "string" && r["line"].trim() ? r["line"].trim() : null;
         lines.set(keyOf(e), { line, provider: typeof r["provider"] === "string" ? r["provider"] : null, task: typeof r["task"] === "number" ? r["task"] : null });
+        lineStamp.set(keyOf(e), stampOf(e));
         notify();
       } catch {
         /* an older worker does not know the operation: the row shows the typed work summary instead */
@@ -186,7 +187,13 @@ export function workOf(e: MissionEntry): Work | null {
 export const hasStatus = (e: MissionEntry): boolean => statuses.has(keyOf(e)) || inflight.has(keyOf(e));
 /** True while the mission's attention is unknown and its status read has not arrived (a read still in flight counts as not arrived). */
 export const statusPending = (e: MissionEntry): boolean => eligible(e) && listedNeeds(e.mission) === undefined && !statuses.has(keyOf(e));
-export const hasLine = (e: MissionEntry): boolean => lines.has(keyOf(e));
+/**
+ * True while the activity line read for this row is current: it is read again when the mission's digest moved on (a new update time or current task),
+ * not on every change notice. The pages read every line again on their slow refresh, so output that changes without a database event still shows.
+ */
+const lineStamp = new Map<string, string>();
+const stampOf = (e: MissionEntry): string => `${e.mission.updated_at}|${JSON.stringify(e.mission.current_task ?? null)}`;
+export const hasLine = (e: MissionEntry): boolean => lines.has(keyOf(e)) && lineStamp.get(keyOf(e)) === stampOf(e);
 
 export const lastLine = (e: MissionEntry): string => lines.get(keyOf(e))?.line ?? "";
 

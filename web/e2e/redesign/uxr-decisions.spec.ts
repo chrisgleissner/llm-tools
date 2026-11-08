@@ -210,7 +210,8 @@ uxr({ t: "T48", uxr: ["UXR-048"], needs: [...NEEDS] }, "R2: with several tasks a
 
 // ---- R3: one number everywhere (UXR-049) ---------------------------------------------------------------------------------------------------
 uxr({ t: "T48", uxr: ["UXR-049"], needs: [...NEEDS] }, "R3: the Inbox badge, the answer line and the Needs you heading show one number; '+' only while missions are unread", async ({ page }, info) => {
-  await openApp(page, DENSE, "/");
+  // A worker that sends neither the digest nor `attention`: the console reads the status of at most 12 active missions, so the 40 missions are not all read at once.
+  await openApp(page, { ...DENSE, digest: false, attention: false }, "/");
   const figure = async (text: string | null): Promise<string> => (text ?? "").match(/\d+\+?/)?.[0] ?? "";
   const numbers = async () => [await figure(await page.locator(".main-nav .nav-count").textContent()), await figure(await page.locator("[data-q=need-me]").textContent()), await figure(await page.locator('[data-section="needs-you"] h2').textContent())];
   await expect.poll(async () => new Set(await numbers()).size, { message: "badge, answer line and heading agree" }).toBe(1);

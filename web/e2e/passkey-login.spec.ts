@@ -57,7 +57,7 @@ test("passkey button signs in without a username and keeps password fallback", a
   await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Sign in with a passkey" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
   expect(mock.passkeyAssertionStartCount()).toBe(1);
   const finish = mock.passkeyAssertionFinish();
   expect(finish?.challenge_id).toBe("mock-challenge-1");
@@ -144,7 +144,7 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
 
   const registration = await page.evaluate(async () => {
     const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
@@ -209,7 +209,7 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await page.goto(`${localUrl}/login`);
   await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeVisible();
   await page.getByRole("button", { name: "Sign in with a passkey" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
   const categories = await page.evaluate(async () => (await fetch("/api/v1/security/notifications").then((r) => r.json()) as { notifications: Array<{ category: string }> }).notifications.map((item) => item.category));
   expect(categories).toContain("new_sign_in_device");
   await expect(page.getByText("A sign-in came from a new device.")).toBeVisible();

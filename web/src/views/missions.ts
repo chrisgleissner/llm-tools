@@ -125,13 +125,13 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
 
   const runningOf = (shown: Item[]): api.MissionEntry[] => shown.filter((i) => i.state.id === "running").slice(0, 8).map((i) => i.entry);
 
-  function fetchDetails(everything: boolean, shown: Item[]): void {
+  function fetchDetails(everything: boolean, shown: Item[], allLines = false): void {
     if (disposed || store.conn !== "live" || !reply) return;
     const running = runningOf(shown);
     const gaps = attentionGaps(reply.missions).slice(0, 12);
     const union = new Map([...gaps, ...running].map((e) => [`${e.worker}/${e.mission.id}`, e]));
     const s = [...union.values()].filter((e) => everything || !hasStatus(e));
-    const l = running.filter((e) => everything || !hasLine(e));
+    const l = running.filter((e) => allLines || !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
   }
@@ -261,7 +261,11 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     window.clearTimeout(renderTimer);
     renderTimer = window.setTimeout(render, 30);
   });
-  const clock = window.setInterval(() => document.visibilityState === "visible" && render(), 30000);
+  const clock = window.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    render();
+    if (reply) fetchDetails(true, reply.missions.map(itemOf).filter((i) => sectionOf(i.state) !== "finished"), true);
+  }, 30000);
   render();
   void load();
   return () => {

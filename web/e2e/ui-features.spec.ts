@@ -3,14 +3,13 @@ import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, 
 import { showTab } from "./redesign/harness";
 import { havePython, startSeededWorker } from "./seed";
 
-test("responsive navigation waits for its destination before falling back to More", async ({ page, coord }) => {
+test("responsive navigation waits for its destination to be shown", async ({ page, coord }) => {
   await setupViaUi(page, coord);
+  // The redesign has one navigation element for every width (no More sheet): a link that is not shown yet is waited for, never replaced by another control.
   await page.evaluate(() => {
     const workers = document.querySelector<HTMLAnchorElement>('nav[aria-label="Main"] a[href="/workers"]');
-    const more = document.querySelector<HTMLButtonElement>("#more-button");
-    if (!workers || !more) throw new Error("main navigation controls were not rendered");
+    if (!workers) throw new Error("main navigation controls were not rendered");
     workers.style.visibility = "hidden";
-    more.style.display = "none";
     window.setTimeout(() => { workers.style.visibility = ""; }, 150);
   });
   await navTo(page, "Workers");
@@ -155,9 +154,11 @@ test.describe("with a seeded worker", () => {
       const approvalTask = page.locator('[data-entity^="task:"]', { hasText: "Implement it" });
       await expect(approvalTask).toBeVisible();
       const approveStarted = Date.now();
-      await approvalTask.getByRole("button", { name: "Approve task 2" }).click();
+      // One place for the primary action (UXR-048): the header of the mission offers Approve for the task it is about, its row has no copy.
+      await expect(approvalTask.getByRole("button", { name: "Approve task 2" })).toHaveCount(0);
+      await page.locator('[data-l0="mission.header"]').getByRole("button", { name: "Approve task 2" }).click();
       await page.locator("#dialog-confirm").click();
-      await expect(page.locator(".toast", { hasText: "Approve task 2" })).toBeVisible();
+      await expect(page.locator(".toast", { hasText: /Approved task 2|approve task 2/ })).toBeVisible();
       const approveElapsedMs = Date.now() - approveStarted;
       if (browserName === "chromium") console.log(`UX task approve: ${isMobile ? "Pixel 4" : "1440x900"}, two clicks, ${approveElapsedMs} ms`);
 
@@ -194,18 +195,22 @@ test.describe("with a seeded worker", () => {
       const id = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
       if (id) expect(id).toMatch(/^[0-9a-f]{32}$/);
       // Rejecting a task asks for a reason, then reports the outcome in a toast that names it.
-      const row = rows.filter({ hasText: "Implement it" });
-      await row.getByRole("button", { name: "Reject task 2" }).click();
+      // Reject is in the header from 30rem, in the header menu below it (UXR-048).
+      const rejectButton = page.locator('[data-l0="mission.header"]').getByRole("button", { name: "Reject", exact: true });
+      if (await rejectButton.isVisible()) await rejectButton.click();
+      else {
+        await page.locator(".mission-head").getByRole("button", { name: "More mission actions" }).click();
+        await page.getByRole("menuitem", { name: "Reject task 2" }).click();
+      }
       const dlg = page.getByRole("dialog");
       await expect(dlg).toBeVisible();
       await dlg.locator("#dialog-confirm").click(); // no reason: refused, dialog stays
       await expect(dlg).toBeVisible();
       await dlg.getByLabel("Reason").fill("needs another pass");
       await dlg.locator("#dialog-confirm").click();
-      const toast = page.locator(".toast").filter({ hasText: "Reject task 2" });
+      const toast = page.locator(".toast").filter({ hasText: /reject(ed)? task 2/i });
       await expect(toast).toHaveAttribute("data-kind", /applied|rejected|accepted/, { timeout: 20_000 });
-      await expect(toast).toContainText(/Applied|Rejected|Accepted/);
-      await expect(toast).toContainText("Reject task 2");
+      await expect(toast).toContainText(/Rejected task 2|Asked the worker to reject task 2/);
     } finally {
       w.cleanup();
     }

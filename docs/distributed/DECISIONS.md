@@ -431,8 +431,7 @@ image with that one change made and then restored).
 | 5 | Key bar | On a phone it is hidden until the client holds control, at every height (it was hidden only up to 640 px). T38 changes with it: hidden before control, six keys plus "..." after. | "D28.5: on a phone the key bar is hidden until control..." and T38 | the old height condition in `phone.css` |
 | 6 | Reconnect banner age | The banner says "Showing data as of 12:00" and adds "(15s ago)" once the data is 10 s old. `shell.spec.ts` and T28 wait for it; T28 uses the fake clock because the fixed clock never reaches 10 s. | `shell.spec.ts` "a reconnect shorter than the debounce..." and T28 | `AGE_AFTER_MS = 0` |
 
-The overseer's findings, registered here as UXR-047 to UXR-052 (`SPEC_STATUS.md` has no UXR group on this branch, so the
-lead registers them on the release branch from this table):
+The overseer's findings are registered as UXR-047 to UXR-052 in `SPEC_STATUS.md` (the register has the UXR group since PR #35 merged):
 
 | Row | Finding | Change | Guarding test | Revert that fails it |
 |---|---|---|---|---|
@@ -443,8 +442,8 @@ lead registers them on the release branch from this table):
 | UXR-051 | R5: the pill column | The column is 8.5 rem in Needs you, 6.5 rem in Running and 11 rem elsewhere, so the title starts 40 px closer at 1440 px in Needs you and no pill reaches a title. | "R5: at 1440 px an Inbox title starts close to its pill..." | 11 rem in Needs you |
 | UXR-052 | R6: the phone search button | No fill and no border at rest, like the account button. | "R6: on a phone the search button has no fill and no border..." | the old border colour |
 
-UXR-043 to UXR-046 have no row in `SPEC_STATUS.md` on this branch; their guarding tests are `uxr-paths.spec.ts` (UXR-043, UXR-044),
-`uxr-keyboard.spec.ts` and `uxr-keyboard-only.spec.ts` (UXR-045) and `uxr-reach.spec.ts` (UXR-046).
+UXR-043 to UXR-046 are registered too; their guarding tests are `uxr-paths.spec.ts` (UXR-043, UXR-044), `uxr-keyboard.spec.ts` and
+`uxr-keyboard-only.spec.ts` (UXR-045) and `uxr-reach.spec.ts` (UXR-046).
 
 Answers to the questions of section 14 of `web-design-spec.md` (the section now records them):
 

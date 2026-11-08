@@ -21,7 +21,8 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F2: a failed Inbox row n
 
 // ---- F3: one count of what needs the operator on every page ---------------------------------------------------------
 uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F3: the Inbox badge, the tab title and the Missions answer line show the same count", async ({ page }) => {
-  await openApp(page, DENSE, "/missions");
+  // A worker without the digest and `attention`: the status of at most 12 active missions is read, so the count says it may be too small.
+  await openApp(page, { ...DENSE, digest: false, attention: false }, "/missions");
   const need = page.locator("[data-q=need-me]");
   await expect(need).not.toHaveText("Checking...");
   const badge = page.locator(".main-nav .nav-count");
@@ -117,23 +118,26 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F8: Evidence opens for t
 });
 
 // ---- F9: the header and the task list tell one story -------------------------------------------------------------------
-uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F9: an approval hint that the task list contradicts is not shown: no Needs approval pill and no Approve for a queued task", async ({ page }) => {
-  const app = await openApp(page, { auth: "in" }, MISSION_START_PATH);
-  const header = page.locator('[data-l0="mission.header"]');
-  await expect(header.locator(".pill").first()).toContainText("Queued");
-  // The status projection still says "awaiting approval" while the task list (read separately) shows both tasks queued.
-  app.setNeeds(MISSIONS[5]!.mission.id, { kind: "approval", tasks: [2], message: "task 2 awaits your review" });
-  app.setTasks(MISSIONS[5]!.mission.id, ["QUEUED", "QUEUED"]);
-  const id = MISSIONS[5]!.mission.id;
-  const reads = (suffix: string) => app.requests().filter((r) => r.method === "GET" && r.path === `/missions/${id}${suffix}`).length;
-  const [statusBefore, tasksBefore] = [reads(""), reads("/tasks")];
-  await page.reload();
-  // Both reads must have been answered before the header is judged: until then it shows only what the list says.
-  await expect.poll(() => [reads("") > statusBefore, reads("/tasks") > tasksBefore], { message: "the status and the task list were read again" }).toEqual([true, true]);
-  await page.waitForTimeout(500);
-  await expect(header.locator(".pill").first()).toContainText("Queued");
-  await expect(header.locator('[data-action="approve"]'), "Approve is not offered for a task that is not awaiting it").toHaveCount(0);
-});
+for (const [kind, worker] of [["a worker that sends the digest", { auth: "in" }], ["a worker that sends no digest", { auth: "in", digest: false, attention: false }]] as const) {
+  uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, `F9: an approval hint that the task list contradicts is not shown: no Needs approval pill and no Approve for a queued task (${kind})`, async ({ page }) => {
+    const readsStatus = "digest" in worker; // only a worker without the digest is asked for the status
+    const app = await openApp(page, worker, MISSION_START_PATH);
+    const header = page.locator('[data-l0="mission.header"]');
+    await expect(header.locator(".pill").first()).toContainText("Queued");
+    // The status projection (the digest, or the status read of an older worker) still says "awaiting approval" while the task list (read separately) shows both tasks queued.
+    app.setNeeds(MISSIONS[5]!.mission.id, { kind: "approval", tasks: [2], message: "task 2 awaits your review" });
+    app.setTasks(MISSIONS[5]!.mission.id, ["QUEUED", "QUEUED"]);
+    const id = MISSIONS[5]!.mission.id;
+    const reads = (suffix: string) => app.requests().filter((r) => r.method === "GET" && r.path === `/missions/${id}${suffix}`).length;
+    const [statusBefore, tasksBefore] = [reads(""), reads("/tasks")];
+    await page.reload();
+    // The task list must have been read again before the header is judged (and, for a worker without the digest, the status too): until then it shows only what the list says.
+    await expect.poll(() => [!readsStatus || reads("") > statusBefore, reads("/tasks") > tasksBefore], { message: "the status (when it is read) and the task list were read again" }).toEqual([true, true]);
+    await page.waitForTimeout(500);
+    await expect(header.locator(".pill").first()).toContainText("Queued");
+    await expect(header.locator('[data-action="approve"]'), "Approve is not offered for a task that is not awaiting it").toHaveCount(0);
+  });
+}
 
 uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F9: after Pause the running task says the mission is paused", async ({ page }) => {
   // A slow answer keeps the moment in which the mission is shown as paused but the task list still has its running task.

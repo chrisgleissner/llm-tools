@@ -82,7 +82,8 @@ test("the notification offer follows a new needs-you item and asks for permissio
     stub.requestPermission = () => { w.__asks += 1; return Promise.resolve("denied"); };
     (window as unknown as { Notification: unknown }).Notification = stub;
   });
-  const app = await mockApp(page, IN);
+  // The list answer is replaced below by one that carries no digest and no `attention`, so the first mission is not a needs-you item until its status turns FAILED.
+  const app = await mockApp(page, { ...IN, digest: false, attention: false });
   let calls = 0;
   await page.route("**/api/v1/missions", async (route) => {
     calls += 1;
