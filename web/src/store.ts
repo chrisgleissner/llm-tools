@@ -23,8 +23,17 @@ export interface StreamMessage {
   worker?: string;
   state?: string;
   cursor?: number;
-  events?: Array<Record<string, unknown>>;
-  command?: api.CommandRow;
+  /** `event`: number of events in the accepted batch, their id range and, per mission, how many events and whether a summary changed. */
+  count?: number;
+  first_event_id?: number | null;
+  last_event_id?: number | null;
+  missions?: Array<{ id: string; events: number; last_event_id: number; summary: boolean }>;
+  /** `event`: ids of the missions whose tasks changed in the batch (at most 16). */
+  task_missions?: string[];
+  /** `event`: the mission list in the notice was cut; read the mission list again. */
+  truncated?: boolean;
+  /** `command`: identity and state only; the request parameters and the result stay in `GET /api/v1/commands/{id}`. */
+  command?: Partial<api.CommandRow> & { request_id: string; outcome?: string | null };
   mission_id?: string;
   mode?: string;
   reason?: string;
@@ -43,6 +52,31 @@ export function publishStreamMessage(msg: StreamMessage): void {
 }
 function emit(): void {
   for (const l of [...listeners]) l();
+}
+
+/** New events of one worker, read from the coordinator after a change notice (`GET /api/v1/events`); the notice itself carries none. */
+const eventListeners = new Set<(events: api.BridgeEvent[]) => void>();
+export function onEvents(fn: (events: api.BridgeEvent[]) => void): () => void {
+  eventListeners.add(fn);
+  return () => eventListeners.delete(fn);
+}
+export function publishEvents(events: api.BridgeEvent[]): void {
+  for (const listener of [...eventListeners]) listener(events);
+}
+
+/** True when the worker replicated the digest (task counts, and for a live mission the current task, provider, model and needs): DOG-021. */
+export const hasDigest = (m: api.MissionInfo): boolean => m.task_counts !== undefined;
+
+/**
+ * Why the operator is needed, from what the coordinator's mission list already carries, so no worker is asked: `attention`
+ * (PRD-037 WP-7), else the digest's `needs_you` or `needs_kind`. `null` means nothing is needed, `undefined` that the worker sent
+ * neither (it predates both), so the status has to be read.
+ */
+export function listedNeeds(m: api.MissionInfo): api.NeedsYou | null | undefined {
+  if (m.attention !== undefined) return m.attention;
+  if (m.needs_you) return m.needs_you;
+  if (m.needs_kind) return { kind: m.needs_kind, message: "", tasks: [] };
+  return m.needs_kind === null ? null : undefined;
 }
 
 export function worker(name: string): WorkerInfo | undefined {

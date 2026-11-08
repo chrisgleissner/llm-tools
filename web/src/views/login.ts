@@ -11,6 +11,8 @@ const RESET_DOCS_URL = "https://github.com/chrisgleissner/llm-tools/blob/main/do
 
 export interface LoginOpts {
   setupRequired: boolean;
+  passkeySignInAvailable?: boolean;
+  passkeyCanonicalOrigin?: string | null;
   policy?: api.PasswordPolicy;
   sessionPolicy?: api.AuthState["session_policy"];
   notice?: { kind: NoticeKind; text: string } | null;
@@ -81,6 +83,23 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     ? `Not remembered: signed out after ${minutes(sp.default.idle_secs)} without activity or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. Remembered: signed in for up to ${minutes(sp.remembered.absolute_secs)}, or until ${minutes(sp.remembered.idle_secs)} idle.`
     : "Leave this off on a shared computer.";
   const submit = h("button", { type: "submit", class: "btn primary", id: "login-submit" }, "Sign in");
+  const passkey = h("button", { type: "button", class: "btn", id: "passkey-login", hidden: true }, "Sign in with a passkey");
+  let canonicalLink: HTMLElement | null = null;
+  if (!opts.passkeySignInAvailable && opts.passkeyCanonicalOrigin) {
+    try {
+      const canonical = new URL(opts.passkeyCanonicalOrigin);
+      if (canonical.protocol === "https:" && canonical.origin !== window.location.origin) {
+        canonicalLink = h(
+          "p",
+          { class: "hint", id: "passkey-canonical-link" },
+          "Passkeys are available at ",
+          h("a", { href: canonical.origin }, "the canonical coordinator address"),
+        );
+      }
+    } catch {
+      // Ignore an invalid origin; the password form remains available.
+    }
+  }
   const form = h(
     "form",
     { class: "card auth-card", id: "login-form", novalidate: true },
@@ -93,7 +112,8 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     h("details", { class: "aside" }, h("summary", {}, "What does remembering do?"), h("p", { class: "hint", id: "remember-hint" }, rememberHint)),
     error,
     progress,
-    h("div", { class: "actions" }, submit),
+    h("div", { class: "actions login-actions" }, passkey, submit),
+    canonicalLink,
     h(
       "div",
       { id: "forgot-password-hint" },
@@ -105,6 +125,8 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   let timer = 0;
   let blockedUntil = 0;
   let announcedAt = 0;
+  let passkeyController: AbortController | null = null;
+  let passkeyBusy = false;
   const label = "Sign in";
   const clockText = (at: Date): string => `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}`;
   const lockoutMessage = (left: number): string => `Too many failed sign-in attempts from this network. You can try again in ${left >= 60 ? `${Math.floor(left / 60)} min ${left % 60} s` : `${left} s`} (at ${clockText(new Date(blockedUntil))}).`;
@@ -125,6 +147,59 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     }
     submit.textContent = `Try again in ${left >= 60 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : `${left} s`}`;
   };
+  const resetProgress = (): void => {
+    submit.classList.remove("busy");
+    passkey.classList.remove("busy");
+    submit.disabled = false;
+    submit.textContent = label;
+    passkey.disabled = false;
+    passkey.textContent = "Sign in with a passkey";
+    progress.hidden = true;
+    progress.textContent = "";
+    passkeyBusy = false;
+  };
+  const runPasskey = async (conditional: boolean, prepared?: api.PasskeyAssertionStart): Promise<void> => {
+    if (!conditional && passkeyBusy) return;
+    if (!conditional) {
+      passkeyBusy = true;
+      submit.disabled = true;
+      passkey.disabled = true;
+      passkey.classList.add("busy");
+      passkey.textContent = "Waiting for your passkey…";
+      progress.textContent = "Waiting for your passkey…";
+      progress.hidden = false;
+    }
+    passkeyController?.abort();
+    const controller = new AbortController();
+    passkeyController = controller;
+    try {
+      const { requestOptions, serializeAssertion } = await import("../passkeys");
+      const start = prepared ?? await api.beginPasskeySignIn();
+      const publicKey = requestOptions(start.options);
+      const credential = await navigator.credentials.get({
+        publicKey,
+        mediation: conditional ? "conditional" : "required",
+        signal: controller.signal,
+      });
+      if (!credential) return;
+      await api.finishPasskeySignIn(start.challenge_id, serializeAssertion(credential));
+      opts.onDone("Signed in with a passkey.");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (conditional && err instanceof DOMException && err.name === "NotAllowedError") return;
+      error.textContent = err instanceof api.ApiError && err.status === 401
+        ? "That passkey could not sign you in. Try again or use your password."
+        : err instanceof DOMException && err.name === "NotAllowedError"
+          ? "No passkey was selected. Try again or use your password."
+          : err instanceof api.ApiError && err.status === 0
+            ? "Cannot reach the coordinator. Check your network connection and try again."
+            : err instanceof api.ApiError ? err.message : "Passkey sign-in did not complete. Try again or use your password.";
+    } finally {
+      if (passkeyController === controller) passkeyController = null;
+      if (!conditional) resetProgress();
+    }
+  };
+  passkey.addEventListener("click", () => void runPasskey(false));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     error.textContent = "";
@@ -175,6 +250,29 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   });
   authShell(root, form);
   user.input.focus();
+  if (opts.passkeySignInAvailable) {
+    void import("../passkeys").then(({ detectPasskeySupport }) => detectPasskeySupport()).then((capability) => {
+      if (!capability.supported || !form.isConnected) return;
+      passkey.hidden = false;
+      if (capability.platformAuthenticator) passkey.dataset.platformAuthenticator = "available";
+      if (!capability.conditional) return;
+      void (async () => {
+        try {
+          const start = await api.beginPasskeySignIn();
+          const { requestOptions } = await import("../passkeys");
+          const publicKey = requestOptions(start.options);
+          // Conditional UI requires discoverable credentials. Until the server advertises them,
+          // keep the normal button available and leave username autocomplete unchanged.
+          if (publicKey.allowCredentials && publicKey.allowCredentials.length > 0) return;
+          user.input.setAttribute("autocomplete", "username webauthn");
+          void runPasskey(true, start);
+        } catch {
+          // The password form stays usable if capability probing or challenge creation fails.
+        }
+      })();
+    }).catch(() => {});
+  }
+  form.addEventListener("submit", () => passkeyController?.abort());
 }
 
 // ------------------------------------------------------------------ first-run setup

@@ -1,0 +1,8 @@
+# cargo audit configuration (PRD-025). Keep this list identical to the
+# [advisories] ignore list in ../deny.toml, which records the reason for each entry;
+# tests/test_dependency_policy_audit_config.py checks that the two lists agree.
+[advisories]
+ignore = [
+    # rsa via webauthn-rs 0.6.2: public-key assertion verification only, see deny.toml.
+    "RUSTSEC-2023-0071",
+]

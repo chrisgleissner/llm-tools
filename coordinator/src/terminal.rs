@@ -7,7 +7,7 @@
 //! it in `s` frames.
 
 use crate::auth::sha256_hex;
-use crate::http::{err, origin_ok, ApiError, Authed, Principal, St};
+use crate::http::{err, origin_ok, ApiError, Authed, Principal, St, WorkerCertificate};
 use crate::hub::{SendResult, TermReg, TermStatus};
 use crate::protocol::{valid_id, valid_name};
 use axum::extract::ws::{close_code, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
@@ -34,8 +34,32 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 const BROWSER_FRAME_LIMIT: usize = 256 * 1024;
 const WORKER_FRAME_LIMIT: usize = 1024 * 1024;
 const TO_WORKER_QUEUE: usize = 64;
+/// Per-terminal byte budget for validated browser input waiting on a slow worker socket.
+pub const TO_WORKER_QUEUE_BYTES: usize = 128 * 1024;
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 const LAG_GRACE: Duration = Duration::from_secs(30);
+
+fn queue_worker_frame(tx: &mpsc::Sender<String>, queued: &AtomicUsize, frame: String) -> bool {
+    let bytes = frame.len();
+    loop {
+        let current = queued.load(Ordering::SeqCst);
+        let Some(total) = current.checked_add(bytes).filter(|total| *total <= TO_WORKER_QUEUE_BYTES) else {
+            return false;
+        };
+        if queued.compare_exchange_weak(current, total, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            break;
+        }
+    }
+    if tx.try_send(frame).is_err() {
+        queued.fetch_sub(bytes, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
+fn release_worker_bytes(queued: &AtomicUsize, bytes: usize) {
+    queued.fetch_sub(bytes, Ordering::SeqCst);
+}
 
 fn close_frame(code: u16, reason: &str) -> Ws {
     Ws::Close(Some(CloseFrame {
@@ -49,7 +73,8 @@ fn clean(s: &str) -> String {
 }
 
 fn x_frame(reason: &str) -> String {
-    json!({"t": "x", "reason": reason}).to_string()
+    let bounded: String = reason.chars().filter(|ch| !ch.is_control()).take(64).collect();
+    json!({"t": "x", "reason": bounded}).to_string()
 }
 
 // ---------------------------------------------------------------- browser endpoint
@@ -255,6 +280,7 @@ async fn relay(
     let queued = Arc::new(AtomicUsize::new(0));
     let (v_tx, mut v_rx) = mpsc::unbounded_channel::<ViewerItem>();
     let (w_tx, mut w_rx) = mpsc::channel::<String>(TO_WORKER_QUEUE);
+    let worker_queue_bytes = Arc::new(AtomicUsize::new(0));
 
     // Viewer writer: drains the byte-bounded queue into the browser socket.
     let mut writer = {
@@ -284,9 +310,13 @@ async fn relay(
         })
     };
     // Worker writer: input and resize frames; a full queue drops frames instead of stalling the relay.
+    let worker_queue_bytes_writer = worker_queue_bytes.clone();
     let worker_writer = tokio::spawn(async move {
         while let Some(text) = w_rx.recv().await {
-            if w_sink.send(Ws::Text(text.into())).await.is_err() {
+            let bytes = text.len();
+            let sent = w_sink.send(Ws::Text(text.into())).await;
+            release_worker_bytes(&worker_queue_bytes_writer, bytes);
+            if sent.is_err() {
                 return w_sink;
             }
         }
@@ -299,7 +329,11 @@ async fn relay(
             queued.fetch_sub(n, Ordering::SeqCst);
             return false;
         }
-        v_tx.send(ViewerItem::Frame(text, n)).is_ok()
+        if v_tx.send(ViewerItem::Frame(text, n)).is_err() {
+            queued.fetch_sub(n, Ordering::SeqCst);
+            return false;
+        }
+        true
     };
 
     let mut writer_done = false;
@@ -313,7 +347,7 @@ async fn relay(
                 match incoming {
                 Some(Ok(Ws::Text(t))) => {
                     if let Some(frame) = checked_browser_frame(t.as_str()) {
-                        let _ = w_tx.try_send(frame);
+                        let _ = queue_worker_frame(&w_tx, &worker_queue_bytes, frame);
                     }
                 }
                 Some(Ok(Ws::Close(_))) | None | Some(Err(_)) => break End::Browser,
@@ -347,7 +381,9 @@ async fn relay(
     // ---- teardown
     match &end {
         End::Worker(reason) => {
-            let _ = v_tx.send(ViewerItem::Frame(x_frame(reason), 0));
+            let frame = x_frame(reason);
+            let bytes = frame.len();
+            let _ = v_tx.send(ViewerItem::Frame(frame, bytes));
             let _ = v_tx.send(ViewerItem::Close(close_code::NORMAL, reason.clone()));
         }
         End::Lagged => {
@@ -384,20 +420,40 @@ async fn relay(
 
 // ---------------------------------------------------------------- worker endpoint
 
-pub async fn worker(State(st): State<St>, Path(session_id): Path<String>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn worker(
+    State(st): State<St>,
+    Path(session_id): Path<String>,
+    cert: Option<axum::Extension<WorkerCertificate>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let fail = |status: StatusCode, code: &'static str, m: &'static str| err(status, code, m).into_response();
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    let name = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
-        Some(Ok(Some(w))) => w.name,
+    let worker = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
+        Some(Ok(Some(w))) => w,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
             return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
         }
         _ => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or revoked worker token"),
     };
+    if st.cfg.worker_mtls {
+        let Some(fingerprint) = cert.and_then(|axum::Extension(c)| c.0) else {
+            return fail(StatusCode::UNAUTHORIZED, "unauthorized", "worker client certificate required");
+        };
+        match st.db.worker_client_certificate_matches(&worker.name, &fingerprint) {
+            Ok(true) => {}
+            Ok(false) => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "worker client certificate does not match token"),
+            Err(e) => {
+                eprintln!("database error: {e}");
+                return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
+            }
+        }
+    }
+    let name = worker.name;
     if !valid_id(&session_id) {
         return fail(StatusCode::NOT_FOUND, "unknown-session", "no such terminal session");
     }
@@ -415,6 +471,23 @@ pub async fn worker(State(st): State<St>, Path(session_id): Path<String>, header
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_input_queue_refuses_bytes_above_its_per_session_budget() {
+        let (tx, mut rx) = mpsc::channel(TO_WORKER_QUEUE);
+        let queued = AtomicUsize::new(0);
+        let first = "x".repeat(96 * 1024);
+        let second = "y".repeat(40 * 1024);
+        assert!(queue_worker_frame(&tx, &queued, first.clone()));
+        assert!(!queue_worker_frame(&tx, &queued, second.clone()));
+        assert_eq!(queued.load(Ordering::SeqCst), first.len());
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(sent, first);
+        release_worker_bytes(&queued, sent.len());
+        assert_eq!(queued.load(Ordering::SeqCst), 0);
+        assert!(queue_worker_frame(&tx, &queued, second.clone()));
+        assert_eq!(rx.recv().await.as_deref(), Some(second.as_str()));
+    }
 
     #[test]
     fn browser_frames_are_validated() {
@@ -439,6 +512,16 @@ mod tests {
         assert!(checked_browser_frame(&big).is_none());
         let max = json!({"t": "i", "d": b64.encode(vec![b'a'; MAX_INPUT_BYTES])}).to_string();
         assert!(checked_browser_frame(&max).is_some());
+    }
+
+    #[test]
+    fn terminal_error_frame_bounds_untrusted_worker_reason() {
+        let encoded = x_frame(&format!("{}\n", "🙂".repeat(1000)));
+        let frame: Value = serde_json::from_str(&encoded).unwrap();
+        let reason = frame["reason"].as_str().unwrap();
+        assert_eq!(reason.chars().count(), 64);
+        assert!(reason.len() <= 256);
+        assert!(!reason.chars().any(char::is_control));
     }
 
     #[test]

@@ -8,6 +8,8 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import soak_plot  # noqa: E402
@@ -35,6 +37,7 @@ def test_plot_is_well_formed_svg_with_a_warmup_band_and_a_named_group(tmp_path) 
     assert text.count("Mission controllers") == 1 and "Workers" in text and "Coordinator" in text
 
 
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="the soak sampler reads process state from /proc (Linux only)")
 def test_sampler_finds_no_processes_for_an_unused_runtime_prefix_and_reads_stats_for_this_one() -> None:
     assert soak_sampler.sample_once(("/nonexistent-prefix-",), 0.0) == []
     rss, anon, threads, fds = soak_sampler.process_stats(os.getpid())

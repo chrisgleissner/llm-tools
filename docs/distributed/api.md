@@ -200,7 +200,7 @@ once; the list response contains metadata only:
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90}' \
+  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90,"allowed_cidrs":["192.0.2.0/24"],"allowed_workers":["build-1"]}' \
   "$COORDINATOR/api/v1/tokens"
 
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -223,6 +223,20 @@ documented removal date before removal.
 contract; `tests/test_openapi_compat.py` fails on removed paths, operations or
 fields and on newly required fields.
 
+`allowed_cidrs` is optional; when present, every use of that token must come
+from one of the listed IPv4 or IPv6 CIDR ranges. The coordinator uses the peer
+address unless the request arrived through a configured trusted proxy. Invalid,
+duplicate, or more than 32 ranges are rejected. An empty or omitted list allows
+any client address.
+
+`allowed_workers` is optional. An empty or omitted list allows every worker; a
+non-empty list is limited to 32 unique names of currently enrolled workers.
+The coordinator filters worker and mission lists and checks worker names on
+individual worker, mission, and terminal routes. Worker-bound tokens cannot use
+global audit, diagnostics, or token-management routes, or the low-level
+`/commands` adapter; use the resource endpoints that name a worker instead.
+Denied requests are audited without recording the token secret.
+
 Mutation requests with a body must use `Content-Type: application/json` (UTF-8
 is accepted); other media types receive `415 unsupported-media-type`.
 Bodies are limited to 1 MiB, 4 nested levels, 64 KiB UTF-8 strings, 1,000
@@ -236,6 +250,11 @@ navigation (`navigate` / `document`) to a console HTML page. Cross-site API,
 asset and WebSocket requests receive a problem response. This supplements exact
 Origin and CSRF checks; it does not replace them. Requests without Fetch Metadata
 remain available to non-browser clients and still need normal authentication.
+
+The low-level command adapter rejects an embedded command request over 64 KiB
+with `413 request-too-large`. A worker or global pending-command byte budget
+returns `429 queue-full`; these limits are represented in the generated
+OpenAPI problem responses.
 
 Bearer-authenticated mutations are limited to 30 requests per token and 120 per
 client address in a rolling 60-second window. The limit applies after authentication
@@ -258,6 +277,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
+| `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
 | `mission colour` | Typed `mission.settings.patch` field `colour`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission color` | Alias of `mission colour`; same typed settings field. |
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
@@ -298,6 +318,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `backup` | **API-016 incomplete:** `backup --target` is explicitly rejected. The worker only has an outbound WebSocket carrying durable `command` and `command.result` messages; the coordinator journals both request and result JSON. There is no ephemeral worker rendezvous, binary frame, or download channel. Returning bounded chunks as command results would therefore persist prompt/evidence bytes in the coordinator journal. A safe implementation needs a protocol extension for authenticated, bounded, non-journaled streaming with cancellation and cleanup. Until then run backup locally on the worker and transfer it outside the coordinator. |
 | `restore` | Typed `worker.restore`; admin-scoped resource `POST /api/v1/workers/{name}/restore`; worker requires `--allow-restore` and an input file inside an enrolled `--allow-root`. Restore refuses while controllers run and keeps a pre-restore backup. |
 | `worker enroll` | Exclusion: writes local worker credentials; coordinator-side worker creation is `POST /api/v1/workers` by an admin. |
+| `worker rotate-token` | Exclusion: installs a one-time staged secret in this host's private enrollment file; obtain it with the coordinator's local `worker rotate-token NAME` command and install it locally. The REST API never reads or writes worker credential files. |
 | `worker status` | Exclusion: reads this host enrolment; no remote equivalent; run locally. |
 | `worker run` | Exclusion: starts the outbound worker service; run locally on enrolled host. |
 | `worker audit` | Typed `worker.audit`; admin-scoped resource `GET /api/v1/workers/{name}/audit`. |
@@ -380,6 +401,8 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--allow-restore` | Local worker opt-in required for remote restore; no request can override the worker setting. |
 | `--allow-terminal-view` | Local worker enrollment terminal-view policy; terminal authorization remains scoped WebSocket. |
 | `--ca-file` | Local TLS trust configuration for worker/remote clients; not sent in API requests. |
+| `--client-cert-file` | Local output path for the coordinator-issued worker client certificate; local file only. |
+| `--client-key-file` | Local `0600` output path for the coordinator-issued worker private key; local file only. |
 | `--coordinator` | Local connection configuration; API base URL is client config, not request field. |
 | `--token-file` | Local credential input; token is stored privately and sent only as Authorization header. |
 | `--print` | Local service-unit preview; no API. |
@@ -404,7 +427,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--to` | `mission.steer` typed field `route` for handoff (same as `--route`). |
 | `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
 | `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
-| `--yes` | Confirmation for `cancel`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. |
+| `--yes` | Confirmation for `cancel` and `mission delete`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. `mission delete` always asks (a mission the worker would refuse gets no question, only the refusal), and the prompt names the mission. |
 | `-f` | Short form of `--follow` for `events`. |
 | `-j` | Short form of `--json`. |
 | `-m` | Short form of `--mission`. |
@@ -424,8 +447,10 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/auth/password` |
 | `POST /api/v1/auth/passkeys/registration/start` |
 | `POST /api/v1/auth/passkeys/registration/finish` |
+| `GET /api/v1/auth/passkeys` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
+| `POST /api/v1/auth/passkeys/re-enroll` |
 | `GET /api/v1/workers` |
 | `POST /api/v1/workers` |
 | `GET /api/v1/workers/{name}` |
@@ -438,9 +463,12 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/tokens` |
 | `POST /api/v1/tokens` |
 | `DELETE /api/v1/tokens/{name}` |
+| `GET /api/v1/security/notifications` |
+| `DELETE /api/v1/security/notifications/{id}` |
 | `GET /api/v1/missions` |
 | `POST /api/v1/missions` |
 | `GET /api/v1/missions/{id}` |
+| `DELETE /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
 | `GET /api/v1/missions/{id}/agents` |

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
-    AUTONOMY_ABORT_EXIT_CODE, HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
+    AUTONOMY_ABORT_EXIT_CODE, DELETABLE_MISSION_STATUSES, HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
 )
 from .bridge_vocab import mission_mode
 from .bridge_vocab import status_label
@@ -89,6 +89,13 @@ def mission_transition_message(mission_id: str, old: str, new: str, *, verb: str
     if new == "PAUSED":
         return f"mission {short} is {old.lower()}, not running, so there is nothing to pause"
     return f"mission {short} is {old.lower()} and cannot become {new.lower()}"
+
+
+def mission_delete_refusal(mission_id: str, status: str) -> str:
+    """The message for `mission delete` on a mission that is running, paused or stopping."""
+    short = str(mission_id)[:8]
+    return (f"mission {short} is {status.lower()}, so it cannot be deleted; stop it with: llm-bridge stop --mission {short} "
+            f"(or end it with: llm-bridge cancel --mission {short}), then delete it")
 
 
 _HEADING_MARKERS = re.compile(r"^\s*#{1,6}(?:\s+|$)")
@@ -2153,6 +2160,79 @@ class BridgeStore:
                 if not thin(mission_id, "capacity-refresh", events_before):
                     return {"missions": missions, "complete": False}
         return {"missions": missions, "complete": True}
+
+    # ---- mission deletion (PRD-038) ----
+    # The tombstone table is created by the first deletion rather than by a schema migration, so a
+    # database that never deletes a mission keeps its schema number and an older llm-bridge opens it.
+    _TOMBSTONE_TABLE = (
+        "CREATE TABLE IF NOT EXISTS mission_tombstones ("
+        "mission_id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, "
+        "deleted_at TEXT NOT NULL, replicated_at TEXT) WITHOUT ROWID"
+    )
+    TOMBSTONE_KEEP_DAYS = 90
+    TOMBSTONE_KEEP_COUNT = 1000
+
+    def _has_tombstone_table(self) -> bool:
+        return self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_tombstones'").fetchone() is not None
+
+    def delete_mission(self, mission_id: str) -> dict[str, Any]:
+        """Remove a mission and everything the database holds about it, in one transaction.
+
+        Only a mission that never started or has ended or been stopped may be deleted
+        (``DELETABLE_MISSION_STATUSES``); any other state raises ``TransitionError``. The tasks,
+        dependencies, amendments, operations, events, queued commands, managed processes and task
+        counters of the mission go with it. A tombstone row (identifier, name, final status, time)
+        replaces it: the worker replicates the tombstone to the coordinator, which then drops its copy.
+        The result lists the counts and the log files the operations referenced, which the caller removes
+        after the commit.
+        """
+        with self._transaction():
+            mission = self._mission_row(mission_id)
+            status = str(mission["status"])
+            if status not in DELETABLE_MISSION_STATUSES:
+                raise TransitionError(mission_delete_refusal(mission_id, status))
+            count = lambda table: int(self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE mission_id=?", (mission_id,)).fetchone()[0])  # noqa: E731 - table names are literals below
+            counts = {"tasks": count("tasks"), "events": count("events"), "operations": count("operations")}
+            log_paths = [str(row[0]) for row in self.db.execute(
+                "SELECT logs_path FROM operations WHERE mission_id=? AND logs_path IS NOT NULL", (mission_id,))]
+            self.db.execute(self._TOMBSTONE_TABLE)
+            self.db.execute("DELETE FROM missions WHERE id=?", (mission_id,))  # the foreign keys cascade to every dependent table
+            self.db.execute("DELETE FROM mission_task_counts WHERE mission_id=?", (mission_id,))  # has no foreign key
+            now = utc_now()
+            self.db.execute(
+                "INSERT OR REPLACE INTO mission_tombstones(mission_id,name,status,deleted_at,replicated_at) VALUES(?,?,?,?,NULL)",
+                (mission_id, str(mission["name"]), status, now),
+            )
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=self.TOMBSTONE_KEEP_DAYS)).isoformat(timespec="seconds")
+            self.db.execute("DELETE FROM mission_tombstones WHERE deleted_at<?", (cutoff,))
+            self.db.execute(
+                "DELETE FROM mission_tombstones WHERE mission_id NOT IN "
+                "(SELECT mission_id FROM mission_tombstones ORDER BY deleted_at DESC,mission_id LIMIT ?)",
+                (self.TOMBSTONE_KEEP_COUNT,),
+            )
+        return {"mission_id": mission_id, "name": str(mission["name"]), "status": status, "deleted_at": now,
+                "log_paths": log_paths, **counts}
+
+    def pending_tombstones(self, limit: int = 50) -> list[str]:
+        """Identifiers of deleted missions the coordinator has not yet been told about, oldest first."""
+        if not self._has_tombstone_table():
+            return []
+        return [str(row[0]) for row in self.db.execute(
+            "SELECT mission_id FROM mission_tombstones WHERE replicated_at IS NULL ORDER BY deleted_at,mission_id LIMIT ?", (int(limit),))]
+
+    def mark_tombstones_replicated(self, mission_ids: Iterable[str]) -> None:
+        ids = [str(item) for item in mission_ids]
+        if not ids or not self._has_tombstone_table():
+            return
+        with self._transaction():
+            self.db.executemany("UPDATE mission_tombstones SET replicated_at=? WHERE mission_id=?", [(utc_now(), item) for item in ids])
+
+    def tombstone(self, mission_id: str) -> dict[str, Any] | None:
+        """The tombstone of a deleted mission, or ``None``."""
+        if not self._has_tombstone_table():
+            return None
+        row = self.db.execute("SELECT * FROM mission_tombstones WHERE mission_id=?", (mission_id,)).fetchone()
+        return None if row is None else dict(row)
 
     def operations_with_logs(self, mission_id: str, *, limit: int) -> list[dict[str, Any]]:
         """Operations of a mission that still reference a log file, oldest first."""

@@ -259,7 +259,7 @@ export function inbox(root: HTMLElement): () => void {
     renderTimer = window.setTimeout(render, 30);
   }
 
-  const signature = () => JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.updated_at, m.mission.needs_you ?? null, (m.mission as { attention?: unknown }).attention ?? null]), store.workers.map((w) => [w.name, w.state]), store.conn, store.loaded]);
+  const signature = () => JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.updated_at, m.mission.needs_you ?? null, m.mission.attention ?? null, m.mission.needs_kind ?? null, m.mission.task_counts ?? null, m.mission.current_task ?? null, m.mission.station ?? null, m.mission.model ?? null]), store.workers.map((w) => [w.name, w.state]), store.conn, store.loaded]);
   const scheduleDetails = (delay: number) => {
     window.clearTimeout(detailTimer);
     detailTimer = window.setTimeout(() => {

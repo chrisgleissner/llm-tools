@@ -107,7 +107,7 @@ DEFAULT_BOUNDS: dict[str, SlopeBound] = {
     "coordinator_fds": SlopeBound(per_hour=4, floor=4, unit="descriptors"),
     "coordinator_threads": SlopeBound(per_hour=2, floor=4, unit="threads"),
     "coordinator_db_bytes": SlopeBound(per_hour=32 * 1024 * 1024, floor=8 * 1024 * 1024, unit="bytes"),
-    "workers_rss_kib": SlopeBound(per_hour=3 * 1024, floor=1024, unit="KiB", per_process=True),
+    "workers_rss_kib": SlopeBound(per_hour=512, floor=1024, unit="KiB", per_process=True),
     "workers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
     "workers_threads": SlopeBound(per_hour=1, floor=1, unit="threads", per_process=True),
     "controllers_rss_kib": SlopeBound(per_hour=1536, floor=512, unit="KiB", per_process=True),
@@ -443,6 +443,62 @@ class ApiClient:
 # Coordinator
 # --------------------------------------------------------------------------------------------
 
+@dataclass
+class TerminalOpen:
+    """One remote terminal opened through the coordinator, timed from the browser's request to the first screen."""
+
+    seconds_to_first_output: float | None
+    seconds_to_status: float | None
+    frames: int
+    error: str = ""
+
+
+def open_terminal(coordinator: "Coordinator", worker: str, mission_id: str, *, mode: str = "view", cols: int = 100, rows: int = 30,
+                  limit: float = 15.0, hold: float = 2.0) -> TerminalOpen:
+    """Open ``/api/v1/terminal`` as an API client and wait for the first ``o`` frame (the screen snapshot), then read for ``hold`` seconds.
+
+    The clock starts before the WebSocket upgrade request and stops when the first output frame has arrived, so the figure includes
+    the coordinator's ``terminal.open`` to the worker, the worker's own connection to the coordinator and the first snapshot.
+    """
+    from llm_tools import bridge_ws
+
+    context = ssl.create_default_context(cafile=str(coordinator.ca_file))
+    query = f"worker={worker}&mission={mission_id}&mode={mode}&cols={cols}&rows={rows}"
+    started = time.monotonic()
+    first = status = None
+    frames = 0
+    try:
+        client = bridge_ws.WebSocketClient.connect(f"wss://{HOST}:{coordinator.port}/api/v1/terminal?{query}",
+                                                   headers={"Authorization": f"Bearer {coordinator.api_token}"}, context=context, timeout=limit)
+    except (OSError, bridge_ws.WebSocketError) as exc:
+        return TerminalOpen(None, None, 0, f"{type(exc).__name__}: {exc}")
+    try:
+        end = started + limit
+        while time.monotonic() < end and (first is None or time.monotonic() < first + started + hold):
+            try:
+                text = client.receive_text(timeout=max(0.05, min(0.5, end - time.monotonic())))
+            except (OSError, bridge_ws.WebSocketError) as exc:
+                return TerminalOpen(first, status, frames, f"{type(exc).__name__}: {exc}")
+            if text is None:
+                continue
+            frames += 1
+            try:
+                kind = json.loads(text).get("t")
+            except ValueError:
+                kind = None
+            elapsed = time.monotonic() - started
+            if kind == "s" and status is None:
+                status = elapsed
+            if kind == "o" and first is None:
+                first = elapsed
+            if kind == "x":
+                return TerminalOpen(first, status, frames, "session ended: " + text[:120])
+        return TerminalOpen(first, status, frames, "" if first is not None else f"no output within {limit:g}s")
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
+
+
 def _ignore_sigxfsz() -> None:
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # a write past RLIMIT_FSIZE fails with EFBIG instead of killing the process
 
@@ -677,8 +733,9 @@ class WorkerNode:
     """One enrolled worker: its own state, runtime, config and home directories and a ``worker run`` process."""
 
     def __init__(self, name: str, base: Path, *, seed: int = 0, mix: ProviderMix | None = None, speed: float = 1.0,
-                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20) -> None:
+                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20, extra_env: dict[str, str] | None = None) -> None:
         self.name = name
+        self.extra_env = dict(extra_env or {})
         self.base = base
         self.state = base / "state"
         self.runtime = short_temp_dir(f"lbw-{name}-")
@@ -712,6 +769,7 @@ class WorkerNode:
             "LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT": str(self.question_idle), "LLM_SCHEDULER_IDLE_TIMEOUT": str(self.idle_timeout),
             "SOAK_PROVIDER_SEED": str(self.seed), "SOAK_PROVIDER_MIX": self.mix.text(), "SOAK_PROVIDER_SPEED": str(self.speed),
         })
+        env.update(self.extra_env)
         env.update(extra)
         return env
 
@@ -765,10 +823,11 @@ class WorkerNode:
             process.wait(timeout=10)
 
     # -- missions
-    def create_mission(self, label: str, *, prompt: str | None = None, run_provider: bool = True) -> str:
+    def create_mission(self, label: str, *, prompt: str | None = None, run_provider: bool = True, mode: str = "headless") -> str:
+        """Create a mission. ``mode="background"`` gives it a tmux station, which a remote terminal needs."""
         folder = self.base / "projects" / label
         folder.mkdir(parents=True, exist_ok=True)
-        args = ["mission", "create", "--prompt", prompt or f"soak mission {label}", "--cwd", str(folder), "--providers", "codex", "--mode", "headless",
+        args = ["mission", "create", "--prompt", prompt or f"soak mission {label}", "--cwd", str(folder), "--providers", "codex", "--mode", mode,
                 "--new", "--json"]
         if run_provider:
             args += ["--verifier", "true", "--command-template", shlex.join([sys.executable, str(PROVIDER_SCRIPT)])]
@@ -826,9 +885,11 @@ class WorkerNode:
         except sqlite3.Error:
             return Counter()
 
-    def event_ids(self) -> list[int]:
+    def event_ids(self, exclude_kinds: Sequence[str] = ()) -> list[int]:
         with self.database() as connection:
-            return [int(row[0]) for row in connection.execute("SELECT id FROM events ORDER BY id")]
+            marks = ",".join("?" for _ in exclude_kinds)
+            query = "SELECT id FROM events" + (f" WHERE kind NOT IN ({marks})" if exclude_kinds else "") + " ORDER BY id"
+            return [int(row[0]) for row in connection.execute(query, tuple(exclude_kinds))]
 
     def last_event_id(self) -> int:
         with self.database() as connection:
@@ -1047,7 +1108,7 @@ class Sampler:
     def take(self) -> dict[str, Any]:
         elapsed = self.clock() - self._origin
         coordinator = self.coordinator.stats() or {}
-        workers = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0}
+        workers: dict[str, Any] = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0, "by_pid": {}}
         controllers: dict[str, Any] = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0, "by_pid": {}}
         tasks: Counter[str] = Counter()
         nodes = list(self.nodes())
@@ -1059,6 +1120,7 @@ class Sampler:
                 for key in ("rss_kib", "fds", "threads"):
                     workers[key] += stats[key]
                 workers["max_rss_kib"] = max(workers["max_rss_kib"], stats["rss_kib"])
+                workers["by_pid"][str(node.pid)] = stats["rss_kib"]
             for pid in by_runtime.get(str(node.runtime), []):
                 stats = proc_stats(pid)
                 if stats:
@@ -1114,8 +1176,8 @@ def metric_value(sample: dict[str, Any], metric: str) -> float | None:
 def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBound], *, warmup_fraction: float = 0.25, min_samples: int = 4,
                        warmup_seconds: float | None = None, ceilings: dict[str, tuple[float, str]] | None = None,
                        process_bounds: dict[str, SlopeBound] | None = None) -> list[SlopeResult]:
-    """Slope and ceiling checks. ``process_bounds`` holds the unscaled bound of ``controllers_rss_kib``: when the samples carry
-    the per-process sizes of the controllers, that metric is judged per process (``check_per_process_slope``), not on the sum."""
+    """Slope and ceiling checks. ``process_bounds`` holds the unscaled bounds of ``controllers_rss_kib`` and ``workers_rss_kib``: when
+    the samples carry the per-process sizes (``by_pid``), that metric is judged per process (``check_per_process_slope``), not on the sum."""
     results = []
     rows = [(float(s["t"]), float(sum((s.get("rows") or {}).values()))) for s in samples]
 
@@ -1128,14 +1190,15 @@ def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBou
     def coordinator_memory_explained_by_rows(first: float, last: float) -> float:
         return max(0.0, rows_at(last) - rows_at(first)) * COORDINATOR_RSS_BYTES_PER_ROW / 1024.0
 
-    controllers_by_pid: dict[str, list[tuple[float, float]]] = {}
-    for sample in samples:
-        for pid, kib in ((sample.get("controllers") or {}).get("by_pid") or {}).items():
-            controllers_by_pid.setdefault(str(pid), []).append((float(sample["t"]), float(kib)))
+    by_pid: dict[str, dict[str, list[tuple[float, float]]]] = {"controllers_rss_kib": {}, "workers_rss_kib": {}}
+    for metric, table in by_pid.items():
+        for sample in samples:
+            for pid, kib in ((sample.get(metric.split("_")[0]) or {}).get("by_pid") or {}).items():
+                table.setdefault(str(pid), []).append((float(sample["t"]), float(kib)))
 
     for metric, bound in bounds.items():
-        if metric == "controllers_rss_kib" and controllers_by_pid and process_bounds and metric in process_bounds:
-            results.append(check_per_process_slope(metric, controllers_by_pid, process_bounds[metric],
+        if by_pid.get(metric) and process_bounds and metric in process_bounds:
+            results.append(check_per_process_slope(metric, by_pid[metric], process_bounds[metric],
                                                    warmup_seconds=warmup_seconds if warmup_seconds is not None else 0.0, min_samples=min_samples))
             continue
         points = [(float(s["t"]), float(v)) for s in samples if (v := metric_value(s, metric)) is not None]

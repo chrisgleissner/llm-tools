@@ -15,13 +15,13 @@ HTTP_RS = ROOT / "coordinator/src/http.rs"
 # Intentional local-only commands are named explicitly in the docs. The remaining
 # entries are likewise present so a new CLI leaf cannot silently escape review.
 COMMANDS = {
-    "help", "view", "mission create", "mission list", "mission set", "mission settings", "mission colour", "mission color",
+    "help", "view", "mission create", "mission list", "mission set", "mission settings", "mission delete", "mission colour", "mission color",
     "status", "screen", "agents", "suspend-until-credits", "task add", "task list", "task show",
     "task amend", "task priority", "task reorder", "task dependencies", "task pause", "task resume",
     "task cancel", "task retry", "task verify", "task approve", "task output", "task diff", "task reject", "proposal create", "proposal list",
     "proposal accept", "proposal reject", "events", "start", "pause", "resume", "continue", "stop",
     "cancel", "attach", "detach", "missions", "gc", "backup", "restore", "worker enroll",
-    "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service",
+    "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service", "worker rotate-token",
     "worker unenroll", "worker list", "remote login", "remote status", "remote logout", "finish", "doctor",
     "theme", "console", "control", "usage", "station", "rotation", "steer", "_station-gc", "_controller",
 }

@@ -766,6 +766,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view notes.md"),
     "mission set": ("Change a saved mission setting: automatic continue, team guidance, token spend, or suspending when rate limited", "mission set --mission ID --auto-continue on"),
     "mission colour": ("Pin the mission's identity colour (1-8) or return to the automatic one", "mission colour --mission ID 3"),
+    "mission delete": ("Permanently delete a mission that never started or has ended or been stopped, with its tasks, events and logs; asks first, and refuses a running one", "mission delete ID"),
     "theme": ("Show the detected terminal background, the active colour theme and a swatch per role", "theme --theme light"),
     "backup": ("Write a consistent copy of the Bridge database (missions, tasks, events); an existing file is never overwritten", "backup --output bridge-backup.db"),
     "restore": ("Replace the Bridge database with a backup; the current one is kept beside it", "restore --input bridge-backup.db"),
@@ -775,6 +776,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "remote logout": ("Delete the stored coordinator URL, CA and API token", "remote logout"),
     "worker": ("Optional: let a Bridge coordinator use this computer; nothing connects unless you enrol and run it", "worker status"),
     "worker enroll": ("Store the coordinator URL, CA and worker token for this computer", "worker enroll --name workstation --coordinator wss://bridge.home.arpa:8443 --token-file worker.token"),
+    "worker rotate-token": ("Install a coordinator-staged worker token without enrolling again", "worker rotate-token --token-file staged.token"),
     "worker status": ("Show this computer's enrolment without the token", "worker status"),
     "worker run": ("Run the worker in the foreground until interrupted", "worker run"),
     "worker audit": ("Show this worker's security audit log (no tokens or terminal content)", "worker audit --limit 20"),
@@ -802,6 +804,7 @@ EFFECTS: dict[str, str] = {
     "mission create": "saves a new mission in Bridge's database; starts no provider.",
     "mission set": "changes a saved setting of the mission.",
     "mission colour": "changes the mission's saved colour.",
+    "mission delete": "permanently removes the mission from this computer, and from a coordinator the worker is connected to. This cannot be undone.",
     "task add": "adds a task to the mission; if the mission is running, the provider uses paid capacity on it when its turn comes. A running native Claude Code, Codex or Copilot is also told about the task at its next idle prompt.",
     "task amend": "replaces the task's text; a provider that is working on it sees the change after its current step.",
     "task priority": "changes the order in which tasks run.",
@@ -836,6 +839,7 @@ EFFECTS: dict[str, str] = {
     "remote login": "stores the coordinator URL and API token on this computer.",
     "remote logout": "deletes the stored coordinator URL and API token.",
     "worker enroll": "stores the coordinator URL and worker token on this computer.",
+    "worker rotate-token": "replaces the stored worker token with the one staged by the coordinator.",
     "worker run": "lets the coordinator reach this computer; with --allow-control at enrolment it can start and control missions here.",
     "worker install-service": "installs and starts a systemd user unit that runs the worker.",
     "worker uninstall-service": "stops and removes the worker's systemd user unit.",
@@ -844,7 +848,7 @@ EFFECTS: dict[str, str] = {
 
 # Subcommand order on group pages, most common first; commands not named follow in registered order.
 _COMMAND_ORDER: dict[str, tuple[str, ...]] = {
-    "mission": ("create", "list", "set", "settings", "colour"),
+    "mission": ("create", "list", "set", "settings", "delete", "colour"),
     "task": ("add", "list", "show", "approve", "reject", "amend", "verify", "output", "diff", "pause", "resume", "cancel", "retry", "priority", "reorder", "dependencies"),
     "proposal": ("list", "accept", "reject", "create"),
 }

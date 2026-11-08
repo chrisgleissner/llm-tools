@@ -19,6 +19,15 @@ async fn login_with(env: &Env, remember: Option<Value>) -> (Api, String) {
     (api, sc)
 }
 
+async fn sign_in_with_ua(api: &Api, user_agent: &str) -> reqwest::Response {
+    api.bare(Method::POST, "/api/v1/auth/login")
+        .header("user-agent", user_agent)
+        .json(&json!({"username":"admin", "password":PASSWORD}))
+        .send()
+        .await
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mutation_bodies_require_json_content_type() {
     let env = boot().await;
@@ -32,6 +41,315 @@ async fn mutation_bodies_require_json_content_type() {
         .await;
     assert_eq!(status, 415, "{body}");
     assert_eq!(body["type"], "https://llm-tools.dev/problems/unsupported-media-type");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn security_notifications_are_durable_scoped_and_dismissible() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"notice-token","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let (status, body) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(status, 200, "{body}");
+    let notices = body["notifications"].as_array().unwrap();
+    assert!(notices.iter().any(|item| item["category"] == "new_sign_in_address"));
+    let token_notice = notices
+        .iter()
+        .find(|item| item["category"] == "api_token_created")
+        .expect("token creation event");
+    let id = token_notice["id"].as_str().unwrap();
+    let (status, _) = api.send(api.rb(Method::DELETE, &format!("/api/v1/security/notifications/{id}"))).await;
+    assert_eq!(status, 200);
+    let (_, body) = api.get("/api/v1/security/notifications").await;
+    assert!(!body["notifications"].as_array().unwrap().iter().any(|item| item["id"] == id));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_sign_in_from_a_new_device_creates_a_notice_without_storing_user_agent() {
+    let env = boot().await;
+    let mut api = env.admin().await;
+    let first = sign_in_with_ua(&api, "ExampleBrowser/1 Linux").await;
+    assert_eq!(first.status().as_u16(), 200, "{}", first.text().await.unwrap());
+    let cookie = first.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    api.cookie = Some(cookie.split(';').next().unwrap().strip_prefix("__Host-bridge_session=").unwrap().to_string());
+    api.csrf = Some(first.json::<Value>().await.unwrap()["csrf_token"].as_str().unwrap().to_string());
+    let (status, notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(status, 200);
+    assert!(notices["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["category"] == "new_sign_in_device"));
+
+    let repeated = sign_in_with_ua(&api, "ExampleBrowser/1 Linux").await;
+    assert_eq!(repeated.status().as_u16(), 200);
+    let (_, repeated_notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(
+        repeated_notices["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        1
+    );
+
+    let different = sign_in_with_ua(&api, "ExampleBrowser/2 Android").await;
+    assert_eq!(different.status().as_u16(), 200);
+    let (_, different_notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(
+        different_notices["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        2
+    );
+
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    let conn = rusqlite::Connection::open(bridge_coordinator::db_path(&env.dir)).unwrap();
+    let stored: String = conn
+        .query_row("SELECT fingerprint_hash FROM known_login_devices LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert!(!stored.contains("ExampleBrowser"));
+    assert_eq!(
+        db.security_notifications_list("admin")
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        2
+    );
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let (status, created) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({
+                "name":"network-limited", "scopes":["read"], "allowed_cidrs":["192.0.2.0/24"]
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["token"]["allowed_cidrs"], json!(["192.0.2.0/24"]));
+    let secret = created["secret"].as_str().unwrap();
+    let response = admin.bare(Method::GET, "/api/v1/auth/state").bearer_auth(secret).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 403, "auth/state must enforce token network restrictions too");
+    let response = admin.bare(Method::GET, "/api/v1/missions").bearer_auth(secret).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 403);
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["code"], "token-address-denied");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/token-address-denied");
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    let audit = db.audit_list(20).unwrap();
+    assert!(audit.iter().any(|row| row["action"] == "authorization.denied.address"));
+    let (status, allowed) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"local-network", "scopes":["read"], "allowed_cidrs":["127.0.0.0/8"]}),
+        )
+        .await;
+    assert_eq!(status, 201, "{allowed}");
+    let response = admin
+        .bare(Method::GET, "/api/v1/missions")
+        .bearer_auth(allowed["secret"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let (status, problem) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({
+                "name":"bad-network", "scopes":["read"], "allowed_cidrs":["192.0.2.1"]
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    for name in ["worker-a", "worker-b"] {
+        let (status, body) = admin.post("/api/v1/workers", json!({"name":name})).await;
+        assert_eq!(status, 201, "{body}");
+    }
+    for (worker, worker_id, mission) in [("worker-a", "worker-id-a", "mission-a"), ("worker-b", "worker-id-b", "mission-b")] {
+        let mut hello = serde_json::Map::new();
+        hello.insert("missions".into(), json!([{"id":mission,"name":mission}]));
+        env.srv.state.db.worker_hello(worker, worker_id, &hello, &json!([]), "127.0.0.1").unwrap();
+    }
+    let (status, created) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"one-worker", "scopes":["admin"], "allowed_workers":["worker-a"]}),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["token"]["allowed_workers"], json!(["worker-a"]));
+    let token = created["secret"].as_str().unwrap();
+    let (status, invalid) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"unknown-worker-key", "scopes":["read"], "allowed_workers":["not-enrolled"]}),
+        )
+        .await;
+    assert_eq!(status, 400, "{invalid}");
+
+    let workers: Value = admin
+        .bare(Method::GET, "/api/v1/workers")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(workers["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(workers["workers"][0]["name"], "worker-a");
+
+    let missions: Value = admin
+        .bare(Method::GET, "/api/v1/missions")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missions["total"], 1);
+    assert_eq!(missions["missions"][0]["worker"], "worker-a");
+
+    let permitted = admin.bare(Method::GET, "/api/v1/workers/worker-a").bearer_auth(token).send().await.unwrap();
+    assert_eq!(permitted.status().as_u16(), 200);
+    let forbidden = admin.bare(Method::GET, "/api/v1/workers/worker-b").bearer_auth(token).send().await.unwrap();
+    assert_eq!(forbidden.status().as_u16(), 403);
+    assert_eq!(forbidden.json::<Value>().await.unwrap()["code"], "token-worker-denied");
+
+    let forbidden_mission = admin
+        .bare(Method::GET, "/api/v1/missions/private-mission?worker=worker-b")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_mission.status().as_u16(), 403);
+    let forbidden_terminal = admin
+        .bare(Method::GET, "/api/v1/terminal?worker=worker-b&mission=private-mission&mode=view")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_terminal.status().as_u16(), 403);
+    let forbidden_create = admin
+        .bare(Method::POST, "/api/v1/missions")
+        .bearer_auth(token)
+        .json(&json!({"worker":"worker-b","prompt":"no","cwd":"/tmp"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_create.status().as_u16(), 403);
+    let forbidden_low_level = admin
+        .bare(Method::POST, "/api/v1/commands")
+        .bearer_auth(token)
+        .json(&json!({"target":"worker-a","request":{"operation":"mission.status"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_low_level.status().as_u16(), 403);
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    assert!(db.audit_list(20).unwrap().iter().any(|row| row["action"] == "authorization.denied.worker"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_origin_reenrollment_requires_password_and_atomically_clears_credentials() {
+    let env = boot_with(|text| text.replace("allowed_origins = []", "allowed_origins = [\"https://new.example.test\"]")).await;
+    let api = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put_at_origin(
+        &bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "old-credential".into(),
+            principal_id: "admin".into(),
+            credential: "stored-passkey".into(),
+            user_name: "old device".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        },
+        "https://old.example.test",
+    )
+    .unwrap();
+    let path = "/api/v1/auth/passkeys/re-enroll";
+    let body = json!({"current_password":"wrong password","new_origin":"https://new.example.test","confirm":true});
+    let request = |body: Value| {
+        api.c
+            .post(format!("{}{path}", api.base))
+            .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+            .header("origin", "https://new.example.test")
+            .header("x-csrf-token", api.csrf.as_deref().unwrap())
+            .json(&body)
+    };
+    let (status, _) = api.send(request(body)).await;
+    assert_eq!(status, 401);
+    assert_eq!(db.passkey_count("admin").unwrap(), 1);
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://old.example.test"));
+
+    let body = json!({"current_password":PASSWORD,"new_origin":"https://new.example.test","confirm":true});
+    let (status, response) = api.send(request(body)).await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["registration_required"], true);
+    assert_eq!(db.passkey_count("admin").unwrap(), 0);
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://new.example.test"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_list_returns_only_declared_management_metadata() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put(&bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "public-handle".into(),
+        principal_id: "admin".into(),
+        credential: "private-credential-json-must-not-leak".into(),
+        user_name: "phone".into(),
+        created_at: bridge_coordinator::now(),
+        last_used: Some(bridge_coordinator::now()),
+        aaguid: Some("00112233-4455-6677-8899-aabbccddeeff".into()),
+        transports: "[\"internal\"]".into(),
+        backup_eligible: true,
+        backed_up: true,
+        sign_count: 42,
+    })
+    .unwrap();
+    let (status, body) = api.get("/api/v1/auth/passkeys").await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body["passkeys"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "phone");
+    assert_eq!(rows[0]["provider_aaguid"], "00112233-4455-6677-8899-aabbccddeeff");
+    assert_eq!(rows[0]["synced"], true);
+    assert!(rows[0].get("credential").is_none());
+    assert!(rows[0].get("transports").is_none());
+    assert!(rows[0].get("sign_count").is_none());
+    assert!(!body.to_string().contains("private-credential-json-must-not-leak"));
+    let (status, _) = api.get("/api/v1/auth/passkeys").await;
+    assert_eq!(status, 200);
     env.stop().await;
 }
 
@@ -55,6 +373,8 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     assert_eq!(st, 200);
     assert_eq!(body["password_policy"]["min_length"], bridge_coordinator::auth::MIN_PASSWORD_LEN);
     assert_eq!(body["password_policy"]["max_length"], bridge_coordinator::auth::MAX_PASSWORD_LEN);
+    assert_eq!(body["passkey_sign_in_available"], false);
+    assert!(body["passkey_canonical_origin"].is_null());
     assert!(
         body.get("username").is_none() && body.get("session").is_none(),
         "nothing about the session before sign-in: {body}"
@@ -74,6 +394,60 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["username"], "admin");
     assert!(body["session"]["expires_at"].as_i64().unwrap() > bridge_coordinator::now());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_sign_in_is_advertised_only_on_the_bound_canonical_origin() {
+    let env = boot_with(|t| {
+        t.replace(
+            "allowed_origins = []",
+            "allowed_origins = [\"https://bridge.example.test\"]\npublic_origin = \"https://bridge.example.test\"",
+        )
+    })
+    .await;
+    let _ = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put_at_origin(
+        &bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "credential".into(),
+            principal_id: "admin".into(),
+            credential: "{}".into(),
+            user_name: "Phone".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        },
+        "https://bridge.example.test",
+    )
+    .unwrap();
+    drop(db);
+
+    let api = env.api();
+    let (status, body) = api.get("/api/v1/auth/state").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["passkey_sign_in_available"], false, "IP origin must not advertise passkeys");
+    let response = api
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("origin", "https://bridge.example.test")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["passkey_sign_in_available"], true);
+    assert_eq!(body["passkey_canonical_origin"], "https://bridge.example.test");
+    let response = api
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("origin", "https://other.example.test")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["passkey_sign_in_available"], false);
     env.stop().await;
 }
 
@@ -138,17 +512,56 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
         .await;
     assert_eq!(status, 201, "{created}");
     let secret = created["secret"].as_str().expect("one-time token secret");
-    assert!(!secret.is_empty());
+    let mut token_parts = secret.split('_');
+    assert_eq!(token_parts.next(), Some("lbr"));
+    assert_eq!(token_parts.next(), Some("pat"));
+    assert_eq!(
+        token_parts.next().map(str::len),
+        Some(16),
+        "token id is visible for scanning and identification"
+    );
+    assert_eq!(token_parts.next().map(str::len), Some(64), "token secret encodes 256 random bits");
+    assert!(token_parts.next().is_none());
     assert_eq!(created["token"]["scopes"], json!(["read", "operate"]));
     assert!(created["token"]["created_at"].as_str().unwrap().ends_with('Z'));
     assert!(created["token"]["expires_at"].as_str().unwrap().ends_with('Z'));
+    assert!(created["token"]["last_address"].is_null());
+    let mut bearer = env.api();
+    bearer.bearer = Some(secret.to_string());
+    assert_eq!(bearer.get("/api/v1/missions").await.0, 200, "prefixed bearer token authenticates");
+    let mut wrong_secret = secret.to_string();
+    let last_secret_char = wrong_secret.chars().last().unwrap();
+    wrong_secret.pop();
+    wrong_secret.push(if last_secret_char == '0' { '1' } else { '0' });
+    let mut rejected = env.api();
+    rejected.bearer = Some(wrong_secret);
+    assert_eq!(rejected.get("/api/v1/missions").await.0, 401, "wrong token secret is rejected");
+    let legacy_secret = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped(
+            "legacy-token",
+            &bridge_coordinator::auth::sha256_hex(&legacy_secret),
+            None,
+            &["read".to_string()],
+        )
+        .unwrap());
+    let mut legacy = env.api();
+    legacy.bearer = Some(legacy_secret);
+    assert_eq!(legacy.get("/api/v1/missions").await.0, 200, "old unprefixed bearer tokens remain accepted");
 
     let (status, listed) = api.get("/api/v1/tokens").await;
     assert_eq!(status, 200);
     let token = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "automation").unwrap();
+    assert_eq!(token["id"], created["token"]["id"]);
     assert_eq!(token["scopes"], json!(["read", "operate"]));
-    assert!(token["last_used"].is_null());
+    assert!(token["last_used"].as_str().is_some_and(|value| value.ends_with('Z')));
+    assert_eq!(token["last_address"], "127.0.0.1");
     assert!(token.get("secret").is_none() && token.get("token_hash").is_none());
+    let legacy = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "legacy-token").unwrap();
+    assert!(legacy["id"].is_null(), "legacy token has no public token ID");
 
     let (status, revoked) = api.send(api.rb(Method::DELETE, "/api/v1/tokens/automation")).await;
     assert_eq!(status, 200, "{revoked}");
@@ -157,6 +570,92 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
         .unwrap()
         .iter()
         .any(|t| t["name"] == "automation"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_last_use_address_uses_only_configured_trusted_proxy_headers() {
+    let env = boot_with(|t| t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")).await;
+    let admin = env.admin().await;
+    let (status, created) = admin.post("/api/v1/tokens", json!({"name":"address-check","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let mut client = env.api();
+    client.bearer = Some(created["secret"].as_str().unwrap().to_string());
+    let response = client
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("x-forwarded-for", "198.51.100.27")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap()["authenticated"], true);
+    let listed = admin.get("/api/v1/tokens").await.1;
+    let token = listed["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|token| token["name"] == "address-check")
+        .unwrap();
+    assert_eq!(token["last_address"], "198.51.100.27");
+    let audit = env.srv.state.db.audit_list(20).unwrap();
+    assert!(audit.iter().any(|event| {
+        event["actor"] == "token:address-check"
+            && event["action"] == "token.use"
+            && event["remote"] == "198.51.100.27"
+            && event["detail"].as_str().is_some_and(|detail| detail.contains("scopes=read"))
+    }));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_mutation_budget_keys_on_trusted_client_address() {
+    let env = boot_with(|t| {
+        t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")
+            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2")
+    })
+    .await;
+    let admin = env.admin().await;
+    let (_, token_a) = admin.post("/api/v1/tokens", json!({"name":"automation-a","scopes":["admin"]})).await;
+    let (_, token_b) = admin.post("/api/v1/tokens", json!({"name":"automation-b","scopes":["admin"]})).await;
+    for (name, token, address) in [
+        ("created-a", token_a["secret"].as_str().unwrap(), "198.51.100.27"),
+        ("created-b", token_b["secret"].as_str().unwrap(), "203.0.113.42"),
+    ] {
+        let mut client = env.api();
+        client.bearer = Some(token.to_string());
+        let response = client
+            .rb(Method::POST, "/api/v1/tokens")
+            .header("x-forwarded-for", address)
+            .json(&json!({"name":name,"scopes":["read"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            201,
+            "different trusted client address {address} has a separate budget"
+        );
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry() {
+    let env = boot_with(|t| t.replace("max_token_lifetime_days = 3650", "max_token_lifetime_days = 1")).await;
+    let api = env.admin().await;
+    let (status, body) = api.post("/api/v1/tokens", json!({"name":"too-long","scopes":["read"],"expires_days":2})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "invalid-request");
+
+    let (status, body) = api.post("/api/v1/tokens", json!({"name":"one-day","scopes":["read"],"expires_days":1})).await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["token"]["expires_at"].as_str().is_some());
+
+    let (status, body) = api
+        .post("/api/v1/tokens", json!({"name":"local-forever","scopes":["read"],"expires_days":0}))
+        .await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["token"]["expires_at"].is_null());
     env.stop().await;
 }
 
@@ -178,6 +677,14 @@ async fn passkey_registration_start_is_bound_to_https_named_origin_and_session()
     assert_eq!(options["options"]["publicKey"]["rp"]["id"], "bridge.example.test");
     assert_eq!(options["options"]["publicKey"]["attestation"], "none");
     assert_eq!(options["options"]["publicKey"]["authenticatorSelection"]["userVerification"], "required");
+    assert_eq!(options["options"]["publicKey"]["authenticatorSelection"]["residentKey"], "required");
+    let algorithms = options["options"]["publicKey"]["pubKeyCredParams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|parameter| parameter["alg"].as_i64())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(algorithms, [-257, -8, -7].into_iter().collect());
     let challenge_id = options["challenge_id"].as_str().unwrap();
     assert_eq!(challenge_id.len(), 64);
 
@@ -339,6 +846,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "203.0.113.7",
         )
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-resource-test");
 
     let (status, command) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=25&offset=5").await;
     assert_eq!(status, 202, "{command}");
@@ -354,6 +862,16 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let (status, status_command) = api.get("/api/v1/missions/mission-1?worker=build-1").await;
     assert_eq!(status, 202, "{status_command}");
     assert_eq!(status_command["operation"], "mission.status");
+    // The size controls of the bounded reads pass through; nothing else does.
+    let (status, sized) = api
+        .get("/api/v1/missions/mission-1?worker=build-1&task_limit=2&prompt_chars=80&event_limit=3")
+        .await;
+    assert_eq!(status, 202, "{sized}");
+    assert_eq!(sized["request"]["params"], json!({"task_limit":2,"prompt_chars":80,"event_limit":3}));
+    let (status, clipped) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=10&prompt_chars=0").await;
+    assert_eq!(status, 202, "{clipped}");
+    assert_eq!(clipped["request"]["params"], json!({"limit":10,"offset":0,"prompt_chars":0}));
+    assert_eq!(api.get("/api/v1/missions/mission-1?worker=build-1&limit=5").await.0, 400);
     env.stop().await;
 }
 
@@ -456,6 +974,7 @@ async fn cli_parity_resource_adapters_queue_the_expected_typed_operations() {
         .db
         .worker_hello("build-1", "worker-id-parity", &hello, &json!(capabilities), "203.0.113.8")
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-parity");
     let routes = [
         (
             Method::GET,
@@ -654,7 +1173,7 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "etag-worker", 0).await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "etag-worker", 0).await;
     let read_api = Api {
         c: api.c.clone(),
         base: api.base.clone(),
@@ -716,7 +1235,7 @@ async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "cursor-worker", 0).await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "cursor-worker", 0).await;
 
     let filters = "worker=w1;mission=m1;resource=tasks;limit=1";
     let cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/tasks", filters, 3);
@@ -748,6 +1267,7 @@ async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
             json!({"schema_version":1,"request_id":request_id,"operation":"task.list","outcome":"ok","result":{"tasks":[{"ordinal":4}],"total":5,"offset":3},"error":null}),
         )
         .await;
+    worker.barrier().await;
     let response = get.await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
     let body: Value = response.json().await.unwrap();
@@ -869,6 +1389,14 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
         .expect("a session idle for 3 h is valid under the original 8 h limit");
     assert!(s.remember);
     assert_eq!(s.idle_secs, bridge_coordinator::db::SESSION_IDLE_SECS);
+    drop(db);
+    let migrated_version: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(migrated_version, bridge_coordinator::db::SCHEMA_VERSION);
+    let reopened = bridge_coordinator::db::Db::open(&path).expect("partial legacy fixture remains reopenable after migration");
+    assert!(reopened.session_get("old").unwrap().is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
 

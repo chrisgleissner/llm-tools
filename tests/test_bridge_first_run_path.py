@@ -66,17 +66,32 @@ class Terminal:
     def type(self, text: str) -> None:
         self._tmux("send-keys", "-t", self.session, "-l", text)
 
-    def wait_for(self, text: str, timeout: float = 20.0) -> str:
+    def wait_for(self, *texts: str, timeout: float = 20.0) -> str:
+        """Return the first screen that shows every one of ``texts``.
+
+        Curses writes a frame in several pieces, so a capture taken while it redraws can hold
+        one expected string and only part of another. Waiting for all of them avoids
+        asserting on a half-drawn frame.
+        """
         deadline = time.monotonic() + timeout
         screen = ""
         while time.monotonic() < deadline:
             screen = self.screen()
-            if text in screen:
+            if all(text in screen for text in texts):
                 return screen
             time.sleep(0.1)
-        raise AssertionError(f"timed out waiting for {text!r}; the screen shows:\n{screen}")
+        raise AssertionError(f"timed out waiting for {texts!r}; the screen shows:\n{screen}")
 
     def close(self) -> None:
+        # Killing a client attached to a completed mission triggers the station's
+        # client-detached hook, which launches a background `_station-gc` process.
+        # This fixture owns the whole tmux server, so remove that hook before
+        # shutdown instead of creating work that can outlive the test.
+        subprocess.run(
+            ["tmux", "-S", str(self.socket), "set-hook", "-gu", "client-detached"],
+            capture_output=True,
+            timeout=20,
+        )
         subprocess.run(["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=20)
 
 
@@ -126,47 +141,38 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     # 2. The home screen offers a new mission and names the key.
     terminal = Terminal(runtime / "drive.sock", env, repo, [sys.executable, "-m", "llm_tools.bridge"])
     terminals.append(terminal)
-    home = terminal.wait_for("New mission in this folder")
-    assert "N new mission" in home
+    terminal.wait_for("New mission in this folder", "N new mission")
 
     # 3. The form defaults to the provider that is installed and signed in, not to codex.
     terminal.keys("n")
-    form = terminal.wait_for("Objective:")
-    assert "[1] claude" in form and "[1] codex" not in form
-    assert "F5 start now" in form
+    form = terminal.wait_for("Objective:", "[1] claude", "F5 start now")
+    assert "[1] codex" not in form
     terminal.type("Create a file named hello.txt containing the word hello, then stop.")
     terminal.keys("Tab", "Tab", "Tab", "Tab", "Tab")  # Providers, Folder, Mode, Save, Start
-    start = terminal.wait_for("Starts claude now")
-    assert "Claude asks once to trust this folder: choose Yes" in start
-    assert "Native" in start
+    terminal.wait_for("Starts claude now", "Claude asks once to trust this folder: choose Yes", "Native")
 
     # 4. Start runs the provider in its station; when it exits the station says how to continue.
     terminal.keys("Enter")
     from llm_tools.terminal import tmux_version
     version = tmux_version() or (99, 0)
     if version >= (3, 5):
-        exited = terminal.wait_for("ready for review · Ctrl-] B then /approve")
-        assert "Provider exited (status 0)" in exited
+        terminal.wait_for("ready for review · Ctrl-] B then /approve", "Provider exited (status 0)")
     else:
         # tmux < 3.5 does not expose pane_dead_status, so the station footer
         # may omit its exit hint entirely. The Bridge pane still shows the
         # review state and the always-visible route to its approval controls.
-        screen = terminal.wait_for("REVIEW")
-        assert "Bridge: Ctrl-] then B" in screen
+        terminal.wait_for("REVIEW", "Bridge: Ctrl-] then B")
     assert (repo / "hello.txt").read_text() == "hello\n"
 
     # 5. Bridge controls point at /approve; the confirmation shows what is approved.
     terminal.keys("C-]")
     terminal.keys("B")
-    controls = terminal.wait_for("type /approve 1")
-    assert "NEEDS YOU" in controls
+    terminal.wait_for("type /approve 1", "NEEDS YOU")
     terminal.type("/approve")
     terminal.keys("Enter")
-    confirm = terminal.wait_for("Y approve")
-    assert "Approve verification and mark task 1 complete?" in confirm
+    terminal.wait_for("Y approve", "Approve verification and mark task 1 complete?")
     terminal.keys("y")
-    done = terminal.wait_for("mission completed")
-    assert "COMPLETED" in done and "1/1 tasks completed" in done
+    terminal.wait_for("mission completed", "COMPLETED", "1/1 tasks completed")
 
     # 6. The saved state agrees with the screen.
     with BridgeStore(state_dir / "bridge.sqlite3") as store:

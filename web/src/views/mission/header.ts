@@ -35,6 +35,7 @@ export interface HeaderHandlers {
   stop(): void;
   start(): void;
   cancel(): void;
+  remove(): void;
   runNext(): void;
   approve(t: Task): void;
   reject(t: Task): void;
@@ -46,6 +47,7 @@ export interface HeaderHandlers {
 
 const wide = window.matchMedia("(min-width: 30rem)");
 const LOADING = "Loading the task list";
+const DELETABLE = new Set(["CREATED", "COMPLETED", "FAILED", "CANCELLED", "STOPPED"]);
 const known = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.toLowerCase() !== "unknown";
 
 /** "Codex gpt-5": provider and model from the status projection. Unknown parts are omitted. */
@@ -170,6 +172,8 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
   items.push({ label: "Copy mission ID", onSelect: () => hd.copy(m.missionId, "mission ID") });
   if (m.folder) items.push({ label: "Copy folder path", onSelect: () => hd.copy(m.folder, "folder path") });
   if (!finished) items.push({ label: "Cancel mission", danger: true, onSelect: hd.cancel, disabled: Boolean(why), reason: why });
+  // Only a mission that never started or has ended or stopped can be deleted (the worker enforces the same set, PRD-038).
+  if (DELETABLE.has(m.status)) items.push({ label: "Delete mission", danger: true, onSelect: hd.remove, disabled: Boolean(why), reason: why, attrs: { "data-action": "delete-mission" } });
   return items;
 }
 

@@ -9,21 +9,21 @@ coordinator process only (`VmRSS`; peak is `VmHWM`).
 ## x86-64 host measurement
 
 Host: Intel Core i7-6700K, 8 logical CPUs, 48 GiB RAM, Linux 7.0, release build
-(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-05.
+(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-07.
 
 | Measurement | Result |
 |---|---|
-| Startup to `/healthz` (process spawn to first healthy answer) | 47 ms |
-| Idle RSS (2 s after healthy) | 6.2 MiB |
-| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 25.4 MiB |
-| RSS after 1000 events | 26.4 MiB |
-| Peak RSS (`VmHWM`) up to and including the 1000-event load | 26.4 MiB |
-| RSS after 10 000 events | 29.9 MiB |
-| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.29 / 0.36 ms |
-| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.52 / 0.84 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | about 40 000 events/s |
-| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 5.2 / 10.3 ms |
-| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (557 bytes/event) |
+| Startup to `/healthz` (process spawn to first healthy answer) | 53 ms |
+| Idle RSS (2 s after healthy) | 8.1 MiB |
+| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 27.2 MiB |
+| RSS after 1000 events | 28.3 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 28.3 MiB |
+| RSS after 10 000 events | 30.3 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.22 / 0.28 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.44 / 1.08 ms |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | 52 232 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 49.8 / 59.0 ms |
+| Database growth for 10 000 events (main file + WAL) | 6.59 MiB (691 bytes/event) |
 
 Notes:
 
@@ -113,7 +113,7 @@ they share the host in the x86-64 run. The database was on the SD card
 | RSS after 10 000 events | 15.1 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 7.75 / 9.03 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 51.37 / 72.60 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 1506 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-05, before the 128 KiB batch cap) | 1506 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 174.2 / 220.3 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 
@@ -189,7 +189,7 @@ Measurement harness, 512 MB and 1 CPU:
 | RSS after 10 000 events | 28.4 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.17 / 0.19 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.93 / 1.24 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 67 550 events/s |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | pending rerun after the 128 KiB cap |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 1.3 / 2.8 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 | Container peak memory (`memory.peak`, includes page cache) | 21.7 MiB |
@@ -214,8 +214,9 @@ not a full Raspberry Pi OS. The runner is shared, so timings vary between runs.
 
 ## Storage writes (microSD wear)
 
-Platform: x86-64 host (ext4 on NVMe), release coordinator, one run per figure on
-2026-11-05, repeated three times with the same results to within 1 %. The figures
+Platform: x86-64 host (ext4 on NVMe), release coordinator. Event, command and daily-budget
+measurements are from the 2026-11-07 run; the one-hour idle figure is from 2026-11-05.
+The figures
 are not from a microSD card. They are bytes, not time, so they do not depend on
 the medium, but the Pi's file system (ext4 on the card) adds its own journal
 writes that are not counted here.
@@ -230,25 +231,75 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 
 | Workload | Measured | Bound asserted |
 |---|---|---|
-| 1000 replicated events (about 100-byte payload, batches of up to 200) | 0.52 MiB written, 545 bytes/event | 1.5 MiB |
-| Database file growth for those events (main file + WAL) | 527 bytes/event | 1024 bytes/event |
-| `db_bytes` from `GET /api/v1/diagnostics` for the same events | 896 bytes/event | 2048 bytes/event |
+| 1000 replicated events (about 100-byte payload, committed at once, sent in the worker's production batches: 40 batches of 25) | 1.61 MiB written, 1688 bytes/event, 42 189 bytes/batch (identical in 3 runs) | 4 MiB |
+| Transactions and log frames for those events | 40 commits, 369 frames (9.2 frames of 4 KiB per batch) | 40 commits, 12 frames per commit |
+| Database file growth for those events (main file, after a checkpoint) | 377 bytes/event | 940 bytes/event |
+| `db_bytes` from `GET /api/v1/diagnostics` for the same events (after the checkpoint) | 377 bytes/event | 940 bytes/event |
 | 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
+| (Earlier run on main, 2026-11-07, test sending five batches of 200 events) 1000 replicated events (about 100-byte payload, committed at once, five batches of 200) | 0.60-0.64 MiB written, 631-668 bytes/event | 1.5 MiB |
+| (Earlier run on main, 2026-11-07) 1000 `mission.list` command round-trips through a worker (16 in flight) | 86.6 MiB written, 88.7 KiB/round-trip | 150 MiB |
+| Coordinator flood harness: six accepted 25-event batches (400-byte event payloads, with two browsers subscribed) | 258,048 bytes total, 43,008 bytes/batch | Reported for comparison |
+| Flood harness: one command round-trip with a deliberately large 200 KiB result | 454,514 bytes written/round-trip | Reported for comparison |
 | Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
 | Idle for one hour, one connected worker, no clients | 104 KiB (16-20 KiB per 10 minutes) | not asserted (one-hour run) |
+| Budget extrapolation: 3 running missions at 1 accepted event/s each, 3 connected workers, 2 browser sessions (one event/page measurement above; conservative 4 KiB session touch every 5 minutes) | 447,440,486 bytes/day (426.7 MiB/day), computed by `tests/test_distributed_storage_writes.py` from the 1688 bytes/event measured with the worker's production batches (183,081,370 bytes/day, 174.6 MiB/day, from the earlier 668 bytes/event measurement with batches of 200) | 1 GiB/day |
+
+The 426.7 MiB/day figure is an extrapolation from this local per-event measurement, not a 24-hour Pi measurement. The browser does not issue a full `mission.status` command on its overview, missions list, or mission-detail refresh: compact task counts and current-work labels arrive with the replicated mission summary, while activity details use the coordinator's local read-only events endpoint. A worker that predates the replicated summary is still asked for one bounded `mission.status` per change of its `updated_at`. Two sessions therefore add no command-result writes during ordinary view refresh; the budget model still reserves one 4 KiB database page every five minutes per session. The Pi's own filesystem and its real event rate still need a fresh 24-hour measurement after deployment.
 
 Reading the figures:
 
-- Events are written one transaction per batch, so the bytes written are about
-  the bytes stored (545 written against 527 stored per event). The bound is about
-  2.9 times the measurement. A change that adds a write per event fails it.
-- The 557-558 bytes/event above is for 10 000 events. The 527 bytes/event here is for
-  1000 events: the write-ahead log (WAL) file is counted at its current size, and
-  SQLite checkpoints it into the main file after 1000 pages (about 4 MiB) and then
-  reuses it, so the file size stops growing by the WAL's share beyond that.
-  `db_bytes` is larger because it adds the WAL file size to `page_count * page_size`,
-  which already includes pages that are still only in the WAL.
-- A command costs much more than an event: about 17 database pages (68 KiB). The
+- Events are written one transaction per accepted batch, with no checkpoint of its own (the
+  automatic checkpoint runs after 1000 log frames). The cost of a batch is a fixed part plus a part
+  proportional to the events. Measured without any API polling (release build, 2026-11-07, 1000
+  events, bytes written per batch): 25 events per batch 42.2 KB; 100 events 73.7 KB; 200 events
+  109.8 KB. That is about 0.39 KB per event plus about 32 KB per batch. The fixed part is the pages
+  every commit rewrites: the first page of the database file, the `workers` row page (cursors),
+  the tail of the `events` index, the interior page above it, the extra pages the index rebalances
+  when its last leaf fills, and the partly filled 4 KiB page at the end of the log that each
+  commit's fsync writes again (frames are 4120 bytes). At 25 events per batch the fixed part is
+  about three quarters of the bytes written. The proportional part is about what the events occupy.
+- The figure of about 115 KB per batch reported after PR #53 was mostly the test, not the
+  coordinator. The test polled `GET /api/v1/workers` every 50 ms while waiting for the events.
+  Every API call with a bearer token is stored as an audit row, which is a commit of its own
+  (the `audit` page and the `sqlite_sequence` page, about 12 KB written including the log's tail page).
+  With production batches the wait is longer (rate cap), so the number of polls, and with it the
+  bytes, grew. Measured with the previous coordinator and the same 250 events in batches of 25:
+  114 KB per batch with polling (61 audit rows in 10 batches) and 44 KB per batch without. The test
+  now reads the replicated cursor from the database file with a read-only connection, so the
+  figure no longer depends on the duration of the wait.
+- Changes to the coordinator (`Db::events_store`): the mission summaries that a batch carries are
+  written only when they differ from the stored row (the previous `INSERT OR REPLACE` rewrote
+  the row and its page for every batch); the two `UPDATE`s of the worker row are one statement;
+  retention no longer deletes the oldest few events in every batch once a worker is at its cap.
+  Without the change each batch at the cap ran a query that walks `max_events_per_worker` index
+  entries and deleted one batch worth of rows at the left edge of the index, which rewrote about
+  seven extra pages per batch. Now the coordinator keeps an estimate of the stored count per worker
+  and, when it exceeds the cap, deletes down to 90 % of the cap in one pass and counts the rows
+  again. The stored count still never exceeds `max_events_per_worker`; it is between 90 % and
+  100 % of it once the cap has been reached.
+- Before and after, same host, 1000 events in batches of 25 with the worker's production batching
+  and no API polling. Below the cap: 46 285 bytes/batch (1851 bytes/event, 409 log frames) before,
+  42 189 bytes/batch (1688 bytes/event, 369 frames) after. At the cap (cap 3000, 3200 events
+  stored first): 76 698 bytes/batch (3068 bytes/event, 700 frames) before, 60 621 bytes/batch
+  (2425 bytes/event, 533 frames) after. In batches of 200: 569 and 549 bytes/event.
+- What was not changed. The per-batch fixed cost remains because every accepted batch is committed
+  before the worker's next ping is answered, and a commit rewrites those pages. The `events` table is
+  `WITHOUT ROWID`, so SQLite does not use its right-edge append shortcut for it and redistributes
+  the last leaf pages every time one fills; a rowid table with a unique index on `(worker, id)` would
+  save about two pages per batch in a standalone measurement (8.5 against 10.3 frames per batch), but
+  it needs a schema migration and a changed events query and was not done here. Writing several batches in one
+  transaction would remove most of the fixed cost, but the coordinator would then acknowledge
+  events that are not yet durable, which the ping fence does not allow today.
+- Before each size reading the test runs `PRAGMA wal_checkpoint(TRUNCATE)` on its own
+  connection, so the WAL file is empty and the main file alone is measured: the number
+  of pages the events occupy. Without this, an automatic checkpoint (after 1000 WAL
+  frames) landing inside the window would count the same pages once in the main file and
+  once in the WAL file, because the WAL file keeps its size after a checkpoint.
+  `db_bytes` (`page_count * page_size` plus the WAL file size) has the same dependency
+  and is read after the checkpoint as well.
+- The 557-558 bytes/event for 10 000 events in the load tables above counts the main file
+  plus WAL and was not re-measured with this method.
+- A command costs much more than an event: 88.7 KiB per `mission.list` round-trip in the 2026-11-07 run, about 22 four-KiB pages. The
   coordinator commits five separate transactions per command (insert, audit row,
   `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
   of the WAL, and each rewrites the `commands` table page and its two indexes.
@@ -302,7 +353,7 @@ that attempt.
 | RSS after 10 000 events | 20.8 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 2.15 / 2.25 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 3.11 / 3.67 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 5933 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-06, before the 128 KiB batch cap) | 5933 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 16.4 / 42.1 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 

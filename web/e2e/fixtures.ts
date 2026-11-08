@@ -79,8 +79,14 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await page.getByLabel("Administrator username").fill(username);
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill(PASSWORD);
+  const setupResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname.endsWith("/auth/setup") && response.request().method() === "POST",
+    { timeout: 30_000 },
+  );
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
+  const response = await setupResponse;
+  expect(response.ok(), `first-run setup returned HTTP ${response.status()}`).toBe(true);
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 /** Open the account menu and sign out. */
@@ -97,7 +103,19 @@ export async function navTo(page: Page, name: "Overview" | "Inbox" | "Workers" |
     await page.getByRole("menuitem", { name }).click();
     return;
   }
-  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: name === "Overview" ? "Inbox" : name, exact: true }).click();
+  const label = name === "Overview" ? "Inbox" : name;
+  // The shell (side bar, tab bar and More button) is built only after the page's auth-state request returns, which
+  // can be after the load event of a goto. isVisible() does not wait, so without this the check below can run before
+  // any navigation exists and fall through to a More button that is not there yet (or is hidden on desktop).
+  await page.locator("#more-button").waitFor({ state: "attached" });
+  const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: label, exact: true });
+  const more = page.locator("#more-button");
+  await expect.poll(async () => (await link.isVisible()) || (await more.isVisible()), {
+    message: `navigation for ${label} should render before choosing its responsive control`,
+  }).toBe(true);
+  if (await link.isVisible()) return link.click();
+  await more.click();
+  await page.locator("#more-sheet").getByRole("link", { name: label, exact: true }).click();
 }
 
 export async function loginViaUi(page: Page, username = "admin", password = PASSWORD): Promise<void> {

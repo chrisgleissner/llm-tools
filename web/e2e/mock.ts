@@ -38,6 +38,11 @@ export interface MockOptions {
   login?: "ok" | "wrong" | "limited";
   /** Response of POST /auth/setup. */
   setup?: "ok" | "bad-token";
+  /** Report that one or more passkeys are enrolled on the canonical origin. */
+  passkeySignInAvailable?: boolean;
+  passkeyCanonicalOrigin?: string | null;
+  /** Return discoverable-only assertion options so conditional UI can be exercised. */
+  passkeyDiscoverable?: boolean;
   workers?: "none" | "some";
   missions?: "none" | "some";
   sessionRemembered?: boolean;
@@ -70,6 +75,10 @@ export interface MockOptions {
   usage?: "none";
   /** Delay the GET answers of the worker and mission lists by this many milliseconds (skeleton timing tests). */
   getDelayMs?: number;
+  /** Mission summaries carry the replicated digest (task counts, current task, station, model, needs_kind) like a current worker sends. Default true; false is a worker that predates the digest. */
+  digest?: boolean;
+  /** Mission summaries carry `attention`. Default true; false is a worker that predates it (PRD-037 WP-7). */
+  attention?: boolean;
 }
 
 export interface MockRequest {
@@ -111,7 +120,13 @@ export const WORKERS = [
 const mk = (n: number, worker: string, name: string, status: string, folder: string, ago: number) => ({
   worker,
   stale: worker === "beta",
-  mission: { id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32), name, status, folder, updated_at: iso(ago) },
+  mission: {
+    id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32),
+    name,
+    status,
+    folder,
+    updated_at: iso(ago),
+  },
 });
 export const MISSIONS = [
   mk(1, "alpha", "Refactor the parser", "RUNNING", "parser", 95),
@@ -247,6 +262,8 @@ export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
+  passkeyAssertionStartCount(): number;
+  passkeyAssertionFinish(): Record<string, unknown> | null;
   emitStream(message: Record<string, unknown>): void;
   /** Every /api/v1 request the page made after sign-in, in order. */
   requests(): MockRequest[];
@@ -261,6 +278,10 @@ export interface Mock {
   restoreStream(): void;
   /** Close every open terminal socket from the server side (the page sees a dropped connection). */
   closeTerminals(): void;
+  /** Requests answered so far, by kind: `status` is GET /missions/{id} (a worker command), `tasks` the task list, `events` GET /events (coordinator only). */
+  requestCounts(): { status: number; tasks: number; events: number };
+  /** Change fields of a mission summary, as a replicated summary update would. */
+  patchMission(id: string, patch: Record<string, unknown>): void;
   /** Change what the status projection reports as needing the operator for one mission (null: nothing). */
   setNeeds(missionId: string, needs: Record<string, unknown> | null): void;
   /** Pin the task list of one mission (task statuses by ordinal), whatever its status says; null restores the derived list. */
@@ -283,6 +304,8 @@ export function operationOf(method: string, path: string, body: Record<string, u
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
+  let passkeyStarts = 0;
+  let passkeyFinish: Record<string, unknown> | null = null;
   let streamSocket: WebSocketRoute | null = null;
   if (opts.fakeClock) await page.clock.install({ time: NOW });
   else await page.clock.setFixedTime(NOW);
@@ -314,7 +337,24 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       : dataset === "dense" && denseNeeds(i)?.["kind"] === "provider" ? { ...entry, mission: { ...entry.mission, needs_you: denseNeeds(i) } }
       : { ...entry, mission: { ...entry.mission } },
   );
-  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
+  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; last_address: string | null; expires_at: string | null; allowed_cidrs: string[]; allowed_workers: string[] }> = [];
+  const requestCounts = { status: 0, tasks: 0, events: 0 };
+  // What a current worker replicates with each mission summary: the digest (DOG-021: task counts, and for a live mission the current task,
+  // provider, model and what needs the operator) and `attention` (PRD-037 WP-7: why the operator is needed). `digest: false` is a worker that
+  // predates the digest, `attention: false` one that predates `attention`; with neither the console reads the status of each active mission.
+  const LIVE = new Set(["CREATED", "RUNNING", "PAUSED", "STOPPING"]);
+  const summaryOf = (entry: (typeof MISSIONS)[number]): (typeof MISSIONS)[number] => {
+    const m = entry.mission as Record<string, unknown> & { id: string; status: string };
+    const needs = ((m["needs_you"] as Record<string, unknown> | undefined) ?? needsFor(m.id)) as { kind: string; message: string; tasks: number[]; command?: string } | null;
+    const running = m.status === "RUNNING";
+    const extras: Record<string, unknown> = {};
+    if (opts.digest !== false) {
+      extras["task_counts"] = countsOf(tasksFor(m.id, m.status, needsFor(m.id) !== null || (dataset === "default" && m.id === MISSIONS[0]!.mission.id)));
+      if (LIVE.has(m.status)) Object.assign(extras, { current_task: running ? { ordinal: 2, title: "Implement the new tokenizer" } : null, station: running ? "codex" : "unknown", model: running ? "gpt-5" : "unknown", needs_kind: needs?.kind ?? null, needs_tasks: needs?.tasks.length ?? 0, ...(needs ? { needs_you: needs } : {}) });
+    }
+    if (opts.attention !== false) extras["attention"] = m.status === "COMPLETED" || m.status === "CANCELLED" || !needs ? null : { kind: needs.kind, message: needs.message, tasks: needs.tasks };
+    return { ...entry, mission: { ...extras, ...entry.mission } } as (typeof MISSIONS)[number];
+  };
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
     if (streamDown) {
       ws.close({ code: 1011, reason: "stream down (test)" });
@@ -371,13 +411,33 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/auth/state") {
       if (auth === "in")
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
-      return json(route, 200, { setup_required: auth === "setup", authenticated: false, password_policy: POLICY, session_policy: SESSION_POLICY });
+      return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, passkey_canonical_origin: opts.passkeyCanonicalOrigin ?? null, password_policy: POLICY, session_policy: SESSION_POLICY });
     }
     if (path === "/auth/login") {
       if (opts.login === "wrong") return json(route, 401, { error: { code: "invalid-credentials", message: "invalid username or password" } });
       if (opts.login === "limited") return json(route, 429, { error: { code: "rate-limited", message: "too many failed attempts; try again later" } }, { "retry-after": "300" });
       auth = "in";
       return json(route, 200, { csrf_token: "csrf" });
+    }
+    if (path === "/auth/passkeys/assertion/start" && method === "POST") {
+      passkeyStarts += 1;
+      return json(route, 200, {
+        challenge_id: "mock-challenge-1",
+        options: {
+          publicKey: {
+            challenge: "AQID",
+            rpId: "localhost",
+            timeout: 60_000,
+            allowCredentials: opts.passkeyDiscoverable ? [] : [{ type: "public-key", id: "BAUG", transports: ["internal"] }],
+            userVerification: "required",
+          },
+        },
+      }, { "set-cookie": "__Host-bridge_passkey=mock-ticket; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict" });
+    }
+    if (path === "/auth/passkeys/assertion/finish" && method === "POST") {
+      passkeyFinish = JSON.parse(req.postData() ?? "{}") as Record<string, unknown>;
+      auth = "in";
+      return json(route, 200, { csrf_token: "csrf" }, { "set-cookie": "__Host-bridge_session=mock-session; Path=/; Secure; HttpOnly; SameSite=Strict" });
     }
     if (path === "/auth/setup") {
       if (opts.setup === "bad-token") return json(route, 403, { error: { code: "invalid-setup-token", message: "invalid setup token" } });
@@ -400,7 +460,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       list = [...list].sort((a, b) => (b.mission.updated_at < a.mission.updated_at ? -1 : 1));
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const limit = Number(url.searchParams.get("limit") ?? list.length);
-      return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
+      return json(route, 200, { missions: list.slice(offset, offset + limit).map(summaryOf), total: list.length, offset, statuses: facets });
     }
     const steer = path.match(/^\/missions\/([^/]+)\/steer$/);
     if (steer && method === "POST")
@@ -413,11 +473,13 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         const status = missionAction[2] === "start" || missionAction[2] === "resume" || missionAction[2] === "continue" ? "RUNNING"
           : missionAction[2] === "pause" ? "PAUSED" : missionAction[2] === "stop" ? "STOPPED" : "CANCELLED";
         current.mission.status = status;
+        streamSocket?.send(JSON.stringify({ type: "event", mission_id: current.mission.id }));
       }
       return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation, state: "done", result: { outcome: "applied", result: { mission: current?.mission ?? null }, error: null } });
     }
     const missionResource = path.match(/^\/missions\/([^/]+)$/);
     if (missionResource && method === "GET") {
+      requestCounts.status += 1;
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
       const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: countsOf(tasksFor(current.mission.id, current.mission.status, needsFor(current.mission.id) !== null || (dataset === "default" && current.mission.id === MISSIONS[0]!.mission.id))), current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : needsFor(current.mission.id), health: { state: "healthy" } };
@@ -428,6 +490,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
     if (taskRoute) {
+      if (method === "GET") requestCounts.tasks += 1;
       let operation = "task.list";
       const owner = missions.find((m) => m.mission.id === taskRoute[1]) ?? baseMissions[0]!;
       const taskSet = tasksFor(owner.mission.id, owner.mission.status, needsFor(owner.mission.id) !== null);
@@ -456,6 +519,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: method === "GET" ? "ok" : "applied", result, error: null } }, etag ? { etag } : {});
     }
     if (path === "/events") {
+      requestCounts.events += 1;
       const target = url.searchParams.get("worker");
       const missionIds = new Set(missions.filter((mission) => !target || mission.worker === target).map((mission) => mission.mission.id));
       return json(route, 200, { events: ([...EVENTS] as EventRow[]).filter((row) => missionIds.has(String(row.event["mission_id"]))).reverse().concat(extraEvents.filter((row) => missionIds.has(String(row.event["mission_id"])))) });
@@ -463,8 +527,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/diagnostics") return json(route, 200, DIAG);
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
     if (path === "/tokens" && method === "POST") {
-      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number };
-      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
+      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number; allowed_cidrs?: string[]; allowed_workers?: string[] };
+      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, last_address: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null, allowed_cidrs: body.allowed_cidrs ?? [], allowed_workers: body.allowed_workers ?? [] };
       tokens.push(token);
       return json(route, 201, { token, secret: "lbr_pat_mock-secret" });
     }
@@ -477,6 +541,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/commands" && method === "POST") {
       const request = (body?.["request"] ?? {}) as { operation: string; request_id: string; mission_id?: string; params?: Record<string, unknown> };
       const op = request.operation;
+      if (op === "mission.status") requestCounts.status += 1;
       const target = String(body?.["target"] ?? "alpha");
       const missionId = request.mission_id ?? MISSIONS[0]!.mission.id;
       const entry = missions.find((m) => m.mission.id === missionId) ?? baseMissions[0]!;
@@ -499,6 +564,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   return {
     setAuth: (m) => void (auth = m),
     terminalInputCount: () => terminalInputs,
+    passkeyAssertionStartCount: () => passkeyStarts,
+    passkeyAssertionFinish: () => passkeyFinish,
     emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
     requests: () => log,
     operations: () => log.filter((r) => r.method !== "GET" && r.operation).map((r) => r.operation as string),
@@ -507,12 +574,19 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const id = 100 + extraEvents.length;
       const row = { id, event: { mission_id: ev.mission_id ?? MISSIONS[0]!.mission.id, task_id: ev.task_id ?? null, kind: ev.kind, data: ev.data ?? {}, created_at: new Date().toISOString() } };
       extraEvents.push(row);
-      streamSocket?.send(JSON.stringify({ type: "event", worker: "alpha", cursor: id, events: [row] }));
+      // The coordinator's change notice: counts per mission and the ids of missions whose tasks changed, no events (the page reads them from /events).
+      const missionId = String(row.event["mission_id"]);
+      streamSocket?.send(JSON.stringify({ type: "event", worker: "alpha", cursor: id, count: 1, first_event_id: id, last_event_id: id, missions: [{ id: missionId, events: 1, last_event_id: id, summary: false }], ...(/^task-/.test(ev.kind) ? { task_missions: [missionId] } : {}) }));
     },
     dropStream: () => { streamDown = true; streamSocket?.close({ code: 1011, reason: "stream down (test)" }); },
     restoreStream: () => { streamDown = false; },
     setNeeds: (missionId, needs) => void needsOverride.set(missionId, needs),
     setTasks: (missionId, statuses) => void (statuses ? tasksOverride.set(missionId, statuses.map((st, i) => task(i + 1, `Task number ${i + 1}`, st))) : tasksOverride.delete(missionId)),
+    requestCounts: () => ({ ...requestCounts }),
+    patchMission: (id, patch) => {
+      const entry = missions.find((m) => m.mission.id === id);
+      if (entry) Object.assign(entry.mission, patch);
+    },
     closeTerminals: () => { for (const ws of terminalRoutes) { try { ws.close({ code: 1006, reason: "closed by test" }); } catch { /* already closed */ } } },
   };
 }

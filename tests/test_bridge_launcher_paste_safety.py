@@ -333,9 +333,132 @@ def test_burst_with_start_focused_never_dispatches_start(tmp_path, monkeypatch):
     monkeypatch.setattr(curses, "curs_set", lambda *_: None)
     monkeypatch.setattr(bridge_tui, "initialize_colors", lambda: False)
     from tests.test_bridge_launcher_home import Grid
-    window = Grid(["n", *"Objective", *"\t" * 5, "\n", "\x04"])  # delivered with no gap
+    sent = ["n", *"Objective", *"\t" * 5, "\n", "\x04"]
+    window = Grid(sent)  # delivered with no gap
+    # A terminal that delivers keys with no gap has them in the input queue; report that, as the real
+    # stdin would, so the test does not depend on how long the launcher takes to process each key. The
+    # final Ctrl-D comes after a pause: it is not queued behind the Enter, so the launcher draws before it.
+    monkeypatch.setattr(launcher, "_stdin_pending", lambda: window.delivered < len(sent) - 1)
+    original_get = window.get_wch
+    window.delivered = 0
+
+    def get_wch():
+        window.delivered += 1
+        return original_get()
+
+    window.get_wch = get_wch
     monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
     calls: list[list[str]] = []
     assert launcher.run_launcher(lambda args: calls.append(args) or 0) == 0
     assert calls == []  # no mission created, nothing started
+    assert "Press Enter again to start" in window.text()
+
+
+# --- the guard must not depend on how long the loop takes ---------------------
+#
+# On a loaded machine the launcher can spend tens of milliseconds drawing, or not run at all, between
+# two keys of a paste. Those keys are already in the terminal input queue (or arrive while the launcher
+# is busy), so the time spent is not a gap between keystrokes.
+
+
+class _Clock:
+    """The launcher's clock: real time plus a skew that the tests advance by hand."""
+
+    def __init__(self) -> None:
+        self.skew = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.skew
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(launcher, "time", fake)
+    return fake
+
+
+def test_key_that_arrived_while_the_loop_was_busy_is_part_of_the_burst(clock):
+    waiting = [False]
+    state = guarded(focus=5, objective="Do it")
+    state.input_pending = lambda: waiting[0]
+    state.key("\t")
+    clock.skew += 10  # a slow draw, or a descheduled process
+    waiting[0] = True  # the next key arrived meanwhile
+    state.note_ready()
+    waiting[0] = False  # nothing queued behind it
+    assert state.key("\n") is None
+    assert state.error == "Press Enter again to start"
+
+
+def test_gap_is_measured_from_when_the_loop_was_ready_not_from_the_previous_key(clock):
+    state = guarded(focus=5, objective="Do it")
+    state.key("\t")
+    clock.skew += 10  # the loop was busy for ten seconds before it waited for input
+    state.note_ready()
+    clock.skew += 0.01  # the next key arrives 10 ms after the loop started waiting
+    assert state.key("\n") is None and state.error == "Press Enter again to start"
+    # A key that arrives after a real pause is still a deliberate Enter.
+    state.key("\t")
+    clock.skew += 10
+    state.note_ready()
+    clock.skew += 0.06
+    assert state.key("\n") == "start"
+
+
+def test_a_timed_out_wait_does_not_shorten_the_gap_since_the_last_key(clock):
+    state = guarded(focus=5, objective="Do it")
+    state.key("\t")
+    state.note_ready()
+    clock.skew += 1  # the wait timed out (a timer fired) and the loop waited again
+    state.note_ready()
+    clock.skew += 0.01
+    assert state.key("\n") == "start"  # one second after the last key is a deliberate Enter
+
+
+class _DrawStallGrid:
+    """A window whose draws are slow and during which the next pasted key arrives.
+
+    ``keys`` holds ``(key, arrives_during_draw)``. The terminal input queue is modelled: ``pending`` is
+    true only for a key that arrived during the draw since the previous read.
+    """
+
+    def __init__(self, base, keys, clock):
+        self.base, self.keys, self.clock = base, list(keys), clock
+        self.drawn_since_read = False
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def refresh(self):
+        self.clock.skew += 1.0  # a draw takes a second of wall-clock time
+        self.drawn_since_read = True
+
+    def get_wch(self):
+        key, _arrives = self.keys.pop(0)
+        self.drawn_since_read = False
+        return key
+
+    def pending(self) -> bool:
+        return bool(self.keys) and self.keys[0][1] and self.drawn_since_read
+
+
+def test_slow_draws_between_the_keys_of_a_burst_never_start_a_mission(tmp_path, monkeypatch, clock):
+    events: list[str] = []
+    _prepare(tmp_path, monkeypatch, events)
+    monkeypatch.setattr(launcher, "_BURST_SECONDS", 0.03)
+    monkeypatch.setattr(curses, "mousemask", lambda *_: None)
+    monkeypatch.setattr(curses, "curs_set", lambda *_: None)
+    monkeypatch.setattr(bridge_tui, "initialize_colors", lambda: False)
+    from tests.test_bridge_launcher_home import Grid
+    keys = [(key, True) for key in ["n", *"Objective", *"\t" * 5, "\n"]] + [("\x04", False)]
+    window = _DrawStallGrid(Grid(), keys, clock)
+    monkeypatch.setattr(launcher, "_stdin_pending", window.pending)
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
+    calls: list[list[str]] = []
+    assert launcher.run_launcher(lambda args: calls.append(args) or 0) == 0
+    assert calls == []
     assert "Press Enter again to start" in window.text()

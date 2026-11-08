@@ -1,7 +1,7 @@
 // Steer dialogs of the session pane (loaded when the first Steer item is chosen, so they stay out of the terminal chunk).
 import * as api from "./api";
 import { h } from "./dom";
-import { onStream } from "./store";
+import { onEvents } from "./store";
 import { announce, confirmDialog, reportOutcome } from "./ui";
 
 export interface SteerTarget {
@@ -38,8 +38,8 @@ function chip(o: SteerTarget, kind: api.SteerKind, text: string): void {
   const node = h("span", { class: "queued-chip" }, `Queued: ${text}`);
   o.chips.append(node);
   o.chips.hidden = false;
-  const stop = onStream((msg) => {
-    if (msg.type !== "event" || !(msg.events ?? []).some((e) => (e["mission_id"] ?? o.missionId) === o.missionId && done.test(String(e["kind"])))) return;
+  const stop = onEvents((events) => {
+    if (!events.some((e) => (e.mission_id ?? o.missionId) === o.missionId && done.test(String(e.kind)))) return;
     node.remove();
     o.chips.hidden = !o.chips.childElementCount;
     stop();

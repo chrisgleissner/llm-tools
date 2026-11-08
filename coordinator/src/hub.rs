@@ -1,16 +1,21 @@
 //! In-memory registry of live worker connections and the `/stream` broadcast channel.
 
 use axum::extract::ws::WebSocket;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub const MAX_WORKER_CONNECTIONS: usize = 64;
 pub const OUTBOUND_QUEUE: usize = 256;
-pub const STREAM_BUFFER: usize = 256;
+pub const STREAM_BUFFER: usize = 32;
+/// Browser fan-out is advisory. Keep each retained message tiny and never duplicate event/result bodies.
+pub const MAX_STREAM_MESSAGE_BYTES: usize = 4 * 1024;
 pub const MAX_TERMINALS_PER_WORKER: usize = 16;
 pub const MAX_TERMINALS: usize = 64;
+
+/// Messages and bytes of one (direction, message type) pair.
+type LinkCounts = BTreeMap<(&'static str, String), (u64, u64)>;
 
 /// A `terminal.status` payload relayed from the worker's control connection.
 pub struct TermStatus {
@@ -22,7 +27,7 @@ pub struct TermStatus {
 struct TermEntry {
     worker: String,
     attach: Option<oneshot::Sender<WebSocket>>,
-    status: mpsc::UnboundedSender<TermStatus>,
+    status: mpsc::Sender<TermStatus>,
 }
 
 /// A terminal session this coordinator opened. Dropping it frees the session slot.
@@ -30,7 +35,7 @@ pub struct TermReg {
     hub: Arc<Hub>,
     pub id: String,
     pub attach: oneshot::Receiver<WebSocket>,
-    pub status: mpsc::UnboundedReceiver<TermStatus>,
+    pub status: mpsc::Receiver<TermStatus>,
 }
 
 impl Drop for TermReg {
@@ -69,6 +74,8 @@ pub struct Hub {
     active: AtomicUsize,
     /// Worker names with a connection that has not sent its hello yet.
     pending: Mutex<HashSet<String>>,
+    /// Messages and bytes since start, by direction and message type (diagnostics only; not persisted).
+    link: Mutex<LinkCounts>,
 }
 
 /// Marks one worker token as having a connection waiting for its hello (at most one at a time).
@@ -101,7 +108,36 @@ impl Hub {
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             pending: Mutex::new(HashSet::new()),
+            link: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Count one message of `text.len()` bytes. `direction` is `worker_in`, `worker_out` or
+    /// `browser_out`; the type is read from the message's `type` field.
+    pub fn count_message(&self, direction: &'static str, text: &str) {
+        #[derive(serde::Deserialize)]
+        struct Kind<'a> {
+            #[serde(borrow, rename = "type")]
+            kind: std::borrow::Cow<'a, str>,
+        }
+        let kind = serde_json::from_str::<Kind>(text).map_or_else(|_| "unparsed".to_string(), |k| k.kind.into_owned());
+        let mut link = self.link.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = link.entry((direction, kind)).or_default();
+        entry.0 += 1;
+        entry.1 += text.len() as u64;
+    }
+
+    /// `{direction: {type: {messages, bytes}}}` for `GET /api/v1/diagnostics`.
+    pub fn link_bytes(&self) -> serde_json::Value {
+        let link = self.link.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = serde_json::Map::new();
+        for ((direction, kind), (messages, bytes)) in link.iter() {
+            out.entry(direction.to_string())
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|o| o.insert(kind.clone(), serde_json::json!({"messages": messages, "bytes": bytes})));
+        }
+        serde_json::Value::Object(out)
     }
 
     /// Claim the single pre-hello slot of worker `name`; `None` when one is already waiting.
@@ -208,7 +244,7 @@ impl Hub {
             }
         };
         let (attach_tx, attach) = oneshot::channel();
-        let (status_tx, status) = mpsc::unbounded_channel();
+        let (status_tx, status) = mpsc::channel(16);
         terms.insert(
             id.clone(),
             TermEntry {
@@ -239,7 +275,7 @@ impl Hub {
     pub fn terminal_status(&self, worker: &str, session_id: &str, status: TermStatus) {
         if let Some(entry) = self.terms().get(session_id) {
             if entry.worker == worker {
-                let _ = entry.status.send(status);
+                let _ = entry.status.try_send(status);
             }
         }
     }
@@ -263,6 +299,30 @@ impl Hub {
     }
 
     pub fn publish(&self, value: serde_json::Value) {
-        let _ = self.stream.send(Arc::from(value.to_string()));
+        let mut value = value;
+        // Live notifications tell the SPA what changed; detail is fetched from the bounded API.
+        // Retaining an event batch or command result here multiplies its size by the ring and pins
+        // it for every browser subscriber, which used to let one large payload consume hundreds
+        // of MiB. Keep this defence in depth even if a caller accidentally passes a full row.
+        if let Some(object) = value.as_object_mut() {
+            match object.get("type").and_then(serde_json::Value::as_str) {
+                Some("event") => {
+                    // `missions` is the per-mission count list of a change notice (a few dozen bytes each,
+                    // capped by the caller); the event bodies and replicated summaries never travel here.
+                    object.remove("events");
+                }
+                Some("command") => {
+                    if let Some(command) = object.get_mut("command").and_then(serde_json::Value::as_object_mut) {
+                        command.remove("request");
+                        command.remove("result");
+                    }
+                }
+                _ => {}
+            }
+        }
+        let text = value.to_string();
+        if text.len() <= MAX_STREAM_MESSAGE_BYTES {
+            let _ = self.stream.send(Arc::from(text));
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::auth::sha256_hex;
 use crate::db::{CommandRow, EventBatch, EventsOutcome, HelloOutcome};
-use crate::http::{Peer, St};
+use crate::http::{Peer, St, WorkerCertificate};
 use crate::hub::{ConnHandle, Outbound, PendingGuard, OUTBOUND_QUEUE};
 use crate::protocol::{self, Message, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use axum::extract::ws::{close_code, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
@@ -31,19 +31,40 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
         .into_response()
 }
 
-pub async fn connect(State(st): State<St>, Extension(peer): Extension<Peer>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn connect(
+    State(st): State<St>,
+    Extension(peer): Extension<Peer>,
+    cert: Option<Extension<WorkerCertificate>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    let worker = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
-        Some(Ok(Some(w))) => w,
+    let token_hash = token.map(sha256_hex);
+    let authentication = match token_hash.as_deref().map(|hash| st.db.worker_by_connection_token(hash, crate::now())) {
+        Some(Ok(Some(authenticated))) => authenticated,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
         }
         _ => return plain(StatusCode::UNAUTHORIZED, "invalid or revoked worker token"),
     };
+    let (worker, pending_token) = authentication;
+    if st.cfg.worker_mtls {
+        let Some(fingerprint) = cert.and_then(|Extension(c)| c.0) else {
+            return plain(StatusCode::UNAUTHORIZED, "worker client certificate required");
+        };
+        match st.db.worker_client_certificate_matches(&worker.name, &fingerprint) {
+            Ok(true) => {}
+            Ok(false) => return plain(StatusCode::UNAUTHORIZED, "worker client certificate does not match token"),
+            Err(e) => {
+                eprintln!("database error: {e}");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            }
+        }
+    }
     let Some(guard) = st.hub.try_reserve() else {
         return plain(StatusCode::SERVICE_UNAVAILABLE, "too many worker connections");
     };
@@ -54,12 +75,13 @@ pub async fn connect(State(st): State<St>, Extension(peer): Extension<Peer>, hea
         return plain(StatusCode::TOO_MANY_REQUESTS, "a connection of this worker is already waiting for its hello");
     };
     let remote = peer.0.ip().to_string();
+    let token_hash = token_hash.expect("successful token authentication has a token hash");
     // Transport limit is twice the protocol limit so an oversized frame can be answered with our own close 1009.
     ws.max_message_size(2 * MAX_MESSAGE_BYTES)
         .max_frame_size(2 * MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _guard = guard;
-            run(st, name, remote, pending, socket).await;
+            run(st, name, remote, pending, pending_token, token_hash, socket).await;
         })
 }
 
@@ -67,8 +89,16 @@ fn close_frame(code: u16, reason: &'static str) -> Ws {
     Ws::Close(Some(CloseFrame { code, reason: reason.into() }))
 }
 
-async fn send(socket: &mut WebSocket, text: String) -> bool {
+async fn send(st: &St, socket: &mut WebSocket, text: String) -> bool {
+    st.hub.count_message("worker_out", &text);
     socket.send(Ws::Text(text.into())).await.is_ok()
+}
+
+/// Count an incoming text frame for the diagnostics byte counters.
+fn count_in(st: &St, frame: &Option<Result<Ws, axum::Error>>) {
+    if let Some(Ok(Ws::Text(t))) = frame {
+        st.hub.count_message("worker_in", t.as_str());
+    }
 }
 
 enum Step {
@@ -114,7 +144,7 @@ fn classify(frame: Option<Result<Ws, axum::Error>>, name: &str, generation: u64)
     }
 }
 
-async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut socket: WebSocket) {
+async fn run(st: St, name: String, remote: String, pending: PendingGuard, pending_token: bool, token_hash: String, mut socket: WebSocket) {
     let mut shutdown = st.shutdown.clone();
     // ---- handshake: wait for a valid hello
     let deadline = Instant::now() + HELLO_TIMEOUT;
@@ -123,6 +153,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             f = timeout(deadline.saturating_duration_since(Instant::now()), socket.recv()) => match f { Ok(f) => f, Err(_) => { let _ = socket.send(close_frame(1008, "hello timeout")).await; return } },
             _ = shutdown.changed() => { let _ = socket.send(close_frame(1001, "shutting down")).await; return }
         };
+        count_in(&st, &frame);
         match classify(frame, &name, 0) {
             Step::Close(c, r) => {
                 let _ = socket.send(close_frame(c, r)).await;
@@ -131,18 +162,18 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             Step::Skip => {}
             Step::Reject(text) => {
                 if let Some(t) = text.strip_prefix("\u{0}fatal") {
-                    let _ = send(&mut socket, t.to_string()).await;
+                    let _ = send(&st, &mut socket, t.to_string()).await;
                     let _ = socket.send(close_frame(1002, "unsupported version")).await;
                     return;
                 }
-                if !send(&mut socket, text).await {
+                if !send(&st, &mut socket, text).await {
                     return;
                 }
             }
             Step::Message(m) if m.kind == "hello" => match protocol::check_hello(&m) {
                 Ok(caps) => break (m, caps),
                 Err(e) => {
-                    let _ = send(&mut socket, protocol::error_message(&name, 0, e.code, &e.message, Some(&m.id))).await;
+                    let _ = send(&st, &mut socket, protocol::error_message(&name, 0, e.code, &e.message, Some(&m.id))).await;
                     if e.code == "unsupported-version" {
                         let _ = socket.send(close_frame(1002, "unsupported version")).await;
                         return;
@@ -152,6 +183,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             Step::Message(m) if m.kind == "error" => {}
             Step::Message(m) => {
                 if !send(
+                    &st,
                     &mut socket,
                     protocol::error_message(&name, 0, "not-welcomed", &format!("{} before hello", m.kind), Some(&m.id)),
                 )
@@ -168,6 +200,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
         Ok(HelloOutcome::WorkerIdMismatch) => {
             let _ = send(
+                &st,
                 &mut socket,
                 protocol::error_message(
                     &name,
@@ -191,8 +224,26 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             return;
         }
     };
+    if pending_token {
+        match st.db.worker_promote_token_rotation(&name, &token_hash, crate::now()) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = socket.send(close_frame(1008, "worker token rotation expired or was superseded")).await;
+                return;
+            }
+            Err(e) => {
+                eprintln!("database error: {e}");
+                let _ = socket.send(close_frame(1011, "internal error")).await;
+                return;
+            }
+        }
+    }
 
-    // ---- register (closes any older connection) and welcome
+    // ---- register (closes any older connection) and welcome.
+    // Unanswered reads are failed with `worker-offline` first: nobody is waiting for them any more, and
+    // replaying them after a reconnect cost megabytes (DOG-021). Doing it before `register` means no
+    // read submitted on the new connection can be caught by it.
+    expire_reads(&st, &name);
     let conn_id = st.hub.next_conn_id();
     let (tx, mut rx) = mpsc::channel::<Outbound>(OUTBOUND_QUEUE);
     let (close_tx, mut close_rx) = watch::channel(None);
@@ -216,9 +267,9 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         generation,
         json!({"generation": generation, "protocol_version": PROTOCOL_VERSION, "event_cursor": cursor}),
     );
-    let mut alive = send(&mut socket, welcome).await;
+    let mut alive = send(&st, &mut socket, welcome).await;
 
-    // ---- redeliver every unfinished command
+    // ---- redeliver every unfinished write (reads were expired before registering, see above)
     if alive {
         match st.db.commands_resend(&name) {
             Ok(rows) => {
@@ -245,12 +296,13 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         tokio::select! {
             frame = socket.recv() => {
                 last_heard = Instant::now();
+                count_in(&st, &frame);
                 match classify(frame, &worker_id, generation) {
                     Step::Close(c, r) => { final_close = Some((c, r)); break }
                     Step::Skip => {}
                     Step::Reject(text) => {
                         let text = text.strip_prefix("\u{0}fatal").map(str::to_string).unwrap_or(text);
-                        if !send(&mut socket, text).await { break }
+                        if !send(&st, &mut socket, text).await { break }
                     }
                     Step::Message(m) if is_stale_welcome_reply(&m, &welcome_id) => {
                         st.db.audit(
@@ -263,16 +315,16 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
                         break
                     }
                     Step::Message(m) => match handle(&st, &name, &worker_id, generation, m) {
-                        Ok(replies) => for r in replies { if !send(&mut socket, r).await { alive = false; break } },
+                        Ok(replies) => for r in replies { if !send(&st, &mut socket, r).await { alive = false; break } },
                         Err(()) => { final_close = Some((1011, "internal error")); break }
                     },
                 }
             }
             item = rx.recv() => {
                 let Some(item) = item else { final_close = *close_rx.borrow(); break };
-                if !send(&mut socket, item.text).await { break }
+                if !send(&st, &mut socket, item.text).await { break }
                 if let Some(id) = item.command_id {
-                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.to_json()})); }
+                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.to_notice()})); }
                 }
             }
             _ = close_rx.changed() => {
@@ -287,7 +339,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
                     Ok(None) => { final_close = Some((1008, "worker revoked")); break }
                     _ => {}
                 }
-                if !send(&mut socket, protocol::encode("ping", &worker_id, generation, json!({}))).await { break }
+                if !send(&st, &mut socket, protocol::encode("ping", &worker_id, generation, json!({}))).await { break }
             }
         }
     }
@@ -296,8 +348,21 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
     }
     if st.hub.unregister(&name, conn_id) {
         let _ = st.db.worker_disconnected(&name);
+        expire_reads(&st, &name);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
+    }
+}
+
+/// Finish the worker's unanswered read-only commands with a `worker-offline` failure and tell the browsers.
+fn expire_reads(st: &St, name: &str) {
+    match st.db.commands_expire_reads(name) {
+        Ok(rows) => {
+            for row in rows {
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
+            }
+        }
+        Err(e) => eprintln!("database error: {e}"),
     }
 }
 
@@ -308,13 +373,61 @@ async fn deliver_row(st: &St, socket: &mut WebSocket, worker_id: &str, generatio
         o.entry("params").or_insert_with(|| json!({}));
         o.entry("mission_id").or_insert(Value::Null);
     }
-    if !send(socket, protocol::encode("command", worker_id, generation, payload)).await {
+    if !send(st, socket, protocol::encode("command", worker_id, generation, payload)).await {
         return false;
     }
     if let Ok(Some(r)) = st.db.command_sent(&row.request_id) {
-        st.hub.publish(json!({"type": "command", "command": r.to_json()}));
+        st.hub.publish(json!({"type": "command", "command": r.to_notice()}));
     }
     true
+}
+
+/// Most missions named in one change notice; keeps the notice well below the hub's per-message limit.
+const MAX_NOTICE_MISSIONS: usize = 16;
+
+/// The browser-stream change notice for one accepted batch: counts per mission, not the events.
+/// A console that wants the details reads `GET /api/v1/events` (stored by the coordinator, so no
+/// worker round trip) or the mission list, whose entries carry the replicated summaries.
+fn event_notice(worker: &str, cursor: u64, events: &[Value], summaries: &[Value]) -> Value {
+    let mut by_mission: std::collections::BTreeMap<String, (u64, u64, bool)> = std::collections::BTreeMap::new();
+    for event in events {
+        let mission = event.get("mission_id").and_then(Value::as_str).unwrap_or("");
+        let id = event.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let entry = by_mission.entry(mission.to_string()).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(id);
+    }
+    for summary in summaries {
+        if let Some(id) = summary.get("id").and_then(Value::as_str) {
+            by_mission.entry(id.to_string()).or_default().2 = true;
+        }
+    }
+    // Missions whose tasks changed (an event with a task id), so an open mission page reads its task list.
+    let mut task_missions = std::collections::BTreeSet::new();
+    for event in events {
+        if event.get("task_id").is_some_and(|id| !id.is_null()) {
+            if let Some(mission) = event.get("mission_id").and_then(Value::as_str) {
+                task_missions.insert(mission.to_string());
+            }
+        }
+        if task_missions.len() >= MAX_NOTICE_MISSIONS {
+            break;
+        }
+    }
+    let first = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).min();
+    let last = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max();
+    // The hub drops a stream message above `MAX_STREAM_MESSAGE_BYTES`, so the list is capped: missions with
+    // events first. A console that sees `truncated` re-reads the mission list instead of trusting the list.
+    let mut entries: Vec<(String, (u64, u64, bool))> = by_mission.into_iter().collect();
+    entries.sort_by_key(|(id, (count, _, _))| (*count == 0, id.clone()));
+    let truncated = entries.len() > MAX_NOTICE_MISSIONS;
+    entries.truncate(MAX_NOTICE_MISSIONS);
+    let missions: Vec<Value> = entries
+        .into_iter()
+        .map(|(id, (count, last_id, summary))| json!({"id": id, "events": count, "last_event_id": last_id, "summary": summary}))
+        .collect();
+    json!({"type": "event", "worker": worker, "cursor": cursor, "count": events.len(), "first_event_id": first, "last_event_id": last,
+           "missions": missions, "task_missions": task_missions, "truncated": truncated})
 }
 
 /// The worker's `stale-generation` error in reply to our `welcome`.
@@ -322,6 +435,44 @@ fn is_stale_welcome_reply(m: &Message, welcome_id: &str) -> bool {
     m.kind == "error"
         && m.payload.get("code").and_then(Value::as_str) == Some("stale-generation")
         && m.payload.get("in_reply_to").and_then(Value::as_str) == Some(welcome_id)
+}
+
+/// The mission a finished `mission.delete` command removed on the worker, or `None` when it did not.
+///
+/// An applied result names the full mission ID. A `not-found` rejection means the worker has no such
+/// mission (for example a redelivery after the first execution's result was lost), so the coordinator's
+/// copy, when it has exactly that ID, is stale and goes too. Any other outcome (refused because the mission
+/// is running, confirmation missing, ...) leaves everything in place.
+fn deleted_mission_of(row: &crate::db::CommandRow, payload: &Value) -> Option<String> {
+    match payload.pointer("/outcome").and_then(Value::as_str) {
+        Some("applied") => payload.pointer("/result/mission_id").and_then(Value::as_str).map(str::to_string),
+        Some("rejected") if payload.pointer("/error/code").and_then(Value::as_str) == Some("not-found") => {
+            row.request.get("mission_id").and_then(Value::as_str).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+/// Tombstone `ids` for `name`, audit the ones that are new and tell connected consoles to re-read the missions.
+fn apply_tombstones(st: &St, name: &str, ids: &[String], via: &str) -> Result<(), rusqlite::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let had_replica: Vec<bool> = ids.iter().map(|id| st.db.mission_known(name, id)).collect::<Result<_, _>>()?;
+    let fresh = st.db.missions_tombstone(name, ids)?;
+    for id in &fresh {
+        st.db.audit(
+            &format!("worker:{name}"),
+            "mission.delete",
+            &format!("worker={name} mission={id} via={via}"),
+            "",
+        );
+    }
+    if !fresh.is_empty() || had_replica.iter().any(|known| *known) {
+        let cursor = st.db.worker_get(name)?.map_or(0, |w| w.event_cursor);
+        st.hub.publish(event_notice(name, cursor, &[], &[]));
+    }
+    Ok(())
 }
 
 /// Handle one validated message after welcome. `Err(())` means a storage failure.
@@ -347,6 +498,12 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let events = p["events"].as_array().cloned().unwrap_or_default();
             let missions = p.get("missions").and_then(Value::as_array).cloned();
             let mission_cursor = p.get("mission_cursor").and_then(Value::as_u64);
+            // Tombstones first, so the events and summaries of the same message are already filtered by them. A
+            // repeated tombstone (the worker resends until its pong, and after a nack) changes nothing.
+            if let Some(deleted) = p.get("deleted_missions").and_then(Value::as_array) {
+                let ids: Vec<String> = deleted.iter().filter_map(|id| id.as_str().map(str::to_string)).collect();
+                apply_tombstones(st, name, &ids, "worker").map_err(db)?;
+            }
             match st
                 .db
                 .events_store(EventBatch {
@@ -361,8 +518,8 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
                 .map_err(db)?
             {
                 EventsOutcome::Accepted { cursor, stored } => {
-                    if stored > 0 {
-                        st.hub.publish(json!({"type": "event", "worker": name, "cursor": cursor, "events": events}));
+                    if stored > 0 || missions.as_ref().is_some_and(|m| !m.is_empty()) {
+                        st.hub.publish(event_notice(name, cursor, &events, missions.as_deref().unwrap_or(&[])));
                     }
                     Ok(vec![])
                 }
@@ -377,14 +534,19 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
         "command.ack" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_acked(name, id).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
             }
             Ok(vec![])
         }
         "command.result" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_done(name, id, &Value::Object(m.payload.clone())).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
+                if row.operation == "mission.delete" {
+                    if let Some(mission_id) = deleted_mission_of(&row, &Value::Object(m.payload.clone())) {
+                        apply_tombstones(st, name, &[mission_id], "command").map_err(db)?;
+                    }
+                }
             }
             Ok(vec![])
         }

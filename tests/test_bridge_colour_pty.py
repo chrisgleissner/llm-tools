@@ -25,8 +25,13 @@ DOWN, ENTER, CTRL_D = b"\x1bOB", b"\r", b"\x04"
 ESCAPES = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\([A-Z]|\x1b[=>]|\x1b\][^\x07]*\x07")
 
 
-def run(env: dict[str, str], work: Path, steps: list[tuple[bytes, float]], *, size: tuple[int, int] = (30, 110)) -> bytes:
-    """Run the launcher in a pseudo-terminal, send ``(keys, wait)`` steps, and return everything it wrote."""
+def run(env: dict[str, str], work: Path, steps: list[tuple[bytes, float]], *, size: tuple[int, int] = (30, 110),
+        expect: bytes | None = None) -> bytes:
+    """Run the launcher in a pseudo-terminal, send ``(keys, wait)`` steps, and return everything it wrote.
+
+    With ``expect``, the run waits (up to a scaled deadline) for those bytes after the last step, so a slow
+    start on a loaded host does not turn into a missing screen.
+    """
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
     root = str(Path(__file__).resolve().parents[1])
@@ -54,10 +59,14 @@ def run(env: dict[str, str], work: Path, steps: list[tuple[bytes, float]], *, si
                 return
 
     try:
+        # A key written before the first screen exists is discarded by curses, so wait for it.
+        wait_for(lambda: pump(0.5, settle=0.8) or len(output) > 0, 20, message="the launcher drew nothing")
         pump(2.5, settle=0.8)  # startup draws more than once
         for keys, wait in steps:
             os.write(master, keys)
             pump(wait)
+        if expect is not None:
+            wait_for(lambda: pump(0.2, settle=0.1) or expect in output, 10)
         for _ in range(4):  # leave the console, then the launcher
             if process.poll() is not None:
                 break
@@ -106,7 +115,7 @@ def tmux_screen(env: dict[str, str], work: Path, tmp_path: Path, keys: list[str]
                 return
 
     try:
-        settle(None, 4.6, quiet=0.8)  # startup draws more than once
+        settle(None, 15, quiet=0.8)  # startup draws more than once; a loaded host starts slowly
         for key in keys:
             before = capture()
             subprocess.run([*base, "send-keys", key], check=True)
@@ -189,7 +198,7 @@ def explicit_colours(output: bytes) -> list[str]:
 def test_no_color_emits_attributes_only_and_keeps_the_terminal_background(seeded) -> None:
     env, work = seeded
     env.update(LANG="C.UTF-8", LC_ALL="C.UTF-8", NO_COLOR="1")
-    output = run(env, work, OPEN_CONSOLE)
+    output = run(env, work, OPEN_CONSOLE, expect=b"CREATED")
     assert b"CREATED" in output
     assert explicit_colours(output) == [], explicit_colours(output)[:10]  # no 37m/40m/38;5/48;5 slab on a light terminal
     codes = set(sgr_codes(output))

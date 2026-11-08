@@ -2,7 +2,7 @@
 import * as api from "../api";
 import { h } from "../dom";
 import { mountFeedback } from "../ui";
-import { passwordForm } from "./account";
+import { passwordForm } from "./password-form";
 
 const TITLE = "Choose a new password";
 const SEEN_KEY = "bridge-reset-notice-seen";

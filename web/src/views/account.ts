@@ -1,10 +1,11 @@
 import * as api from "../api";
 import { absTime, button, copyButton, field, h, isoTime, relFromMs } from "../dom";
 import { menu } from "../menu";
-import { DEFAULT_POLICY } from "../password";
-import { announce, openPanel } from "../ui";
+import { passkeyProviderName } from "../passkey-provider";
+import { openPanel } from "../ui";
 import { answerLine, onceDialog } from "./remote";
-import { minutes, newPasswordFields, revealable } from "./login";
+import { minutes } from "./login";
+import { passwordForm } from "./password-form";
 
 export interface AccountOpts {
   me: api.AuthState | null;
@@ -33,6 +34,9 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
   });
   const scopeError = h("p", { class: "field-error", id: "token-scope-error", role: "alert" });
   const expiry = h("select", { id: "api-token-expiry", name: "expires_days" }, h("option", { value: "30" }, "30 days"), h("option", { value: "90", selected: true }, "90 days"), h("option", { value: "365" }, "1 year"), h("option", { value: "0" }, "Never"));
+  const allowedNetworks = field("api-token-networks", "Allowed client networks (optional)", "text", { autocomplete: "off", maxlength: 2048, placeholder: "192.0.2.0/24, 2001:db8::/32" });
+  const allowedWorkers = h("select", { id: "api-token-workers", name: "allowed_workers", multiple: true, size: 4, "aria-label": "Allowed workers (optional)" });
+  void api.get<{ workers: Array<{ name: string }> }>("/api/v1/workers").then(({ workers }) => allowedWorkers.replaceChildren(...workers.map((worker) => h("option", { value: worker.name }, worker.name)))).catch(() => {});
   const failure = h("p", { class: "form-error box", role: "alert" });
   const create = h("button", { type: "submit", class: "btn primary" }, "Create token");
   const form = h(
@@ -45,6 +49,10 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
       h("fieldset", { "aria-describedby": "token-scope-error" }, h("legend", {}, "Permissions"), h("p", { class: "hint" }, "Grant the least access the tool needs."), ...scopeInputs.map((x) => x.label)),
       scopeError,
       h("div", { class: "field" }, h("label", { for: "api-token-expiry" }, "Expires after"), expiry),
+      allowedNetworks.wrap,
+      h("p", { class: "hint" }, "Leave blank to allow requests from any address. Separate CIDR ranges with commas."),
+      h("div", { class: "field" }, h("label", { for: allowedWorkers.id }, "Restrict to workers (optional)"), allowedWorkers),
+      h("p", { class: "hint" }, "Leave no workers selected to allow every worker. Worker-bound tokens cannot use global diagnostics, audit, token, or low-level command endpoints."),
       h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
       failure,
     ),
@@ -67,7 +75,11 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
     }
     create.disabled = true;
     try {
-      const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", { name: name.input.value.trim(), scopes, expires_days: Number(expiry.value) });
+      const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
+        name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
+        allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
+        allowed_workers: Array.from(allowedWorkers.selectedOptions, (option) => option.value),
+      });
       (document.getElementById("token-dialog") as HTMLDialogElement | null)?.close();
       onCreated(created);
     } catch (err) {
@@ -103,7 +115,7 @@ function tokenManagement(): HTMLElement {
             "li",
             { "data-token": token.name },
             h("div", { class: "token-main" }, h("strong", { class: "nowrap" }, token.name), h("span", { class: "token-scopes" }, token.scopes.join(", ")), h("span", { class: "token-actions" }, menu({ label: `Actions for token ${token.name}`, kind: "ghost" }, [{ label: "Revoke token", danger: true, onSelect: () => void revoke() }]))),
-            h("div", { class: "token-meta muted small" }, h("span", {}, `Expires ${token.expires_at ? isoTime(token.expires_at) : "never"}`), h("span", {}, `Last used ${token.last_used ? isoTime(token.last_used) : "never"}`)),
+            h("div", { class: "token-meta muted small" }, h("span", {}, `Expires ${token.expires_at ? isoTime(token.expires_at) : "never"}`), h("span", {}, token.last_used ? `Last used ${isoTime(token.last_used)} from ${token.last_address ?? "unknown address"}` : "Not used yet"), h("span", {}, token.allowed_cidrs.length ? `Networks ${token.allowed_cidrs.join(", ")}` : "Any client network"), h("span", {}, token.allowed_workers.length ? `Workers ${token.allowed_workers.join(", ")}` : "All workers")),
           ),
         );
       }
@@ -128,63 +140,63 @@ function tokenManagement(): HTMLElement {
   return section;
 }
 
-export interface PasswordFormOpts {
-  me: api.AuthState | null;
-  onPasswordChanged: () => void;
-  /** Replaces the card and heading when the form is the whole page (after a reset on the host): the heading text and the paragraphs below it. */
-  page?: { title: string; intro: HTMLElement[] };
-}
-
-/** The change-password form: the account page shows it, and so does the screen that blocks everything else after a host reset. */
-export function passwordForm(opts: PasswordFormOpts): HTMLElement {
-  const me = opts.me;
-  const policy = me?.password_policy ?? DEFAULT_POLICY;
-  const cur = field("current-password", "Current password", "password", { autocomplete: "current-password", required: true });
-  revealable(cur, "current password");
-  const np = newPasswordFields(policy, () => me?.username ?? "", { passId: "new-password", passLabel: "New password", confirmId: "new-password-confirm", confirmLabel: "Repeat new password" });
-  const keep = h("input", { type: "checkbox", id: "keep-tokens" });
-  const error = h("p", { class: "form-error box", role: "alert" });
-  const submit = h("button", { type: "submit", class: "btn primary" }, "Change password");
-  const form = h(
-    "form",
-    { class: opts.page ? "card auth-card" : "panel account-block", id: "password-form", novalidate: true },
-    h(opts.page ? "h1" : "h2", {}, opts.page?.title ?? "Change password"),
-    ...(opts.page?.intro ?? []),
-    h("p", { class: "muted" }, "Changing the password signs out every session, including this one. You sign in again with the new password."),
-    cur.wrap,
-    ...np.nodes,
-    h("label", { class: "check", for: "keep-tokens" }, keep, h("span", {}, "Keep existing API tokens valid")),
-    h("p", { class: "hint" }, "By default every API token is revoked as well. Worker enrolment tokens are not affected."),
-    error,
-    h("div", { class: "actions" }, submit),
+function passkeyReenrollment(): HTMLElement {
+  const section = h("section", { class: "panel account-block", "aria-labelledby": "passkey-reenroll-title" });
+  const current = field("passkey-reenroll-password", "Current password", "password", { autocomplete: "current-password", required: true });
+  const confirm = h("input", { id: "passkey-reenroll-confirm", type: "checkbox", required: true });
+  const status = h("p", { role: "status", "aria-live": "polite" });
+  const submit = h("button", { class: "btn danger", type: "submit" }, "Reset passkeys for this address");
+  const form = h("form", { novalidate: true },
+    h("p", { class: "muted" }, "To change the trusted address, open this page at the new HTTPS address. All existing passkeys will be removed and must be registered again; your password remains available."),
+    current.wrap,
+    h("label", { class: "check", for: confirm.id }, confirm, h("span", {}, "I understand this removes every registered passkey.")),
+    status,
+    submit,
   );
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    error.textContent = "";
-    cur.setError("");
-    if (!cur.input.value) {
-      cur.setError("Enter your current password.");
-      cur.input.focus();
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status.textContent = "";
+    if (!current.input.value || !confirm.checked) {
+      status.textContent = "Enter your current password and confirm the passkey reset.";
       return;
     }
-    if (!np.validatePassword(true) || !np.validateConfirm(true)) return;
     submit.disabled = true;
-    submit.classList.add("busy");
     try {
-      await api.post("/api/v1/auth/password", { current: cur.input.value, new: np.pass.input.value, keep_api_tokens: keep.checked });
-      announce("Password changed. Sign in again.", "applied");
-      opts.onPasswordChanged();
-    } catch (err) {
+      const result = await api.reenrollPasskeys(current.input.value, confirm.checked);
+      current.input.value = "";
+      status.textContent = `Passkeys were removed. Register a new passkey for ${result.origin}.`;
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : "Could not reset passkeys.";
+    } finally {
       submit.disabled = false;
-      submit.classList.remove("busy");
-      if (err instanceof api.ApiError && err.code === "invalid-credentials") {
-        cur.setError("The current password is not correct.");
-        cur.input.focus();
-      } else if (err instanceof api.ApiError && err.status === 429) error.textContent = `Too many wrong current passwords. Try again in ${minutes(err.retryAfter ?? 60)}.`;
-      else error.textContent = err instanceof api.ApiError ? err.message : "Unexpected error. Try again.";
     }
   });
-  return form;
+  section.append(h("h2", { id: "passkey-reenroll-title" }, "Change passkey address"), form);
+  return section;
+}
+
+function passkeyList(): HTMLElement {
+  const section = h("section", { class: "panel account-block", "aria-labelledby": "passkey-list-title" });
+  const rows = h("ul", { class: "token-list", "aria-label": "Registered passkeys" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading passkeys…");
+  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows);
+  void api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys")
+    .then(({ passkeys }) => {
+      status.textContent = "";
+      if (!passkeys.length) {
+        rows.replaceChildren(h("li", { class: "muted" }, "No passkeys registered."));
+        return;
+      }
+      rows.replaceChildren(...passkeys.map((passkey) => h("li", {},
+        h("strong", {}, passkey.name),
+        h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
+        h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
+        h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
+        h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
+      )));
+    })
+    .catch((error) => { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; });
+  return section;
 }
 
 export function account(root: HTMLElement, opts: AccountOpts): () => void {
@@ -215,6 +227,22 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     needMe: "Nothing needs you.",
     next: "Change the password or create an API token below if you need one.",
   });
-  root.append(h("h1", {}, "Account"), answers.el, h("div", { class: "account-col" }, session, form, tokenManagement()));
+  const passkeyGuidance = h("section", { id: "passkey-support-guidance", class: "panel account-block", hidden: true });
+  void import("../passkeys").then(async ({ detectPasskeySupport, supportsPasskeysOnHost }) => {
+    const capability = await detectPasskeySupport();
+    if (!capability.supported || !supportsPasskeysOnHost(window.location.hostname)) {
+      passkeyGuidance.hidden = false;
+      passkeyGuidance.replaceChildren(
+        h("h2", {}, "Passkeys"),
+        h("p", { class: "muted" }, "Passkeys need a trusted address such as Tailscale."),
+        h("a", { href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#enable-passkeys-optional", target: "_blank", rel: "noopener" }, "Enable passkeys (optional)"),
+      );
+    }
+  }).catch(() => {});
+  root.append(
+    h("h1", {}, "Account"),
+    answers.el,
+    h("div", { class: "account-col" }, session, form, tokenManagement(), ...(me?.passkey_canonical_origin ? [passkeyList(), passkeyReenrollment()] : []), passkeyGuidance),
+  );
   return () => {};
 }

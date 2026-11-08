@@ -202,6 +202,7 @@ commands are optional; see `llm-bridge help distributed` and
 | `llm-bridge remote status` | Show the stored coordinator address. |
 | `llm-bridge remote logout` | Remove the stored coordinator configuration. |
 | `llm-bridge worker enroll` | Register this computer as a worker. |
+| `llm-bridge worker rotate-token` | Install a coordinator-staged worker token without enrolling again. |
 | `llm-bridge worker status` | Show this worker's enrolment and connection. |
 | `llm-bridge worker run` | Run the worker in the foreground. |
 | `llm-bridge worker install-service` | Install and start a systemd user unit for the worker. |

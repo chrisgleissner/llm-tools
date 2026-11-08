@@ -229,8 +229,18 @@ def _mission_list(store: BridgeStore | None, request: CommandRequest, params: di
 
 
 def _mission_status(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """The bounded status projection (a few KB). ``full`` returns the whole local projection: ``llm-bridge status`` on the worker's own machine asks for it."""
     assert request.mission_id is not None
-    return dict(_cli().status_snapshot(request.mission_id))
+    if params["full"]:
+        return dict(_cli().status_snapshot(request.mission_id))
+    from .bridge_status_bound import STATUS_PROMPT_CHARS_MAX, bound_status
+
+    prompt_chars = params["prompt_chars"]
+    if not 0 <= prompt_chars <= STATUS_PROMPT_CHARS_MAX or params["task_limit"] < 0 or params["event_limit"] < 0:
+        raise CommandFailure("invalid-argument", f"mission.status: task_limit and event_limit must not be negative and prompt_chars must be 0-{STATUS_PROMPT_CHARS_MAX}")
+    # Read only the head of each prompt: bound_status drops it or keeps at most prompt_chars of it.
+    snapshot = _cli().status_snapshot(request.mission_id, prompt_chars=max(1, prompt_chars))
+    return bound_status(dict(snapshot), task_limit=params["task_limit"], prompt_chars=prompt_chars, event_limit=params["event_limit"])
 
 
 def _mission_steer(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -356,6 +366,19 @@ def _mission_control(action: str) -> Handler:
     return handler
 
 
+def _mission_delete(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Delete a finished or never-started mission and its local state; the confirmation is part of the request (PRD-038)."""
+    assert request.mission_id is not None
+    if not params["confirm"]:
+        raise CommandFailure(
+            "confirmation-required",
+            "mission.delete permanently removes the mission, its tasks, events and logs; send confirm: true to proceed",
+        )
+    from .bridge_delete import delete_mission
+
+    return delete_mission(request.mission_id)
+
+
 def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     """Start the worker's existing controller after validating its selected rotation."""
     cli = _cli()
@@ -459,6 +482,12 @@ def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[
     if not 0 <= limit <= 1000 or offset < 0:
         raise CommandFailure("invalid-argument", "task.list: limit must be 0-1000 and offset non-negative")
     tasks = store.list_tasks(request.mission_id, offset=offset) if params["all"] else store.list_tasks(request.mission_id, limit=limit, offset=offset)
+    prompt_chars = params["prompt_chars"]
+    if prompt_chars is not None:
+        # The console lists tasks by title; ``task.show`` returns one whole task.
+        if prompt_chars < 0:
+            raise CommandFailure("invalid-argument", "task.list: prompt_chars must not be negative")
+        tasks = [{**task, **{key: task[key][:prompt_chars] for key in ("prompt", "original_prompt") if isinstance(task.get(key), str)}} for task in tasks]
     return {
         "tasks": tasks,
         "total": store.task_counters(request.mission_id)["total"],
@@ -705,7 +734,9 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "headless": Param(bool, default=False), "native_tui": Param(bool, default=False),
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
                        "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
-        OperationSpec("mission.status", "Show one mission's status projection", False, True, _NO_PARAMS, _mission_status),
+        OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
+                      {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
+                       "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),
@@ -755,13 +786,16 @@ OPERATIONS: dict[str, OperationSpec] = {
             _mission_control("stop"),
         ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
+        OperationSpec("mission.delete", "Delete a finished or never-started mission and its local state", True, True,
+                      {"confirm": Param(bool, default=False)}, _mission_delete),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(
             "task.list",
             "Page a mission's tasks in scheduling order",
             False,
             True,
-            {"limit": Param(int, default=50), "offset": Param(int, default=0), "all": Param(bool, default=False)},
+            {"limit": Param(int, default=50), "offset": Param(int, default=0), "all": Param(bool, default=False),
+             "prompt_chars": Param(int)},
             _task_list,
         ),
         OperationSpec("task.show", "Show one task", False, True, _TASK_SELECTOR, _task_show),

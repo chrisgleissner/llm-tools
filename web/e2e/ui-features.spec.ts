@@ -3,6 +3,20 @@ import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, 
 import { showTab } from "./redesign/harness";
 import { havePython, startSeededWorker } from "./seed";
 
+test("responsive navigation waits for its destination before falling back to More", async ({ page, coord }) => {
+  await setupViaUi(page, coord);
+  await page.evaluate(() => {
+    const workers = document.querySelector<HTMLAnchorElement>('nav[aria-label="Main"] a[href="/workers"]');
+    const more = document.querySelector<HTMLButtonElement>("#more-button");
+    if (!workers || !more) throw new Error("main navigation controls were not rendered");
+    workers.style.visibility = "hidden";
+    more.style.display = "none";
+    window.setTimeout(() => { workers.style.visibility = ""; }, 150);
+  });
+  await navTo(page, "Workers");
+  await expect(page.getByRole("heading", { name: "Workers", exact: true })).toBeVisible();
+});
+
 test.describe("workers page", () => {
   test("adding a worker shows its token once; removing one asks for confirmation", async ({ page, coord }) => {
     await setupViaUi(page, coord);

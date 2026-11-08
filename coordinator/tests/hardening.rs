@@ -21,6 +21,23 @@ async fn tls_connect(env: &Env) -> Tls {
         .unwrap()
 }
 
+/// Send `GET /healthz` and return the response head (status line and headers).
+async fn healthz_head(s: &mut Tls) -> String {
+    let port = s.get_ref().0.peer_addr().unwrap().port();
+    s.write_all(format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !out.windows(4).any(|w| w == b"\r\n\r\n") {
+        match tokio::time::timeout(Duration::from_secs(10), s.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => out.extend_from_slice(&buf[..n]),
+            other => panic!("no complete response head, got {other:?} after {:?}", String::from_utf8_lossy(&out)),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Read until the peer closes or `limit` passes; returns what arrived.
 async fn read_to_close(s: &mut Tls, limit: Duration) -> (String, bool) {
     let mut out = Vec::new();
@@ -56,7 +73,7 @@ fn set(key: &str, value: &str) -> impl FnOnce(String) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     let env = boot_with(set("max_connections_per_ip", "200")).await;
-    let _admin = env.admin().await; // creates the administrator; the successful login makes 127.0.0.1 a known address
+    let admin = env.admin().await; // creates the administrator; the successful login makes 127.0.0.1 a known address
     let api = env.api();
     let mut tasks = Vec::new();
     for _ in 0..60 {
@@ -80,6 +97,14 @@ async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     let refused = codes.iter().filter(|c| **c == 429).count();
     assert_eq!(verified, 5, "only the limit reaches Argon2: {codes:?}");
     assert_eq!(refused, 55, "{codes:?}");
+    let (_, notifications) = admin.get("/api/v1/security/notifications").await;
+    let failures: Vec<_> = notifications["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["category"] == "repeated_sign_in_failures")
+        .collect();
+    assert_eq!(failures.len(), 1, "a burst creates one bounded security alert");
     env.stop().await;
 }
 
@@ -233,15 +258,16 @@ async fn buffered_large_bodies_are_bounded() {
     let api = env.admin().await;
     let slots = env.srv.state.big_bodies.clone();
     assert_eq!(slots.available_permits(), 8);
-    // Eight 200 kB bodies that stall after one byte take all the permits.
-    let mut held = Vec::new();
-    for _ in 0..8 {
+    // Establish all eight TLS connections concurrently so a slow runner cannot let the
+    // earliest stalled body time out while the later handshakes are still being made.
+    let held = futures_util::future::join_all((0..8).map(|_| async {
         let mut s = tls_connect(&env).await;
         s.write_all(authed_post_head(&env, &api, "/api/v1/commands", 200_000).as_bytes()).await.unwrap();
         s.write_all(b"{").await.unwrap();
-        held.push(s);
-    }
-    let end = Instant::now() + Duration::from_secs(2);
+        s
+    }))
+    .await;
+    let end = Instant::now() + Duration::from_secs(5);
     while slots.available_permits() > 0 && Instant::now() < end {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -340,17 +366,25 @@ async fn worker_reserve_admits_workers_when_general_slots_are_full() {
     let env = boot_with(|t| set("worker_reserve_connections", "2")(set("max_connections", "8")(set("max_connections_per_ip", "100")(t)))).await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    // Six idle sockets (no TLS handshake yet) take every general slot.
-    let fill: Vec<_> = futures_util::future::join_all((0..6).map(|_| TcpStream::connect(env.addr))).await;
-    let _fill: Vec<_> = fill.into_iter().map(Result::unwrap).collect();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Take every general slot. The test client's own keep-alive connections already occupy an
+    // unknown number of general slots (one or two, depending on whether the previous request's
+    // connection had returned to the pool when the next request started), so a fixed number of
+    // filler sockets cannot be right. Hold TLS connections that each completed a /healthz request
+    // until one is answered 503 by the reserve gate: the server only places a connection in the
+    // reserve when no general slot was free when it was accepted.
+    let mut held = Vec::new();
+    let refusal = loop {
+        assert!(held.len() < 6, "more connections admitted than the 6 general slots");
+        let mut s = tls_connect(&env).await;
+        let head = healthz_head(&mut s).await;
+        if head.starts_with("HTTP/1.1 200") {
+            held.push(s);
+        } else {
+            break head;
+        }
+    };
     // A browser-style request lands in the reserve and is refused.
-    let mut s = tls_connect(&env).await;
-    s.write_all(format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", env.addr.port()).as_bytes())
-        .await
-        .unwrap();
-    let (text, _) = read_to_close(&mut s, Duration::from_secs(3)).await;
-    assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+    assert!(refusal.starts_with("HTTP/1.1 503"), "{refusal}");
     // A worker with a valid token still gets in.
     let (mut fw, welcome) = Fw::connect(&env, &token, "wid-1", 0).await;
     assert_eq!(welcome["type"], "welcome");
@@ -559,8 +593,14 @@ fn version_1_database_is_migrated_in_place() {
                platform TEXT, capabilities TEXT);
              CREATE TABLE missions(worker TEXT NOT NULL, mission_id TEXT NOT NULL, info TEXT NOT NULL, PRIMARY KEY(worker, mission_id));
              CREATE TABLE api_tokens(name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used INTEGER);
+             CREATE TABLE admin(id INTEGER PRIMARY KEY, username TEXT NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+             CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, remote TEXT NOT NULL);
              INSERT INTO workers(name, token_hash, worker_id, generation, created_at) VALUES('w1', 'h1', 'wid', 7, 0);
              INSERT INTO api_tokens(name, token_hash, created_at) VALUES('old', 'h2', 0);
+             INSERT INTO admin(id,username,password_hash,created_at) VALUES(1,'operator','password-hash',1);
+             INSERT INTO sessions(token_hash,csrf,created_at,last_seen,expires_at) VALUES('old-session','csrf',1,1,9999999999);
+             INSERT INTO audit(ts,actor,action,detail,remote) VALUES(1,'operator','old-action','', '127.0.0.1');
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -577,6 +617,36 @@ fn version_1_database_is_migrated_in_place() {
         "existing tokens keep working and do not expire"
     );
     assert_eq!(db.token_lookup("h2").unwrap().unwrap().scopes, vec!["admin"]);
+    assert_eq!(db.api_tokens_list().unwrap()[0].token_id, None, "migrated tokens have no public ID");
+    assert!(db.api_tokens_list().unwrap()[0].allowed_cidrs.is_empty(), "migrated tokens remain unrestricted");
+    assert!(
+        db.api_tokens_list().unwrap()[0].allowed_workers.is_empty(),
+        "migrated tokens remain unrestricted to workers"
+    );
+    assert_eq!(
+        db.api_tokens_list().unwrap()[0].principal_id,
+        "admin",
+        "legacy tokens migrate to the stable administrator principal"
+    );
+    assert_eq!(db.principals_list().unwrap()[0]["id"], "admin");
+    let sender_binding: (Option<String>, Option<String>) = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT sender_constraint_kind,sender_constraint_id FROM api_tokens WHERE name='old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(sender_binding, (None, None));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let session_principal: String = connection
+        .query_row("SELECT principal_id FROM sessions WHERE token_hash='old-session'", [], |row| row.get(0))
+        .unwrap();
+    let audit_principal: String = connection
+        .query_row("SELECT principal_id FROM audit WHERE action='old-action'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(session_principal, "admin");
+    assert_eq!(audit_principal, "admin");
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))

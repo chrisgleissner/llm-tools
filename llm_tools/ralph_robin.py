@@ -1923,19 +1923,21 @@ def guard_against_auto_suspend(cfg: RalphConfig, logs: common.RunLogs) -> common
 
 
 def report_prior_suspend_failures(logs: common.RunLogs) -> None:
-    """Surface any earlier suspend cycle that recorded a start but never a resume
-    -- the durable fingerprint of a wake that wedged the machine on a prior boot."""
-    incomplete = common.incomplete_suspend_cycles(common.suspend_ledger_path())
-    if not incomplete:
-        return
-    common.log_event(logs, "prior_suspend_failures", {"count": len(incomplete), "cycles": incomplete[-5:]})
-    newest = max((int(c.get("started_epoch", 0)) for c in incomplete), default=0)
-    status_line(
-        f"warning: {len(incomplete)} earlier suspend cycle(s) never recorded a resume "
-        f"(latest {common.format_local_epoch(newest)}); a wake may have wedged the machine before. "
-        "Consider --watchdog, or longer reset windows so the machine suspends less often.",
-        level="warn",
-    )
+    """Surface a suspend cycle after which the machine never resumed -- a start in
+    the ledger followed by a different boot ID, the fingerprint of a wake that
+    wedged the machine. A start with no resume record from this boot only means the
+    waiting process ended after a normal resume; that is closed in the ledger
+    without a warning (``common.reconcile_suspend_ledger``)."""
+    ledger = common.suspend_ledger_path()
+    report = common.reconcile_suspend_ledger(ledger)
+    if report.recovered:
+        common.log_event(logs, "suspend_cycles_recovered", {"count": len(report.recovered), "cycles": [str(c.get("cycle_id")) for c in report.recovered[-5:]]})
+    if report.wedged or report.unverified:
+        common.log_event(logs, "prior_suspend_failures", {
+            "count": len(report.wedged), "cycles": report.wedged[-5:], "unverified": len(report.unverified),
+        })
+    for level, text in common.suspend_ledger_messages(report, ledger):
+        status_line(text, level=level)
 
 
 def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> int:

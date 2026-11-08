@@ -5,7 +5,10 @@ use serde_json::{json, Map, Value};
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_EVENTS_PER_BATCH: usize = 500;
+pub const MAX_EVENT_BATCH_BYTES: usize = 128 * 1024;
 pub const MAX_MISSIONS_PER_HELLO: usize = 5000;
+/// Mission tombstones in one `events` message (PRD-038).
+pub const MAX_DELETED_MISSIONS_PER_MESSAGE: usize = 100;
 pub const COMMAND_SCHEMA_VERSION: u64 = 1;
 
 /// Event kinds that never change a mission summary (the worker writes them every few seconds
@@ -61,7 +64,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
         "command.ack" => (&["request_id", "status"], &[]),
         "command.result" => (&["schema_version", "request_id", "operation", "outcome", "result", "error"], &[]),
-        "events" => (&["after", "through", "events"], &["mission_cursor", "missions"]),
+        "events" => (&["after", "through", "events"], &["mission_cursor", "missions", "deleted_missions"]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
         "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
@@ -152,6 +155,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
             let Some(events) = p["events"].as_array().filter(|e| e.len() <= MAX_EVENTS_PER_BATCH) else {
                 return perr("invalid-message", format!("events must be a list of at most {MAX_EVENTS_PER_BATCH}"));
             };
+            if serde_json::to_vec(events).map_or(true, |bytes| bytes.len() > MAX_EVENT_BATCH_BYTES) {
+                return perr("message-too-large", format!("event batch exceeds {MAX_EVENT_BATCH_BYTES} bytes"));
+            }
             let mut previous = after;
             for e in events {
                 if !e.is_object() {
@@ -169,6 +175,17 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                 };
                 if missions.iter().any(|m| !m.is_object()) {
                     return perr("invalid-message", "each mission snapshot must be an object");
+                }
+            }
+            if let Some(deleted) = p.get("deleted_missions") {
+                let ok = deleted
+                    .as_array()
+                    .is_some_and(|ids| ids.len() <= MAX_DELETED_MISSIONS_PER_MESSAGE && ids.iter().all(|id| id.as_str().is_some_and(valid_id)));
+                if !ok {
+                    return perr(
+                        "invalid-message",
+                        format!("deleted_missions must be a list of at most {MAX_DELETED_MISSIONS_PER_MESSAGE} mission IDs"),
+                    );
                 }
             }
             if let Some(mission_cursor) = p.get("mission_cursor") {
@@ -192,7 +209,7 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
         }
         "hello" => {
             uint(p.get("event_cursor"), "event_cursor", 0)?;
-            if !p["capabilities"].is_array() || !p["missions"].is_array() {
+            if !p["capabilities"].is_array() || !p["missions"].as_array().is_some_and(|missions| missions.len() <= MAX_MISSIONS_PER_HELLO) {
                 return perr("invalid-message", "hello: capabilities and missions must be lists");
             }
         }
@@ -214,9 +231,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                 "terminal.status"
                     if !matches!(p["state"].as_str(), Some("opened" | "refused" | "closed"))
                         || !matches!(p["mode"].as_str(), Some("view" | "write"))
-                        || !p["reason"].is_string() =>
+                        || !p["reason"].as_str().is_some_and(|reason| reason.len() <= 256) =>
                 {
-                    return perr("invalid-message", "terminal.status: bad state, mode or reason");
+                    return perr("invalid-message", "terminal.status: bad state, mode or reason (maximum 256 bytes)");
                 }
                 _ => {}
             }
@@ -272,9 +289,9 @@ pub fn decode(raw: &[u8]) -> Result<Message, ProtocolError> {
 }
 
 pub fn new_id() -> String {
-    use rand::RngCore;
+    use rand::TryRng;
     let mut b = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    rand::rngs::SysRng.try_fill_bytes(&mut b).expect("operating system random source");
     hex::encode(b)
 }
 

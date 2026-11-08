@@ -249,7 +249,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   // The coordinator pushes changes through the store; read the list again when it changes.
   let last = "";
   const un = subscribe(() => {
-    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, itemOf(m).state.id]), store.workers.map((w) => [w.name, w.state]), store.conn]);
+    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, itemOf(m).state.id, m.mission.task_counts ?? null, m.mission.current_task ?? null, m.mission.station ?? null, m.mission.model ?? null]), store.workers.map((w) => [w.name, w.state]), store.conn]);
     if (k !== last) {
       last = k;
       reload();

@@ -87,6 +87,75 @@ def test_enrolment_is_private_validated_and_hides_the_token(state, capsys):
     assert worker.unenroll() is True and worker.unenroll() is False
 
 
+@pytest.mark.parametrize(
+    ("cert", "key", "message"),
+    [
+        ("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n", None, "supplied together"),
+        ("not a certificate", "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n", "not a PEM certificate"),
+        ("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n", "not a private key", "not a PEM private key"),
+    ],
+)
+def test_worker_enrollment_rejects_incomplete_or_malformed_mtls_identity(state, cert, key, message):
+    with pytest.raises(worker.WorkerConfigError, match=message):
+        worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=False,
+                      client_cert_pem=cert, client_key_pem=key)
+
+
+def test_worker_tls_context_rejects_missing_enrolled_client_identity(state):
+    directory, _ = state
+    cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=False,
+                  client_cert_pem=cert, client_key_pem=key)
+    (directory / "worker" / worker.CLIENT_KEY_FILE).unlink()
+    with pytest.raises(worker.WorkerConfigError, match="client certificate or key is missing"):
+        worker.tls_context()
+
+
+def test_worker_tls_context_loads_the_enrolled_client_identity(state, monkeypatch):
+    directory, _ = state
+    cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=False,
+                  client_cert_pem=cert, client_key_pem=key)
+
+    class TlsContext:
+        minimum_version = None
+        loaded_identity = None
+
+        def load_cert_chain(self, *, certfile, keyfile):
+            self.loaded_identity = (certfile, keyfile)
+
+    context = TlsContext()
+    monkeypatch.setattr(worker.ssl, "create_default_context", lambda cafile=None: context)
+
+    assert worker.tls_context() is context
+    assert context.minimum_version == worker.ssl.TLSVersion.TLSv1_2
+    assert context.loaded_identity == (
+        str(directory / "worker" / worker.CLIENT_CERT_FILE),
+        str(directory / "worker" / worker.CLIENT_KEY_FILE),
+    )
+
+
+def test_worker_token_rotation_preserves_opt_ins_and_client_identity(state, monkeypatch):
+    directory, _ = state
+    cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    enrolled = worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True,
+                             allow_create=True, allow_roots=[str(directory)], allow_power=True,
+                             allow_restore=True, client_cert_pem=cert, client_key_pem=key)
+    rotated = worker.rotate_token("n" * 40)
+    assert rotated.token == "n" * 40 and rotated.worker_id == enrolled.worker_id
+    assert rotated.client_certificate and rotated.allow_control and rotated.allow_create
+    assert rotated.allow_power and rotated.allow_restore and rotated.allow_roots == enrolled.allow_roots
+    assert stat.S_IMODE((directory / "worker" / worker.CLIENT_CERT_FILE).stat().st_mode) == 0o600
+    assert stat.S_IMODE((directory / "worker" / worker.CLIENT_KEY_FILE).stat().st_mode) == 0o600
+    assert "token" not in rotated.public()
+    assert TOKEN not in json.dumps(rotated.public())
+    with pytest.raises(worker.WorkerConfigError, match="32-256 URL-safe"):
+        worker.rotate_token("contains spaces")
+
+
 def test_worker_opt_ins_default_off_and_roots_are_canonical(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     root = tmp_path / "workspace"
@@ -110,11 +179,50 @@ def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatc
     monkeypatch.setattr(worker.platform, "node", lambda: "test-host.example")
     hello = decode(session.hello().encode())
     assert hello.payload["missions"][0]["id"] == mission_id
+    summary = hello.payload["missions"][0]
+    assert summary["task_counts"]["QUEUED"] == 1
+    assert summary["station"] == "unknown" and summary["model"] == "unknown"
+    assert "cwd" not in summary and "config" not in summary
     assert hello.payload["host_name"] == "test-host.example"
     assert hello.payload["event_cursor"] > 0
     operations = {spec["operation"] for spec in hello.payload["capabilities"]}
     assert "mission.status" in operations and not any(spec["mutating"] for spec in hello.payload["capabilities"])
     assert "token" not in session.hello().encode()
+
+
+def test_hello_caps_optional_needs_you_summary_fields(state, monkeypatch):
+    directory, _ = state
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", lambda *_a, **_k: {
+        "task_counts": {"QUEUED": 1},
+        "current_task": {"ordinal": 7, "title": "t" * 300},
+        "station_context": {"last_launched_station": "codex"},
+        "station_observation": {"station": None, "model": "m" * 200},
+        "needs_you": {
+            "kind": "approval", "message": "m" * 5000, "command": "c" * 2000,
+            "tasks": list(range(1, 1001)), "hold": True,
+        },
+    })
+    session, _ = _session(directory, allow_control=False)
+    summary = decode(session.hello().encode()).payload["missions"][0]
+    assert summary["current_task"] == {"ordinal": 7, "title": "t" * 256}
+    assert summary["station"] == "codex" and summary["model"] == "m" * 128
+    assert len(summary["needs_you"]["message"]) == 2048
+    assert len(summary["needs_you"]["command"]) == 512
+    assert len(summary["needs_you"]["tasks"]) == 32
+    assert summary["needs_you"]["hold"] is True
+
+
+def test_mission_summary_falls_back_when_projection_fails(state, monkeypatch):
+    directory, mission_id = state
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("projection unavailable")
+
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", fail_projection)
+    session, _ = _session(directory, allow_control=False)
+    summary = decode(session.hello().encode()).payload["missions"][0]
+    assert summary["id"] == mission_id
+    assert summary["task_counts"] == {"QUEUED": 1}
 
 
 @pytest.mark.parametrize(("hostname", "expected"), [("Pi-Lab.Example", "pi-lab"), ("host_name", "host-name"), ("!!!", "worker")])
@@ -298,9 +406,12 @@ def test_control_messages_and_event_replication(state):
     assert batch is not None and batch.payload["after"] == 0
     decode(batch.encode())  # a valid protocol message
     through = batch.payload["through"]
-    assert session.next_events() is None
-    session.handle(Message("events.nack", "c", 1, {"expected_after": 0}))
-    assert session.next_events().payload["through"] == through
+    assert session.next_events() is None  # one batch in flight
+    session.handle(Message("events.nack", "c", 1, {"expected_after": 0}))  # names the batch's own start: stale
+    assert session.next_events() is None and session.inflight is not None
+    session.barrier_ping()
+    session.handle(Message("pong", "c", 1, {}))
+    assert session.cursor == through and session.inflight is None
 
 
 def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_path):
@@ -319,7 +430,9 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
-    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "attention"} for mission in summaries.values())
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "current_task", "station", "model", "needs_kind", "needs_tasks", "attention"} for mission in summaries.values())
+    assert all(mission["task_counts"] == {"QUEUED": 1} for mission in summaries.values())
+    assert all({"id", "name", "status", "folder", "updated_at", "task_counts", "station", "model"} <= set(mission) for mission in summaries.values())
 
 
 def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):
@@ -480,6 +593,20 @@ def test_worker_cli_enrollment_opt_in_flags_and_status(state, tmp_path, capsys):
     assert main(["worker", "status"]) == 0
     rendered = capsys.readouterr().out
     assert "Remote creation: allowed" in rendered and str(root1.resolve()) in rendered and "Remote power: allowed" in rendered
+
+
+def test_worker_cli_installs_a_staged_token_without_reenrolling(state, tmp_path, capsys):
+    directory, _ = state
+    worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True)
+    staged = tmp_path / "staged-token"
+    staged.write_text("n" * 40 + "\n")
+
+    assert main(["worker", "rotate-token", "--token-file", str(staged)]) == 0
+
+    updated = worker.load_config()
+    assert updated.token == "n" * 40
+    assert updated.worker_id
+    assert "Worker token updated for ws" in capsys.readouterr().out
 
 
 def test_audit_records_security_actions_without_secrets(state, capsys, monkeypatch):
@@ -647,7 +774,8 @@ def test_read_only_worker_shares_terminals_only_with_the_view_opt_in(state, tmp_
         return session.handle(Message("terminal.open", "c", 1, {"session_id": session_id, "mission_id": mission_id, "mode": "view", "cols": 80, "rows": 24}))
 
     plain = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False)
-    assert "--allow-terminal-view" in open_terminal(plain, "t1")[0].payload["reason"] and opened == []
+    refusal = open_terminal(plain, "t1")[0].payload["reason"]
+    assert "--allow-terminal-view" in refusal and len(refusal.encode("utf-8")) <= 64 and opened == []
     viewer = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False, allow_terminal_view=True)
     assert open_terminal(viewer, "t2") == [] and opened == [("t2", "view", False)]
     assert worker.load_config().public()["allow_terminal_view"] is True

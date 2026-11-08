@@ -42,10 +42,17 @@ struct CommandOutcome {
 #[derive(Serialize, utoipa::ToSchema)]
 struct TokenInfo {
     name: String,
+    #[schema(pattern = "^[0-9a-f]{16}$")]
+    id: Option<String>,
     scopes: Vec<String>,
     created_at: String,
     last_used: Option<String>,
+    last_address: Option<String>,
     expires_at: Option<String>,
+    #[schema(required = false)]
+    allowed_cidrs: Vec<String>,
+    #[schema(required = false)]
+    allowed_workers: Vec<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -58,11 +65,14 @@ struct TokenCreate {
     name: String,
     scopes: Option<Vec<String>>,
     expires_days: Option<u32>,
+    allowed_cidrs: Option<Vec<String>>,
+    allowed_workers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 struct TokenCreated {
     token: TokenInfo,
+    #[schema(pattern = "^lbr_pat_[0-9a-f]{16}_[0-9a-f]{64}$")]
     secret: String,
 }
 
@@ -93,12 +103,43 @@ fn token_create_schema() -> Value {
         "properties":{
             "name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
             "scopes":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["read","operate","terminal:view","terminal:write","admin"]}},
-            "expires_days":{"type":"integer","minimum":0,"maximum":3650}
+            "expires_days":{"type":"integer","minimum":0,"maximum":3650},
+            "allowed_cidrs":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":64,"pattern":"^[0-9a-fA-F:.]+/[0-9]{1,3}$"}},
+            "allowed_workers":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},"description":"Empty or omitted means all workers; a non-empty list restricts this token to those enrolled workers."}
         }
     })
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/auth/passkeys" && method == "GET" {
+        return json!({
+            "type":"object","required":["passkeys"],"additionalProperties":false,
+            "properties":{"passkeys":{"type":"array","items":{
+                "type":"object","required":["id","name","provider_aaguid","created_at","last_used","synced","backup_eligible"],"additionalProperties":false,
+                "properties":{
+                    "id":{"type":"string","minLength":1,"maxLength":1024},
+                    "name":{"type":"string","minLength":1,"maxLength":128},
+                    "provider_aaguid":{"type":["string","null"],"maxLength":36},
+                    "created_at":{"type":"string","format":"date-time"},
+                    "last_used":{"type":["string","null"],"format":"date-time"},
+                    "synced":{"type":"boolean"},"backup_eligible":{"type":"boolean"}
+                }
+            }}}
+        });
+    }
+    if path == "/api/v1/auth/state" && method == "GET" {
+        return json!({
+            "type":"object",
+            "required":["setup_required","authenticated","passkey_sign_in_available","passkey_canonical_origin"],
+            "properties":{
+                "setup_required":{"type":"boolean"},
+                "authenticated":{"type":"boolean"},
+                "passkey_sign_in_available":{"type":"boolean"},
+                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"}
+            },
+            "additionalProperties":true
+        });
+    }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
     }
@@ -143,6 +184,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "405": {"description":"Method not allowed","headers":{"Allow":{"schema":{"type":"string"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -204,7 +246,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "type":"object","additionalProperties":false,"required":["name"],
             "properties":{"name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}
         });
-        op["responses"]["201"] = json!({"description":"Worker enrolled; enrolment secret is returned once","content":{"application/json":{"schema":{"type":"object","required":["name","token"],"properties":{"name":{"type":"string"},"token":{"type":"string"}},"additionalProperties":false}}}});
+        op["responses"]["201"] = json!({"description":"Worker enrolled; secrets and any client private key are returned once","content":{"application/json":{"schema":{"type":"object","required":["name","token","mutual_tls"],"properties":{"name":{"type":"string"},"token":{"type":"string"},"mutual_tls":{"type":"boolean"},"client_certificate":{"type":"string"},"client_private_key":{"type":"string","writeOnly":true}},"additionalProperties":false}}}});
     }
     // Logout revokes the authenticated session and has no request payload.
     // Describing the generic POST body here makes Schemathesis correctly flag
@@ -723,7 +765,15 @@ mod tests {
             json!(["read", "operate", "terminal:view", "terminal:write", "admin"])
         );
         assert_eq!(schema["properties"]["expires_days"]["maximum"], 3650);
+        assert_eq!(schema["properties"]["allowed_cidrs"]["maxItems"], 32);
+        assert_eq!(schema["properties"]["allowed_workers"]["maxItems"], 32);
         assert_eq!(schema["additionalProperties"], false);
+        let response = &doc["components"]["schemas"]["TokenInfo"]["properties"];
+        assert_eq!(response["last_address"]["type"], json!(["string", "null"]));
+        assert_eq!(response["allowed_cidrs"]["type"], "array");
+        assert_eq!(response["allowed_workers"]["type"], "array");
+        let required = doc["components"]["schemas"]["TokenInfo"]["required"].as_array().unwrap();
+        assert!(!required.iter().any(|field| field == "allowed_cidrs" || field == "allowed_workers"));
     }
 
     #[test]

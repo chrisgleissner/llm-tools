@@ -499,6 +499,14 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   live = { hooks, asks: () => void askNotify() };
   syncTyping(true); // a sign-in form that was replaced while it had focus fires no focusout
 
+  // Security notices are fetched by a separate chunk once the shell is up; the box stays hidden while there are none.
+  const security = h("section", { class: "notice", "aria-label": "Security notifications", hidden: true });
+  let stopSecurity = (): void => {};
+  let shellDisposed = false;
+  void import("./security-notice").then((m) => {
+    if (!shellDisposed) stopSecurity = m.mountSecurityNotice(security);
+  }).catch(() => {});
+
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   const el = h(
     "div",
@@ -514,13 +522,15 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       user,
     ),
     nav,
-    h("section", { class: "conn-wrap", "aria-label": "Connection status" }, banner),
+    h("section", { class: "conn-wrap", "aria-label": "Connection status" }, banner, security),
     main,
     offer,
   );
   return {
     el,
     dispose: () => {
+      shellDisposed = true;
+      stopSecurity();
       unsubscribe();
       unDetails();
       window.clearTimeout(readTimer);

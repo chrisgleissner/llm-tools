@@ -28,6 +28,15 @@ export interface MissionInfo {
   folder: string;
   updated_at: string | null;
   needs_you?: NeedsYou | null;
+  /** Why the operator is needed (`protocol.md`, "Attention in mission summaries"); `null`: nothing; absent: the worker predates it. */
+  attention?: NeedsYou | null;
+  /** Replicated with each mission summary (protocol.md, "Mission summaries"); absent when the worker predates it. */
+  task_counts?: Record<string, number>;
+  current_task?: { ordinal?: number; title?: string } | null;
+  station?: string | null;
+  model?: string | null;
+  needs_kind?: string | null;
+  needs_tasks?: number;
 }
 
 export interface MissionEntry {
@@ -58,7 +67,10 @@ export interface ApiTokenInfo {
   scopes: string[];
   created_at: string;
   last_used: string | null;
+  last_address: string | null;
   expires_at: string | null;
+  allowed_cidrs: string[];
+  allowed_workers: string[];
 }
 
 export interface ApiTokenCreated {
@@ -124,7 +136,29 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
-export const post = <T>(path: string, body: unknown = {}): Promise<T> => request<T>("POST", path, body);
+export async function post<T>(path: string, body: unknown = {}): Promise<T> {
+  const result = await request<T>("POST", path, body);
+  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll") {
+    window.dispatchEvent(new Event("bridge-security-notification"));
+  }
+  return result;
+}
+
+export interface SecurityNotification { id: string; category: string; created_at: number }
+export async function securityNotifications(): Promise<SecurityNotification[]> {
+  return (await get<{ notifications: SecurityNotification[] }>("/api/v1/security/notifications")).notifications;
+}
+export async function dismissSecurityNotification(id: string): Promise<void> {
+  await del<{ ok: boolean }>(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
+}
+
+export function reenrollPasskeys(currentPassword: string, confirm: boolean): Promise<{ ok: boolean; origin: string; registration_required: boolean }> {
+  return post("/api/v1/auth/passkeys/re-enroll", {
+    current_password: currentPassword,
+    new_origin: location.origin,
+    confirm,
+  });
+}
 
 export interface PasswordPolicy {
   min_length: number;
@@ -134,6 +168,8 @@ export interface PasswordPolicy {
 export interface AuthState {
   setup_required: boolean;
   authenticated: boolean;
+  passkey_sign_in_available?: boolean;
+  passkey_canonical_origin?: string | null;
   csrf_token?: string;
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
@@ -154,6 +190,22 @@ export async function authState(): Promise<AuthState> {
 export async function login(username: string, password: string, remember = false): Promise<void> {
   const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password, remember }, true);
   setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
+}
+
+export interface PasskeyAssertionStart {
+  challenge_id: string;
+  options: { publicKey: unknown; mediation?: string };
+}
+
+export async function beginPasskeySignIn(): Promise<PasskeyAssertionStart> {
+  return request<PasskeyAssertionStart>("POST", "/api/v1/auth/passkeys/assertion/start", {}, true);
+}
+
+export async function finishPasskeySignIn(challenge_id: string, credential: unknown): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/assertion/finish", { challenge_id, credential }, true);
+  setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
 export const setup = (setup_token: string, username: string, password: string) =>
@@ -204,8 +256,18 @@ export async function mutateMission(target: string, operation: string, missionId
   const action = operation.slice("mission.".length);
   const q = new URLSearchParams({ worker: target });
   const base = `/api/v1/missions/${encodeURIComponent(missionId)}`;
+  return commandOutcome(() => request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() }));
+}
+
+/** Permanently delete a finished or never-started mission (`DELETE /missions/{id}`; the body carries the confirmation). */
+export function deleteMission(target: string, missionId: string, waitMs = 10000): Promise<MutationResult> {
+  const q = new URLSearchParams({ worker: target });
+  return commandOutcome(() => request<CommandRow>("DELETE", `/api/v1/missions/${encodeURIComponent(missionId)}?${q}`, { confirm: true, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() }));
+}
+
+async function commandOutcome(send: () => Promise<CommandRow>): Promise<MutationResult> {
   try {
-    const row = await request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() });
+    const row = await send();
     if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
     const result = row.result;
     if (result?.outcome === "uncertain") return { outcome: "uncertain", message: result.error?.message ?? "The worker could not confirm the command outcome." };
@@ -229,7 +291,8 @@ function resourceResult(row: CommandRow): Record<string, unknown> {
 }
 
 export async function missionTasks(target: string, missionId: string, limit = 500, offset = 0): Promise<{ tasks: Array<Record<string, unknown>>; total: number; offset: number }> {
-  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), wait_ms: "10000" });
+  // The console lists tasks by title and never shows a prompt, so none travels over the worker link.
+  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), prompt_chars: "0", wait_ms: "10000" });
   const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks?${q}`);
   return resourceResult(row) as { tasks: Array<Record<string, unknown>>; total: number; offset: number };
 }
@@ -401,4 +464,9 @@ export async function optimisticMutation(apply: () => void, rollback: () => void
   }
   if (result.outcome === "rejected" || result.outcome === "failed") rollback();
   return result;
+}
+
+/** Events of one worker after a cursor, read from the coordinator's own store: no command reaches the worker. Each row is `{id, event}`. */
+export function workerEvents(target: string, after: number, limit: number): Promise<{ events: Array<{ id: number; event: Record<string, unknown> }> }> {
+  return get(`/api/v1/events?worker=${encodeURIComponent(target)}&after=${after}&limit=${limit}`);
 }

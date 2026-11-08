@@ -2230,6 +2230,71 @@ def test_force_stop_marks_uncertain_then_terminates_only_recorded_headless_group
             process.wait()
 
 
+def test_force_stop_accepts_a_stop_the_controller_finished_while_it_ran(tmp_path, monkeypatch, capsys) -> None:
+    """The controller removes the station and records STOPPED once it sees STOPPING.
+
+    If that lands between the force-stop's operation snapshot and its station lookup, the operation
+    has no process identity and the station is gone. The mission is already STOPPED, so `stop`
+    reports success instead of "no verifiable process identity".
+    """
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": False})
+    task = store.add_task(mission["id"], "active task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task, iteration=1, station="codex")
+    store.mark_operation_running(operation)
+
+    def controller_finishes_first(mission_id: str):
+        store.set_mission_status(mission_id, "STOPPED")
+        raise RuntimeError("no station")
+
+    monkeypatch.setattr(bridge, "_load_handle", controller_finishes_first)
+    assert bridge.main(["stop", "--mission", mission["id"], "--force", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["mission"]["status"] == "STOPPED"
+    assert store.get_operation(operation)["status"] == "UNCERTAIN"
+
+
+def _stopping_mission_with_controller_lock(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": False})
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.set_mission_status(mission["id"], "STOPPING")
+    lock = MissionLock(state / "locks", mission["id"])
+    lock.acquire()  # stands in for the controller, which holds the mission lock while it runs
+    return store, mission["id"], lock
+
+
+def test_controller_completed_stop_waits_while_the_controller_still_holds_the_lock(tmp_path, monkeypatch) -> None:
+    import threading
+
+    store, mission_id, lock = _stopping_mission_with_controller_lock(tmp_path, monkeypatch)
+    def controller_records_stopped() -> None:
+        with BridgeStore(store.path) as own:  # SQLite connections stay on the thread that opened them
+            own.set_mission_status(mission_id, "STOPPED")
+
+    finisher = threading.Timer(0.2, controller_records_stopped)
+    finisher.start()
+    try:
+        assert bridge._controller_completed_stop(mission_id) is True
+    finally:
+        finisher.cancel()
+        lock.release()
+
+
+def test_controller_completed_stop_gives_up_when_the_controller_never_finishes(tmp_path, monkeypatch) -> None:
+    store, mission_id, lock = _stopping_mission_with_controller_lock(tmp_path, monkeypatch)
+    monkeypatch.setattr(bridge, "CONTROLLER_STOP_COMPLETION_WAIT_SECONDS", 0.2)
+    try:
+        assert bridge._controller_completed_stop(mission_id) is False
+        assert store.get_mission(mission_id)["status"] == "STOPPING"
+    finally:
+        lock.release()
+
+
 def test_force_stop_refuses_a_recorded_pid_it_cannot_identify_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
     import subprocess
     import sys

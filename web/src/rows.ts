@@ -7,18 +7,11 @@ import { button, copyText, h, setBusy } from "./dom";
 import { icon } from "./icons";
 import { menu } from "./menu";
 import { compactAge, type DerivedState } from "./state";
-import { missionState, store, worker } from "./store";
+import { hasDigest, listedNeeds, missionState, store, worker } from "./store";
 import { confirmDialog, reportOutcome, say } from "./ui";
 import { evidenceBody, evidenceLine, readEvidence } from "./views/mission/evidence";
 
 // ---------------------------------------------------------------- data: what a mission needs and what it is doing
-
-/** Fields the coordinator's mission list adds beside `needs_you` (protocol mission summary). Absent means the worker predates them. */
-interface SummaryFields {
-  attention?: NeedsYou | null;
-  task_counts?: Record<string, number>;
-}
-const summary = (e: MissionEntry): MissionEntry["mission"] & SummaryFields => e.mission as MissionEntry["mission"] & SummaryFields;
 
 export const keyOf = (e: { worker: string; mission: { id: string } }): string => `${e.worker}/${e.mission.id}`;
 export const missionHref = (e: { worker: string; mission: { id: string } }, query = ""): string => `/missions/${encodeURIComponent(e.worker)}/${encodeURIComponent(e.mission.id)}${query}`;
@@ -27,7 +20,7 @@ const ACTIVE = new Set(["CREATED", "RUNNING", "PAUSED", "STOPPING"]);
 const FINISHED = new Set(["COMPLETED", "STOPPED", "CANCELLED"]);
 export const isFinishedStatus = (status: string): boolean => FINISHED.has(status.toUpperCase());
 
-/** The mission status read for missions whose list entry has no `attention` (older workers), and for the work shown on running rows. */
+/** The mission status read for missions whose list entry carries neither `attention` nor the digest (workers that predate both). */
 const statuses = new Map<string, Record<string, unknown>>();
 interface ActivityLine {
   line: string | null;
@@ -54,11 +47,11 @@ function eligible(e: MissionEntry): boolean {
   return ACTIVE.has(e.mission.status.toUpperCase()) && worker(e.worker)?.state === "online" && store.conn === "live";
 }
 
-/** Active, reachable missions whose list entry carries no `attention`: their state needs a status read (at most 12, working ones first). */
+/** Active, reachable missions whose list entry says nothing about what they need (no `attention`, no digest): their state needs a status read (at most 12, working ones first). */
 export function attentionGaps(entries: MissionEntry[]): MissionEntry[] {
   const rank = (m: MissionEntry) => ["RUNNING", "PAUSED", "STOPPING", "CREATED"].indexOf(m.mission.status.toUpperCase());
   return entries
-    .filter((e) => eligible(e) && summary(e).attention === undefined)
+    .filter((e) => eligible(e) && listedNeeds(e.mission) === undefined)
     .sort((a, b) => rank(a) - rank(b) || (b.mission.updated_at ?? "").localeCompare(a.mission.updated_at ?? ""));
 }
 
@@ -79,9 +72,12 @@ export function attentionCount(entries: MissionEntry[] = store.missions): { n: n
   return { n, partial: unread > 0, text: unread > 0 ? `${n}+` : String(n), note: unread > 0 ? `Checked ${gaps.length - unread} of ${gaps.length} active missions` : "" };
 }
 
-/** Read `mission.status` for these missions, a few at a time. Results replace the cached ones; the page is notified when they arrive. */
+/**
+ * Read `mission.status` for these missions, a few at a time. Results replace the cached ones; the page is notified when they arrive.
+ * A mission whose list entry carries the digest is not read: the digest has its state, counts, current task, provider and model.
+ */
 export async function loadStatuses(entries: MissionEntry[], stop: () => boolean = () => false): Promise<void> {
-  const todo = entries.filter((e) => !inflight.has(keyOf(e)));
+  const todo = entries.filter((e) => !inflight.has(keyOf(e)) && !(hasDigest(e.mission) && listedNeeds(e.mission) !== undefined));
   let next = 0;
   const lane = async (): Promise<void> => {
     while (next < todo.length && !stop()) {
@@ -133,10 +129,8 @@ export interface Item {
 }
 
 function attentionOf(e: MissionEntry): NeedsYou | null | undefined {
-  const s = summary(e);
-  if (s.attention !== undefined) return s.attention;
-  // A provider question replicated in the list is current; it outranks what an older status read says.
-  if (e.mission.needs_you?.kind === "provider") return e.mission.needs_you;
+  const listed = listedNeeds(e.mission);
+  if (listed !== undefined) return listed;
   const status = statuses.get(keyOf(e));
   if (status) return (status["needs_you"] as NeedsYou | null | undefined) ?? null;
   return e.mission.needs_you ?? undefined;
@@ -144,7 +138,7 @@ function attentionOf(e: MissionEntry): NeedsYou | null | undefined {
 
 export function itemOf(e: MissionEntry): Item {
   const attention = attentionOf(e);
-  const counts = summary(e).task_counts ?? ((statuses.get(keyOf(e))?.["task_counts"] as Record<string, number> | undefined) ?? null);
+  const counts = e.mission.task_counts ?? ((statuses.get(keyOf(e))?.["task_counts"] as Record<string, number> | undefined) ?? null);
   // The worker's `attention` is the decision "does the operator have to act" (it already looks at failed, blocked and verifying
   // tasks). Task counts only stand in for it while it is unknown, so an automatic verification is not shown as an approval.
   return { entry: e, key: keyOf(e), state: missionState(e, { needsYou: attention ?? null, taskCounts: attention === undefined ? counts : null }), attention, counts };
@@ -168,18 +162,19 @@ export interface Work {
   model: string;
 }
 
-/** Task, provider and model from the typed status projection. Unknown parts are empty, never printed as "unknown". */
+/** Task, provider and model from the digest of the mission list, else the typed status projection. Unknown parts are empty, never printed as "unknown". */
 export function workOf(e: MissionEntry): Work | null {
   const snapshot = statuses.get(keyOf(e));
   const line = lines.get(keyOf(e));
-  if (!snapshot && !line) return null;
+  const digest = hasDigest(e.mission) && e.mission.station !== undefined ? e.mission : null;
+  if (!snapshot && !line && !digest) return null;
   const known = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.toLowerCase() !== "unknown";
-  const task = snapshot?.["current_task"] as Record<string, unknown> | null | undefined;
+  const task = (digest?.current_task ?? snapshot?.["current_task"]) as Record<string, unknown> | null | undefined;
   const observed = (snapshot?.["station_observation"] ?? {}) as Record<string, unknown>;
   const context = (snapshot?.["station_context"] ?? {}) as Record<string, unknown>;
   const models = (((snapshot?.["station_config"] ?? {}) as Record<string, unknown>)["models"] ?? {}) as Record<string, unknown>;
-  const provider = [observed["station"], context["last_launched_station"], line?.provider].find(known) ?? "";
-  const model = [observed["model"], provider ? models[provider] : undefined].find(known) ?? "";
+  const provider = [digest?.station, observed["station"], context["last_launched_station"], line?.provider].find(known) ?? "";
+  const model = [digest?.model, observed["model"], provider ? models[provider] : undefined].find(known) ?? "";
   const ordinal = task && typeof task["ordinal"] === "number" ? task["ordinal"] : line?.task;
   return {
     task: typeof ordinal === "number" ? { ordinal, title: task && typeof task["title"] === "string" ? task["title"].trim() : "" } : null,
@@ -190,7 +185,7 @@ export function workOf(e: MissionEntry): Work | null {
 
 export const hasStatus = (e: MissionEntry): boolean => statuses.has(keyOf(e)) || inflight.has(keyOf(e));
 /** True while the mission's attention is unknown and its status read has not arrived (a read still in flight counts as not arrived). */
-export const statusPending = (e: MissionEntry): boolean => eligible(e) && summary(e).attention === undefined && !statuses.has(keyOf(e));
+export const statusPending = (e: MissionEntry): boolean => eligible(e) && listedNeeds(e.mission) === undefined && !statuses.has(keyOf(e));
 export const hasLine = (e: MissionEntry): boolean => lines.has(keyOf(e));
 
 export const lastLine = (e: MissionEntry): string => lines.get(keyOf(e))?.line ?? "";

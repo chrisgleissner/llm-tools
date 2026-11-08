@@ -117,10 +117,15 @@ def test_a_heartbeat_only_batch_sends_no_summary_but_still_advances_the_cursor(s
         store.record_runtime_event(mission_id, "capacity-refresh", {})
     batch = session.next_events()
     assert batch is not None
-    assert [event["kind"] for event in batch.payload["events"]] == ["controller-heartbeat", "capacity-refresh"]
+    # A controller heartbeat is not replicated at all (UNREPLICATED_EVENT_KINDS); the capacity refresh is, and it needs no summary.
+    assert [event["kind"] for event in batch.payload["events"]] == ["capacity-refresh"]
     assert batch.payload["missions"] == []
     assert batch.payload["mission_cursor"] == batch.payload["through"]
 
+    # The coordinator confirms the batch (a pong after the barrier ping); the rate cap does not hold the next one back.
+    session.barrier_ping()
+    session.handle(Message("pong", "coordinator", 1, {}))
+    session.send_not_before = 0.0
     with BridgeStore(directory / "bridge.sqlite3") as store:
         store.record_runtime_event(mission_id, "controller-heartbeat", {"state": "RUNNING"})
         store.record_runtime_event(mission_id, "task-status", {"task_id": 1})

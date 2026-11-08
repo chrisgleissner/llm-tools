@@ -5,14 +5,14 @@
 //! `config error: <key> = <value>: <problem>; fix: <what to do>`.
 //! The same code runs for `check-config` and before `serve` binds anything.
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Exposure};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 /// Which checks beyond syntax, types and ranges apply.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CheckOptions {
-    /// Refuse a non-loopback bind without `lan_enabled = true` (start-up and `check-config`).
+    /// Refuse a non-loopback bind while `exposure` is `loopback` (start-up and `check-config`).
     pub require_lan: bool,
     /// Check that `web_dir` holds an `index.html` (start-up and `check-config`).
     pub check_paths: bool,
@@ -36,6 +36,10 @@ enum Kind {
     FilePath,
     Origins,
     Path,
+    /// List of strings (trusted proxy CIDRs; element validity is checked in the cross-key pass).
+    StringList,
+    /// Sub-table of optional listener addresses.
+    Table,
 }
 
 struct Spec {
@@ -55,9 +59,50 @@ fn specs() -> Vec<Spec> {
             default: Some(format!("{:?}", d.bind)),
         },
         Spec {
+            key: "exposure",
+            kind: Kind::Choice(&["loopback", "lan", "internet"]),
+            default: Some("\"loopback\"".into()),
+        },
+        // Deprecated: replaced by `exposure`; still read, and rewritten by `Config::load`.
+        Spec {
             key: "lan_enabled",
             kind: Kind::Bool,
-            default: Some(d.lan_enabled.to_string()),
+            default: Some("false".into()),
+        },
+        Spec {
+            key: "listener_groups",
+            kind: Kind::Table,
+            default: None,
+        },
+        Spec {
+            key: "worker_mtls",
+            kind: Kind::Bool,
+            default: Some(d.worker_mtls.to_string()),
+        },
+        Spec {
+            key: "tls_terminator",
+            kind: Kind::Bool,
+            default: Some(d.tls_terminator.to_string()),
+        },
+        Spec {
+            key: "security_webhook_url",
+            kind: Kind::FilePath,
+            default: None,
+        },
+        Spec {
+            key: "trusted_proxies",
+            kind: Kind::StringList,
+            default: Some("[]".into()),
+        },
+        Spec {
+            key: "public_origin",
+            kind: Kind::FilePath,
+            default: None,
+        },
+        Spec {
+            key: "max_token_lifetime_days",
+            kind: Kind::UIntRange { min: 1, max: 3650 },
+            default: n(d.max_token_lifetime_days as u64),
         },
         Spec {
             key: "min_tls",
@@ -268,7 +313,11 @@ fn check_value(spec: &Spec, v: &toml::Value, opts: CheckOptions, errors: &mut Ve
                 errors.push(err(
                     key,
                     &shown,
-                    &format!("mutation limits must be between {min} and {max} per 60 seconds"),
+                    &if key.starts_with("mutation_limit") {
+                        format!("mutation limits must be between {min} and {max} per 60 seconds")
+                    } else {
+                        format!("{key} must be between {min} and {max}")
+                    },
                     &format!("use a whole number from {min} to {max} (default {default})"),
                 ));
             }
@@ -294,6 +343,42 @@ fn check_value(spec: &Spec, v: &toml::Value, opts: CheckOptions, errors: &mut Ve
                         &format!("must be a string, found {}", type_name(other)),
                         "write each origin as a quoted string",
                     )),
+                }
+            }
+        }
+        (Kind::StringList, toml::Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                if !item.is_str() {
+                    errors.push(err(
+                        &format!("{key}[{i}]"),
+                        &show(item),
+                        &format!("must be a string, found {}", type_name(item)),
+                        "write each entry as a quoted string",
+                    ));
+                }
+            }
+        }
+        (Kind::Table, toml::Value::Table(t)) => {
+            for (name, value) in t {
+                if !["console_rest", "worker_channel", "health"].contains(&name.as_str()) {
+                    errors.push(err(
+                        &format!("{key}.{name}"),
+                        &show(value),
+                        "unknown key",
+                        "use console_rest, worker_channel or health",
+                    ));
+                } else if let toml::Value::String(addr) = value {
+                    if addr.parse::<SocketAddr>().is_err() {
+                        let (problem, fix) = bind_problem(addr);
+                        errors.push(err(&format!("{key}.{name}"), &show(value), &problem, &fix));
+                    }
+                } else {
+                    errors.push(err(
+                        &format!("{key}.{name}"),
+                        &show(value),
+                        &format!("must be a string, found {}", type_name(value)),
+                        "write host:port with a numeric address, for example \"127.0.0.1:8443\"",
+                    ));
                 }
             }
         }
@@ -323,6 +408,8 @@ fn check_value(spec: &Spec, v: &toml::Value, opts: CheckOptions, errors: &mut Ve
                 Kind::FilePath => ("a string", "\"/path/to/file\"".to_string()),
                 Kind::Origins => ("a list of strings", "[\"https://bridge.home.arpa:8443\"]".to_string()),
                 Kind::Path => ("a string", "\"/path/to/web\"".to_string()),
+                Kind::StringList => ("a list of strings", "[\"10.0.0.0/8\"]".to_string()),
+                Kind::Table => ("a table", "{ }".to_string()),
             };
             errors.push(err(
                 key,
@@ -371,7 +458,20 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
 
     // Environment overrides win over the file.
     let mut bind_source = ("bind".to_string(), table.get("bind").and_then(|v| v.as_str()).map(str::to_string));
-    let mut lan_source = ("lan_enabled".to_string(), table.get("lan_enabled").and_then(|v| v.as_bool()));
+    // Exposure: the environment wins over the file; within the file `exposure` wins over the
+    // deprecated `lan_enabled`.
+    let legacy_exposure = |lan: bool| if lan { Exposure::Lan } else { Exposure::Loopback };
+    let mut exposure_source: (String, Option<Exposure>) = match (
+        table
+            .get("exposure")
+            .and_then(|v| v.as_str())
+            .and_then(|v| config::parse_exposure("exposure", v).ok()),
+        table.get("lan_enabled").and_then(|v| v.as_bool()),
+    ) {
+        (Some(e), _) => ("exposure".to_string(), Some(e)),
+        (None, Some(lan)) => ("lan_enabled".to_string(), Some(legacy_exposure(lan))),
+        (None, None) => ("exposure".to_string(), None),
+    };
     if let Some(v) = env(config::ENV_BIND) {
         if v.parse::<SocketAddr>().is_err() {
             let (problem, fix) = bind_problem(&v);
@@ -387,12 +487,23 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
     }
     if let Some(v) = env(config::ENV_LAN_ENABLED) {
         match config::parse_bool(config::ENV_LAN_ENABLED, &v) {
-            Ok(b) => lan_source = (config::ENV_LAN_ENABLED.to_string(), Some(b)),
+            Ok(b) => exposure_source = (config::ENV_LAN_ENABLED.to_string(), Some(legacy_exposure(b))),
             Err(_) => errors.push(err(
                 config::ENV_LAN_ENABLED,
                 &format!("{v:?}"),
                 "not a boolean",
                 "set it to true or false (1, 0, yes, no, on and off are also accepted)",
+            )),
+        }
+    }
+    if let Some(v) = env(config::ENV_EXPOSURE) {
+        match config::parse_exposure(config::ENV_EXPOSURE, &v) {
+            Ok(e) => exposure_source = (config::ENV_EXPOSURE.to_string(), Some(e)),
+            Err(_) => errors.push(err(
+                config::ENV_EXPOSURE,
+                &format!("{v:?}"),
+                "not an exposure level",
+                "set it to loopback, lan or internet",
             )),
         }
     }
@@ -463,33 +574,97 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
         }
     }
     let bind_text = bind_source.1.clone().unwrap_or_else(|| Config::default().bind);
+    let groups: Vec<(String, String)> = table
+        .get("listener_groups")
+        .and_then(|v| v.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(k, v)| v.as_str().map(|a| (format!("listener_groups.{k}"), a.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     if opts.require_lan {
-        if let Ok(addr) = bind_text.parse::<SocketAddr>() {
-            let lan = lan_source.1.unwrap_or(Config::default().lan_enabled);
-            let lan_valid = table.get("lan_enabled").is_none_or(|v| v.is_bool());
-            if !addr.ip().is_loopback() && !lan && lan_valid {
-                let lan_by = if lan_source.1.is_some() { lan_source.0.as_str() } else { "lan_enabled" };
-                errors.push(err(
-                    &bind_source.0,
-                    &format!("{bind_text:?}"),
-                    &format!("{addr} is not a loopback address and lan_enabled is not true (it is false in {lan_by}, or unset)"),
-                    "set lan_enabled = true in config.toml (or BRIDGE_COORDINATOR_LAN_ENABLED=true) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\"",
-                ));
+        let exposure = exposure_source.1.unwrap_or(Exposure::Loopback);
+        let exposure_valid = table
+            .get("exposure")
+            .is_none_or(|v| v.as_str().is_some_and(|s| config::parse_exposure("exposure", s).is_ok()))
+            && table.get("lan_enabled").is_none_or(|v| v.is_bool());
+        let by = if exposure_source.1.is_some() {
+            format!("set by {}", exposure_source.0)
+        } else {
+            "the default".to_string()
+        };
+        let checked: Vec<(String, String)> = if groups.is_empty() {
+            vec![(bind_source.0.clone(), bind_text.clone())]
+        } else {
+            groups.clone()
+        };
+        for (key, text) in checked {
+            if let Ok(addr) = text.parse::<SocketAddr>() {
+                if !addr.ip().is_loopback() && exposure == Exposure::Loopback && exposure_valid {
+                    errors.push(err(
+                        &key,
+                        &format!("{text:?}"),
+                        &format!("{addr} is not a loopback address and exposure is loopback ({by})"),
+                        "set exposure = \"lan\" in config.toml (or BRIDGE_COORDINATOR_EXPOSURE=lan) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\"",
+                    ));
+                }
             }
+        }
+    }
+    if let Some(toml::Value::Array(items)) = table.get("trusted_proxies") {
+        let strings: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+        if strings.len() == items.len() && (strings.len() > 64 || strings.iter().any(|c| !crate::client_ip::valid_cidr(c))) {
+            errors.push(err(
+                "trusted_proxies",
+                &show(&toml::Value::Array(items.clone())),
+                "trusted_proxies must contain at most 64 valid IPv4 or IPv6 CIDRs",
+                "write each proxy as address/prefix, for example \"10.0.0.0/8\" or \"2001:db8::/32\"",
+            ));
+        }
+    }
+    if let Some(origin) = table.get("public_origin").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) {
+        match crate::passkeys::canonical_origin(origin) {
+            Err(e) => errors.push(err(
+                "public_origin",
+                &format!("{origin:?}"),
+                &e,
+                "write an https:// origin with a DNS name, for example \"https://bridge.example.test\"",
+            )),
+            Ok(canonical) if canonical != origin => errors.push(err(
+                "public_origin",
+                &format!("{origin:?}"),
+                &format!("public_origin must use its canonical form {canonical:?}"),
+                &format!("write public_origin = {canonical:?}"),
+            )),
+            Ok(_) => {}
+        }
+    }
+    if let Some(webhook) = table.get("security_webhook_url").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) {
+        let ok = url::Url::parse(webhook).is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some() && u.username().is_empty() && u.password().is_none());
+        if !ok {
+            errors.push(err(
+                "security_webhook_url",
+                &format!("{webhook:?}"),
+                "security_webhook_url must be an HTTPS URL without embedded credentials",
+                "write an https:// URL without a user name or password",
+            ));
         }
     }
 
     if !errors.is_empty() {
         return Err(errors);
     }
+    let mut table = table;
+    table.remove("lan_enabled");
     let mut cfg: Config = toml::Value::Table(table)
         .try_into()
         .map_err(|e: toml::de::Error| vec![err("config.toml", "<table>", e.message(), "fix the value named above")])?;
     if let Some(b) = bind_source.1 {
         cfg.bind = b;
     }
-    if let Some(l) = lan_source.1 {
-        cfg.lan_enabled = l;
+    if let Some(e) = exposure_source.1 {
+        cfg.exposure = e;
     }
     for (env_name, slot) in [
         ("BRIDGE_COORDINATOR_TLS_CERT_FILE", &mut cfg.tls_cert_file),
@@ -500,6 +675,14 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
             *slot = Some(v);
         }
     }
+    cfg.validate_internet_static().map_err(|e| {
+        vec![err(
+            "exposure",
+            "\"internet\"",
+            &e,
+            "satisfy each listed requirement, or use exposure = \"lan\"",
+        )]
+    })?;
     Ok(cfg)
 }
 

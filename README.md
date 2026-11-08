@@ -165,6 +165,7 @@ navigation remain explicit. Monitoring starts no model calls. See the
 - **Capacity waits stay awake by default.** Opt a mission into RTC-backed sleep with `llm-bridge mission set --mission ID --suspend-when-rate-limited on`; Bridge sleeps only when no operation is active and a wake is armed.
 - **Sleep to a known credit reset.** Use `llm-bridge suspend-until-credits --mission ID` or **Suspend until credits recover** in Actions. With opt-in enabled and its controller running, Bridge also prearms a recovery wake for manual OS suspend while waiting for credits, including paused missions and detached UIs. See [power prerequisites and safety](./docs/llm-bridge/operations.md#suspend-until-credits-recover).
 - **Many missions, many repos.** `Ctrl-]` then `m` jumps between them; on the CLI, use an ID prefix or just `cd` into the folder.
+- **Old missions can go.** `llm-bridge mission delete ID` removes a finished or never-started mission with its tasks, events and logs, and its copy on a coordinator. It asks first (`--yes` skips the question) and refuses a running one with exit status 4. See [Deleting a mission](./docs/llm-bridge/operations.md#deleting-a-mission).
 
 Day one is in [Your first Bridge mission](#your-first-bridge-mission).
 
@@ -316,6 +317,7 @@ A [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the
 - With everything exhausted, suspends the machine and wakes it at the earliest reset.
 - Holds an idle inhibitor, so your desktop cannot suspend it mid-task.
 - Never suspends without a wake alarm.
+- Records every resume. A USB keyboard with wakeup enabled can wake the machine before the alarm; that is logged as an early wake, not as a failed resume. Only a machine that rebooted during a suspend triggers the wedged-resume warning. Details: [Reliable sleep/wake](./docs/ralph-robin.md#reliable-sleepwake).
 
 ```bash
 ralph-robin --prompt-file task.md

@@ -3482,8 +3482,8 @@ class _ConsoleState:
                     command, self.confirm_command = self.confirm_command + " --hold", None
                     self.response_overlay = False
                     self._dispatch(command)
-                elif isinstance(key, str) and key.lower() in {"o", "d"} and (number := self._approval_task_number()) is not None:
-                    self.request_task_evidence(number, "output" if key.lower() == "o" else "diff")
+                elif isinstance(key, str) and key.lower() in {"o", "d"} and (ref := self._approval_task_ref()) is not None:
+                    self.request_task_evidence(ref[-1], "output" if key.lower() == "o" else "diff", ref=ref)
                 elif isinstance(key, str) and key.lower() == "n" or key in {"\x1b", "KEY_ESCAPE"}:
                     self.confirm_command = None
                     self.response_overlay = False
@@ -3986,20 +3986,24 @@ class _ConsoleState:
 
         threading.Thread(target=read_document, name="llm-bridge-document", daemon=True).start()
 
-    def _approval_task_number(self) -> str | None:
-        """The number of the task the open approval dialog names."""
+    def _approval_task_ref(self) -> list[str] | None:
+        """CLI arguments naming the task the open approval dialog names, taken from the approval command itself.
+
+        The loaded task list is not consulted: it can be a different page, or be replaced by a
+        refresh, while the dialog is open, and `task output` / `task diff` resolve the task
+        themselves, exactly as the approval will.
+        """
         target = _approval_task(self.confirm_command or "")
         if target is None:
             return None
         kind, value = target
-        for task in _items(self.snapshot.get("tasks")):
-            if (str(task.get("id")) if kind == "id" else str(task_number(task))) == value:
-                number = task_number(task)
-                return None if number is None else str(number)
-        return None
+        return ["--task-id" if kind == "id" else "--task", value]
 
-    def request_task_evidence(self, number: str, kind: str) -> None:
-        """Read `task output` or `task diff` of task ``number`` off the input thread and open it in the pager."""
+    def request_task_evidence(self, number: str, kind: str, *, ref: list[str] | None = None) -> None:
+        """Read `task output` or `task diff` of task ``number`` off the input thread and open it in the pager.
+
+        ``ref`` overrides the CLI arguments that name the task; without it they come from the loaded list.
+        """
         if self.document_pending:
             self.output.append("A full task read is already in progress.")
             return
@@ -4010,7 +4014,7 @@ class _ConsoleState:
 
         def read_evidence() -> None:
             try:
-                text = str(self.dispatch(self.mission_id, shlex.join(["task", kind, *_task_ref(self.snapshot, number)])))
+                text = str(self.dispatch(self.mission_id, shlex.join(["task", kind, *(ref if ref is not None else _task_ref(self.snapshot, number))])))
                 result = (number, "", None, text) if text.startswith("error:") else (number, "", text or f"(task {number} has no {kind})\n", "")
             except Exception as exc:
                 result = (number, "", None, f"Could not read task {kind}: {_text(exc, 160)}")  # type: ignore[assignment]  # None stands for a missing value in this row

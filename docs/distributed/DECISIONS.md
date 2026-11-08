@@ -6,7 +6,7 @@ Use `webauthn-rs` 0.6.2 (Kanidm, MPL-2.0) for server-side WebAuthn verification.
 
 The library exposes typed registration/authentication state and credential types, verifies origins/RP IDs and authenticator assertions, and documents that ceremony state must be persisted. The coordinator serializes that state only in its private SQLite database, with a single-use session/setup-bound challenge row capped at five minutes. The `danger-allow-state-serialisation` feature is required because the library deliberately gates persistence of in-flight ceremony state behind an explicit opt-in; the state remains private and is never returned to a client.
 
-The coordinator now wires registration and assertion start/finish routes through the library and persists the returned passkeys and verifier state. This is still partial: `start_passkey_registration` hardcodes `require_resident_key(false)` and the wrapper exposes no general resident-key option. The alternate resident-key helper requires direct attestation and rejects synchronized authenticators, so it does not satisfy the requested profile. Do not mutate the generated options as a workaround: the verifier state would not match what it can actually validate. Expose a configurable no-attestation/required-resident-key method through a maintained upstream version or a narrow vendored wrapper before claiming this requirement. Canonical-origin configuration, AAGUID extraction, and fixed-vector ceremony verification plus explicit ES256/Ed25519/RS256 policy verification also remain. The exact RUSTSEC-2023-0071 exception is limited to this reviewed public-key-only call path; do not broaden it to other advisories.
+The coordinator wires registration and assertion start/finish routes through the library and persists the returned passkeys and verifier state. A narrow MPL-2.0 vendor patch makes normal no-attestation registration require resident credentials and exposes the library's configured credential algorithm list. The coordinator explicitly advertises ES256, EdDSA (Ed25519), and RS256; a live API contract test checks COSE identifiers `-7`, `-8`, and `-257`. Discoverable sign-in requires the administrator's user handle, matches the returned credential ID and requires user verification. The coordinator serializes ceremony state only into its private database and binds each challenge to a session or short-lived browser ticket. Remaining PK-003 work includes AAGUID extraction and fixed-vector valid and user-verification-negative ceremony tests. The exact RUSTSEC-2023-0071 exception is limited to this reviewed public-key-only call path; do not broaden it to other advisories.
 
 Only consequential decisions. Architecture contracts for standalone Bridge stay in
 `docs/llm-bridge/architecture.md`.
@@ -479,3 +479,162 @@ pixel-identical or differed by fewer than 50 pixels were restored, which leaves 
 `inbox-older-failures` screen. 47 of them differ only in the header (the waiting chip). The login and setup screens are among the rest: the committed
 images still showed "What does this do?", which the source replaced with "What does remembering do?" earlier, and the 0.2% comparison tolerance had hidden it.
 Looked at in light and dark: contact sheets of the Inbox, mission, session, Sessions and Missions screens on phone and desktop, header crops of the images that differ only in the chip, and the login screens.
+Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
+The initial caps stay at 91000 raw / 31750 gzip (JavaScript) and 40000 gzip (JavaScript plus CSS).
+Same measurement method as above:
+
+| State | Initial JS raw | gzip | Initial total gzip | Lazy raw | gzip |
+|---|---:|---:|---:|---:|---:|
+| Merge base | 88506 | 30848 | 38382 | | |
+| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 | 365652 | 96411 |
+| This branch before the merge (already above its 91000 / 31750 caps) | 92390 | 32176 | 39710 | 352470 | 91000 |
+| Merge, `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 | | |
+| Merge, `passwordForm` in `views/password-form.ts` | 92638 | 33163 | 40747 | 363929 | 95857 |
+| Merge, plus workers, sessions and usage views loaded on demand | 84299 | 30855 | 38439 | 373424 | 100498 |
+
+What moved:
+- `passwordForm` lives in `views/password-form.ts`. The forced password-change screen (`reset.ts`) is part
+  of the first load and imported it from `account.ts`, which pulled the whole lazy account page (API token
+  restrictions, passkey list and re-enrolment, about 8 KB) into the first load: +9.5 KB raw.
+- The router loads the workers, sessions, usage and account views with `import()` (`lazyView` in
+  `main.ts`). While a chunk loads the main area shows the existing `status-skeleton` block with
+  `aria-busy`; a route change during the load discards the result. The overview, missions list, mission
+  detail and diagnostics views stay in the first load. The mission detail view alone is 3.9 KB gzip
+  of the first load, but moving it, or the missions list, costs more lazy bytes than moving the three
+  smaller views and would delay the pages used most.
+
+Why the lazy caps rose (`jsRaw` 366000 to 374000, `jsGzip` 97000 to 101000): the merged code was
+already larger than the two old budgets together (initial 31750 plus lazy 97000 is 128750 gzip bytes;
+the merged build was 129020 before any split). Any code taken out of the first load therefore
+counts against the lazy caps. Code that leaves the first-load bundle also compresses worse as separate
+chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
+The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
+
+## D19 Worker memory: no leak, per-process gate (PRD-007)
+
+The soaks showed `llm-bridge worker run` processes growing by 2.5 and then 1.9 MiB per hour after warm-up (about 48 MiB per day). The
+investigation followed D16. Measurements are in `soak-and-chaos.md` (Worker memory), plots in `soak-and-chaos/worker-*.svg`.
+
+- **No accumulating object.** `tracemalloc` with 25 frames inside a real worker moved from 7917 to 7964 KiB in 40 minutes (a deferred import
+  on the first status command, not a per-command allocation); live objects, Python allocated blocks and SQLite memory in use did not trend; the
+  controller pattern (CPython 3.12 interned path components) does not occur in the worker. A longer reading is the same: in a 3-hour
+  single-worker run the bytes in use in the glibc heap rose by 0.2 MiB, all within the first 50 minutes.
+- **What was measured as growth.** Free space inside the glibc heap (0.9 MiB at minute 1, 2.8 MiB from minute 55, then flat) and the steps down
+  when the top of the heap is freed (up to 2.6 MiB). The 30- and 45-minute runs sampled the rising part. After minute 20 the resident size of the
+  3-hour run moved by -0.06 to +0.22 MiB per hour depending on the start of the window.
+- **No code change in the worker.** Holding one read-only SQLite connection instead of opening one every 0.5 s was tried and reverted: the
+  heap grew by the same amount. A periodic `malloc_trim` was not added for the reason given in D16; at minute 24 it returned 1.0 MiB and the free
+  space was back 200 s later.
+- **Gate.** The workers are judged per process like the controllers (median over the processes of each one's slope after `--warmup-seconds`).
+  The bound is 512 KiB per hour per worker (12 MiB per day, 2.3 times the largest post-warm-up slope measured), replacing 3 MiB per hour summed
+  over the fleet. The floor (1024 KiB rise per process) and the ceiling (56 MiB, measured peak 34.2 MiB) are unchanged. In the 30-minute run the
+  10-minute window measured a median of 2.81 MiB per hour (settling) with a rise of 474 KiB, so that run passes on the floor; the slope can only
+  fail in runs where the window is two hours or longer (the 4.5-hour nightly run and the 24-hour run).
+- **Tests.** `tests/test_bridge_worker_memory.py` (interned strings and live objects after 240 commands and event polls; it fails with a
+  per-command `Path` or dictionary entry added) guards the property that there is no per-command growth. It cannot fail on the current
+  code because there is nothing to fix. `test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per_hour` fails with the
+  previous bound and the summed check.
+- **Not decided here.** Whether a 24-hour worker stays inside 0.5 MiB per hour is unmeasured; the longest run is 3 hours.
+
+## D20 Canonical passkey origin (PK-002)
+
+Bind the administrator's passkeys to one HTTPS DNS origin. The first successful
+registration binds the origin and credential in one SQLite transaction; an operator may
+preconfigure the same value as `public_origin`. The value is persisted in coordinator
+configuration after registration and remains database-authoritative if that write fails.
+Startup rejects a changed configured origin while credentials remain. Older credentials
+without a recorded origin require the operator to set `public_origin` explicitly before
+startup, so an upgrade cannot silently choose a new RP ID from whichever address is visited
+first. IP literals are rejected because they cannot be WebAuthn RP IDs. Explicit, confirmed
+re-enrolment UX remains future work.
+
+In the code: `coordinator/src/passkeys.rs::canonical_origin`, `coordinator/src/config.rs`,
+`coordinator/src/db.rs::passkey_put_at_origin`, and `coordinator/src/server.rs`; regressions
+are covered by `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs`.
+
+## D21 Require discoverable passkeys (PK-003, PK-004)
+
+The maintained `webauthn-rs` 0.6.2 no-attestation registration method hardcodes
+`require_resident_key(false)`. Its separate resident-key API requires attestation roots and
+rejects synced authenticators, which conflicts with the product's no-attestation and synced
+passkey requirements. Keep upstream's normal passkey API and make a narrow, licensed local
+vendor patch that sets the builder to require resident keys. Enable its conditional UI API
+and start a discoverable authentication ceremony with an empty allow-credentials list and
+user verification required. Before finishing, match the credential ID and verify the fixed
+user handle against the administrator, then use the library's discoverable authentication
+verification. Do not enable synced passkeys through the attestation-only API.
+
+In the code: `coordinator/vendor/webauthn-rs/src/lib.rs` contains the one-line builder patch;
+`coordinator/src/passkeys.rs` starts and finishes the conditional ceremony. The regression
+tests assert required resident keys, conditional mediation and an empty allow list. Completion
+checks the fixed user handle, registered credential ID and user-verification flag; valid
+cryptographic vectors for that path remain required under PK-011.
+
+## D22 Configurable API token lifetime ceiling (SEC2-009)
+
+Keep the existing 90-day default and allow a deployment to lower or raise the explicit
+expiry ceiling through `max_token_lifetime_days`, bounded to 1–3650 days. Preserve
+`expires_days = 0` for non-expiring LAN tokens for compatibility. When Internet exposure is
+implemented, its startup precondition must reject that value and enforce the 90-day ceiling.
+
+In the code: `coordinator/src/config.rs` defines and validates the setting;
+`coordinator/src/http.rs::create_token` enforces it. Boundary tests live in
+`coordinator/src/config.rs::tests::api_token_lifetime_default_is_ten_years_and_config_is_bounded`
+and `coordinator/tests/web_api.rs::token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry`.
+
+## D23 Identifiable API token strings (SEC2-009)
+
+New API tokens use `lbr_pat_<id>_<secret>`. The random 16-character lowercase-hex ID makes
+the credential recognizable to scanners; the independently generated 32-byte secret is
+encoded as 64 lowercase-hex characters and provides 256 bits of entropy. Store the ID and
+only the SHA-256 hash of the secret. Look up by public ID, then compare the secret hash in
+constant time. Continue accepting existing unprefixed tokens through their legacy full-token
+hash lookup until operators rotate them. The generated OpenAPI schema constrains the new
+format. Do not log either component.
+
+In the code: token minting is in `coordinator/src/http.rs::create_token`, and the response
+schema is in `coordinator/src/openapi.rs::TokenCreated`; the format regression is in
+`coordinator/tests/web_api.rs::token_management_lists_metadata_and_shows_secret_only_at_creation`.
+
+## D24 Certificate provisioning boundary (SEC2-019)
+
+Keep certificate source selection behind `CertificateProvider`, with implementations for the
+internal coordinator CA and operator-supplied certificate files. File reload keeps the last
+valid certificate when replacement files are incomplete. ACME remains an unimplemented future
+provider; the project does not operate certificate or DNS infrastructure.
+
+In the code: `coordinator/src/certs.rs` owns the trait and both current providers;
+`coordinator/src/server.rs` selects a provider from the validated config. Existing file-reload
+and TLS tests cover the provider implementations.
+
+## D25 Stable principal ownership and sender binding extension points (SEC2-019)
+
+Use a durable `principals` table with stable IDs (`admin` and `system` today) and role metadata.
+Sessions, API tokens and audit rows point to the principal ID rather than deriving ownership from
+the current administrator display name. Keep DPoP or mutual-TLS token sender constraints as two
+nullable typed fields until a sender-constrained credential is actually implemented; do not imply
+that bearer tokens are sender-constrained today.
+
+In the code: schema migration 17 adds the principal registry and ownership fields in
+`coordinator/src/db.rs`; `coordinator/tests/principals.rs` verifies new records, and
+`coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` verifies legacy rows.
+
+## D26 Allow the bundled webpki trust data license (SEC2-015)
+
+Allow `CDLA-Permissive-2.0` in the Rust license audit because `reqwest` reaches `webpki-roots`,
+which bundles root-certificate data. The official license permits use, modification and sharing;
+if the data is redistributed, the license text must accompany it. Keep this explicit allow narrow
+to the license identifier and retain `cargo deny`'s default deny for all other unknown licenses.
+
+In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
+[the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
+
+## D27 Release decisions delegated to the lead (PRD-007, PRD-037, DOG-025)
+
+The operator delegated the remaining open questions: "All other questions answer them like a principal engineer and product owner would". The lead decided:
+
+- PRD-007 soak duration: PR CI keeps the 5-minute soak (job `soak-chaos`), `.github/workflows/soak-nightly.yml` runs 30 minutes, and the 24-hour run is a pre-release step. A 30-minute soak on every PR would add about 25 minutes to each CI run without finding defects the nightly run misses; the nightly run and the pre-release run cover slow growth.
+- Lazy web JavaScript cap: the raise from 97,000 to 101,000 bytes gzip recorded in D17 is accepted. Its cause (the lazily loaded workers, sessions, usage and account views) was measured. Initial caps stay unchanged.
+- PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
+- DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
+

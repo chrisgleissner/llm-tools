@@ -10,10 +10,14 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # webpki-roots bundles the Mozilla trust-anchor data used by reqwest; CDLA-Permissive-2.0 allows redistribution when its text accompanies the data.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
+    # foldhash 0.2, the default hasher of hashbrown, which rusqlite 0.41 (hashlink) enables.
+    "Zlib",
 ]
 confidence-threshold = 0.8
 
@@ -22,7 +26,12 @@ multiple-versions = "deny"
 # Current upstream trees require both major-compatible families; keep these
 # narrowly versioned exceptions visible so new duplicate families still fail.
 # WebAuthn 0.6.2's crypto-glue also carries its own RustCrypto 0.11/0.10 family.
+# The coordinator uses argon2 0.6 directly; webauthn-rs 0.6.2 reaches argon2 0.5 (with blake2 0.10 and
+# password-hash 0.5) through crypto-glue. Drop these three entries when webauthn-rs moves to argon2 0.6.
 skip = [
+    { name = "argon2", version = "0.5.3" },
+    { name = "blake2", version = "0.10.6" },
+    { name = "password-hash", version = "0.5.0" },
     { name = "block-buffer", version = "0.12.1" },
     { name = "base64", version = "0.23.1" },
     { name = "base64", version = "0.21.7" },
@@ -31,7 +40,6 @@ skip = [
     { name = "digest", version = "0.11.3" },
     { name = "getrandom", version = "0.3.4" },
     { name = "getrandom", version = "0.4.3" },
-    { name = "hashbrown", version = "0.17.1" },
     { name = "rand", version = "0.9.5" },
     { name = "rand", version = "0.10.3" },
     { name = "rand_chacha", version = "0.9.0" },
@@ -40,7 +48,6 @@ skip = [
     { name = "rand_core", version = "0.10.1" },
     { name = "r-efi", version = "6.0.0" },
     { name = "sha1", version = "0.11.0" },
-    { name = "sha2", version = "0.11.1" },
     { name = "syn", version = "3.0.9" },
     { name = "synstructure", version = "0.14.0" },
     { name = "thiserror", version = "1.0.69" },

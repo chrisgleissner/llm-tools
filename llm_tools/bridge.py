@@ -1563,6 +1563,16 @@ def _build_parser(
     listing.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
     listing.add_argument("--include-config", action="store_true", help="with --json, include each mission's saved copy of the llm-tools config (large; left out by default)")
     _add_json_arg(listing)
+    mission_delete = mission_sub.add_parser(
+        "delete",
+        help="permanently delete a finished or never-started mission and its local state",
+        description="Delete a mission that never started or has ended or been stopped: its tasks, events, operations, logs and verifier files, "
+                    "and (with a worker connected to a coordinator) the coordinator's copy. A running, paused or stopping mission is refused (exit status 4). "
+                    "This cannot be undone. The mission must be named; the current folder is not used.")
+    mission_delete.add_argument("--mission", "-m", metavar="ID", default=None, help=f"mission ID or a unique prefix of {MIN_MISSION_PREFIX}+ characters (required; never inferred from the folder)")
+    mission_delete.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
+    mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
+    _add_json_arg(mission_delete)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
     mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
@@ -1754,7 +1764,12 @@ def _build_parser(
     worker_enroll.add_argument("--allow-root", action="append", default=[], metavar="DIR", help="canonical directory allowed for remote creation and restore inputs; repeat as needed")
     worker_enroll.add_argument("--allow-power", action="store_true", help="allow remote machine power operations")
     worker_enroll.add_argument("--allow-restore", action="store_true", help="allow remote restore operations (requires an enrolled --allow-root)")
+    worker_enroll.add_argument("--client-cert-file", metavar="PATH", help="coordinator-issued worker client certificate PEM for optional mTLS")
+    worker_enroll.add_argument("--client-key-file", metavar="PATH", help="matching worker client private key PEM for optional mTLS")
     _add_json_arg(worker_enroll)
+    worker_rotate = worker_sub.add_parser("rotate-token", help="install a coordinator-staged worker token without re-enrolling")
+    worker_rotate.add_argument("--token-file", required=True, metavar="PATH", help="file holding the one-time token from bridge-coordinator worker rotate-token")
+    _add_json_arg(worker_rotate)
     worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
     _add_json_arg(worker_status)
     worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
@@ -1976,6 +1991,52 @@ def _confirm_cancel(args: argparse.Namespace, reference: str, name: str = "") ->
     hint = f"{question} Pass --yes to confirm when there is no terminal to ask on, for example: llm-bridge cancel --mission {reference} --yes"
     print(error_text(hint, "usage"), file=sys.stderr)
     return False
+
+
+DELETE_UNDONE = "This cannot be undone"
+
+
+def _confirm_delete(args: argparse.Namespace, reference: str, name: str = "") -> bool:
+    """Ask before `mission delete` removes a mission for good; scripts without a terminal must pass ``--yes``.
+
+    Returns False when nothing should be deleted; the reason is already printed.
+    """
+    if getattr(args, "yes", False):
+        return True
+    label = f"{reference} \"{name}\"" if name else reference
+    question = f"Delete mission {label} with its tasks, events and logs? {DELETE_UNDONE}."
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"{question} Type y to delete it, anything else keeps it: ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in {"y", "yes"}:
+            return True
+        print(f"Kept mission {label}; nothing was deleted", file=sys.stderr)
+        return False
+    from .bridge_help import error_text
+
+    hint = f"{question} Pass --yes to confirm when there is no terminal to ask on, for example: llm-bridge mission delete {reference} --yes"
+    print(error_text(hint, "usage"), file=sys.stderr)
+    return False
+
+
+def _mission_delete_command(args: argparse.Namespace) -> int:
+    """`mission delete` on this machine: refuse a live mission first, then confirm, then delete."""
+    from .bridge_states import DELETABLE_MISSION_STATUSES
+    from .bridge_store import mission_delete_refusal
+
+    with open_store(readonly=True) as store:
+        saved = store.get_mission(args.mission)
+    status = str(saved["status"])
+    if status not in DELETABLE_MISSION_STATUSES:
+        raise TransitionError(mission_delete_refusal(args.mission, status))
+    if not _confirm_delete(args, fmt.short_id(args.mission), fmt.clipped_name(saved.get("name", ""))):
+        return EXIT_USAGE
+    result = commands.dispatch(commands.CommandRequest("mission.delete", {"confirm": True}, mission_id=args.mission))
+    _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
+    return 0
 
 
 def _warn_not_signed_in(providers: Any, routes: Any, conf: dict[str, Any] | None = None) -> None:
@@ -2436,6 +2497,35 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
         lock.release()
 
 
+# How long `stop --force` lets a controller that is already stopping the mission finish its own cleanup.
+CONTROLLER_STOP_COMPLETION_WAIT_SECONDS = 3.0
+
+
+def _controller_completed_stop(mission_id: str) -> bool:
+    """Whether the mission's controller has itself finished the stop that `stop --force` requested.
+
+    The controller reacts to the STOPPING status by removing the station and recording STOPPED. When
+    that happens between the force-stop's snapshot of the operations and its station lookup, the
+    station is gone and the snapshot's operation has no recorded process: the controller already
+    stopped the provider, so there is nothing left to terminate and nothing unverified to refuse.
+    """
+    deadline = time.monotonic() + CONTROLLER_STOP_COMPLETION_WAIT_SECONDS
+    while True:
+        with open_store() as store:
+            if store.get_mission(mission_id)["status"] == "STOPPED":
+                return True
+        lock = MissionLock(state_dir() / "locks", mission_id)
+        try:
+            lock.acquire()
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        else:
+            lock.release()
+            return False  # no controller is running, so nobody will finish the stop
+
+
 def _force_stop_mission(mission_id: str) -> dict[str, Any]:
     """Terminate only the controller and provider processes owned by this mission."""
     with open_store() as store:
@@ -2486,6 +2576,8 @@ def _force_stop_mission(mission_id: str) -> dict[str, Any]:
                 # waiting to launch); the controller is stopped below.
                 continue
             if not process_start:
+                if _controller_completed_stop(mission_id):
+                    break  # the controller already stopped the provider and recorded STOPPED
                 raise RuntimeError(
                     f"could not confirm that provider process {process_pid} belongs to this mission; "
                     f"it was left running. Check with: ps -p {process_pid}"
@@ -2715,11 +2807,19 @@ def _worker_command(args: argparse.Namespace) -> int:
     if args.worker_action == "enroll":
         token = read_verbatim(args.token_file, "--token-file").strip()
         ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
+        client_cert_pem = read_verbatim(args.client_cert_file, "--client-cert-file") if args.client_cert_file else None
+        client_key_pem = read_verbatim(args.client_key_file, "--client-key-file") if args.client_key_file else None
         config = worker.enroll(args.name or worker.default_worker_name(), _coordinator_url(args.coordinator, "wss"), token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view), allow_create=bool(args.allow_create),
-                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore))
+                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore),
+                               client_cert_pem=client_cert_pem, client_key_pem=client_key_pem)
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
+        return 0
+    if args.worker_action == "rotate-token":
+        token = Path(args.token_file).expanduser().read_text(encoding="utf-8").strip()
+        config = worker.rotate_token(token)
+        _print_result(config.public(), args.json, lambda value: f"Worker token updated for {value['name']}; restart the worker to complete rotation.")
         return 0
     if args.worker_action == "status":
         _print_result(worker.status_public(), args.json, _format_worker_status)
@@ -2946,6 +3046,8 @@ def _main(argv: list[str] | None = None) -> int:
         except (ValueError, KeyError, OSError, TransitionError) as exc:
             return _fail(str(exc), "usage", EXIT_USAGE, False)
     args = _parse_arguments(arguments)
+    if args.command == "mission" and args.mission_action == "delete" and not args.mission:
+        return _fail("name the mission to delete: llm-bridge mission delete ID (the current folder is never used for a deletion)", "usage", EXIT_USAGE, bool(getattr(args, "json", False)))
     if _managed_session() and not _managed_allows(args):
         return _fail(MANAGED_REFUSAL, "refused-in-managed-session", EXIT_USAGE, bool(getattr(args, "json", False)))
     if target != commands.LOCAL_TARGET:
@@ -3172,6 +3274,8 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "mission":
             if args.mission_action == "list" and not args.json:
                 return _print_missions(args)
+            if args.mission_action == "delete":
+                return _mission_delete_command(args)
             with open_store(readonly=args.mission_action == "list") as store:
                 if args.mission_action == "create":
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))
@@ -3208,7 +3312,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, bool(getattr(args, "json", False)), human)
             return 0
         if args.command == "status":
-            result = commands.dispatch(commands.CommandRequest("mission.status", mission_id=args.mission))
+            result = commands.dispatch(commands.CommandRequest("mission.status", {"full": True}, mission_id=args.mission))
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":

@@ -3,11 +3,11 @@
 // the segmented views; the pieces are in header.ts, tasks.ts, evidence.ts, activity.ts, about.ts and session.ts.
 import * as api from "../../api";
 import type { BridgeEvent } from "../../api";
-import { absTime, copyText, emptyState, button, h, hooks } from "../../dom";
+import { absTime, copyText, debounce, emptyState, button, h, hooks } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
-import { missionState, onStream, refresh, store, subscribe, worker } from "../../store";
+import { hasDigest, listedNeeds, missionState, onStream, publishEvents, refresh, store, subscribe, worker } from "../../store";
 import type { DerivedState } from "../../state";
-import { announce, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
+import { announce, announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
@@ -39,6 +39,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let liveEvents: BridgeEvent[] = [];
   let liveEventId = 0;
   let eventStart = 0; // lowest cursor already requested
+  let eventCursor = 0; // highest cursor of this worker already read
   let eventError = "";
   let eventsLoaded = false;
   let optimistic: string | null = null;
@@ -65,6 +66,19 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const workerOnline = () => worker(workerName)?.state === "online";
   const online = () => store.conn === "live" && workerOnline();
   const status = (): string => String(optimistic ?? entry()?.mission.status ?? record(snapshot?.["mission"])["status"] ?? "").toUpperCase();
+  /** The status as the replicated digest of the mission list has it, with the keys of the status projection that the page reads; `null` for a worker that sent no digest. */
+  const digestSnapshot = (): Record<string, unknown> | null => {
+    const m = entry()?.mission;
+    if (!m || !hasDigest(m)) return null;
+    const known = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() && v.toLowerCase() !== "unknown" ? v : undefined);
+    return {
+      mission: { status: m.status, name: m.name, updated_at: m.updated_at },
+      task_counts: m.task_counts,
+      current_task: m.current_task ?? null,
+      station_observation: { station: known(m.station) ?? null, model: known(m.model) ?? null },
+      needs_you: listedNeeds(m) ?? null,
+    };
+  };
   const needs = (): api.NeedsYou | null => {
     const n = snapshot ? snapshot["needs_you"] : entry()?.mission.needs_you;
     if (!n || typeof n !== "object") return null;
@@ -147,7 +161,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let revealed = false;
   const needsSnapshot = (): boolean => {
     const e = entry();
-    return !store.loaded || (Boolean(e) && online() && (e?.mission as { attention?: unknown } | undefined)?.attention === undefined && !["COMPLETED", "CANCELLED"].includes(status()));
+    return !store.loaded || (Boolean(e) && online() && e !== undefined && listedNeeds(e.mission) === undefined && !hasDigest(e.mission) && !["COMPLETED", "CANCELLED"].includes(status()));
   };
   const reveal = (): void => {
     if (!revealed) {
@@ -194,9 +208,24 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   /** A mission change that asks first: Stop and Cancel. `verb` is the button and dialog word, `done` the past tense, `op` the operation suffix. */
   async function sure(verb: string, text: string, done: string, op: string, optimistic: string | null): Promise<void> {
-    if (blocked()) return void announce(blocked(), "failed");
-    const reason = await confirm({ title: `${verb} mission?`, message: `${verb} "${entry()?.mission.name || missionId}" on ${workerName}. ${text}`, confirmLabel: `${verb} mission`, danger: true });
-    if (reason !== null) await missionAction(`Mission ${done}`, `${op} the mission`, `mission.${op}`, optimistic);
+    if (await confirmed(verb, text)) await missionAction(`Mission ${done}`, `${op} the mission`, `mission.${op}`, optimistic);
+  }
+  async function confirmed(verb: string, text: string): Promise<boolean> {
+    if (blocked()) {
+      announce(blocked(), "failed");
+      return false;
+    }
+    return (await confirm({ title: `${verb} mission?`, message: `${verb} "${entry()?.mission.name || missionId}" on ${workerName}. ${text}`, confirmLabel: `${verb} mission`, danger: true })) !== null;
+  }
+  /** PRD-038: delete on the worker, then go back to the missions list, where the toast is shown (the page it belongs to is gone). */
+  async function remove(): Promise<void> {
+    if (!(await confirmed("Delete", "This removes its tasks, events and logs and cannot be undone."))) return;
+    const title = entry()?.mission.name || missionId;
+    const r = await api.deleteMission(workerName, missionId);
+    if (r.outcome !== "applied") return void reportOutcome(r, "", "delete the mission");
+    announceNextPage(`Deleted mission "${title}".`, "applied");
+    history.pushState(null, "", "/missions");
+    window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
   // ---- header
@@ -207,6 +236,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     runNext: () => void missionAction("Next task started", "run the next task now", "mission.continue", null),
     stop: () => void sure("Stop", `Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open.`, "stopped", "stop", "STOPPING"),
     cancel: () => void sure("Cancel", "This cannot be undone from the browser.", "cancelled", "cancel", null),
+    remove: () => void remove(),
     approve: (t) => void actions.approve(t),
     reject: (t) => void actions.reject(t),
     retry: (t) => void actions.retry(t),
@@ -358,11 +388,16 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   async function loadSnapshot(): Promise<void> {
-    if (!online()) return;
-    try {
-      snapshot = await api.missionStatus(workerName, missionId);
-    } catch {
-      /* keep the last-known projection; the header says when the worker cannot be reached */
+    // The replicated digest answers without a worker round trip; only a worker that sent none is asked for the status.
+    const replicated = digestSnapshot();
+    if (replicated) snapshot = replicated;
+    else if (!online()) return;
+    else {
+      try {
+        snapshot = await api.missionStatus(workerName, missionId);
+      } catch {
+        /* keep the last-known projection; the header says when the worker cannot be reached */
+      }
     }
     if (disposed) return;
     headSignature = "";
@@ -401,8 +436,9 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const cursor = worker(workerName)?.event_cursor ?? 0;
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
+      const r = await api.workerEvents(workerName, eventStart, 1000);
       events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
+      eventCursor = Math.max(cursor, ...r.events.map((e) => Number(e.id) || 0));
       eventError = "";
       eventsLoaded = true;
     } catch (e) {
@@ -418,8 +454,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
-      const older = r.events.filter((x) => Number(x["id"]) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
+      const r = await api.workerEvents(workerName, from, EVENT_WINDOW);
+      const older = r.events.filter((x) => Number(x.id) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
     } catch (e) {
@@ -427,6 +463,37 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     }
     if (!disposed) renderActivity();
   }
+
+  /** The coordinator announced events up to `cursor`: read them from its own store. A gap of more than a page reads the recent window again. */
+  async function loadNewEvents(cursor: number): Promise<void> {
+    if (!eventsLoaded) return void (await loadEvents());
+    if (cursor <= eventCursor) return;
+    const after = eventCursor;
+    if (cursor - after > 1000) return void (await loadEvents());
+    try {
+      const r = await api.workerEvents(workerName, after, Math.min(1000, cursor - after));
+      const known = new Set(events.map((e) => e.id));
+      const added = r.events.map(normalize).filter((e) => e.mission_id === missionId && !known.has(e.id));
+      eventCursor = cursor;
+      if (disposed || !added.length) return;
+      events = [...events, ...added];
+      renderActivity();
+      publishEvents(added);
+      // Heartbeats and capacity refreshes change nothing the page shows apart from the hidden count.
+      const milestones = added.filter((e) => e.kind !== "controller-heartbeat" && e.kind !== "capacity-refresh");
+      const last = milestones[milestones.length - 1];
+      if (last) {
+        const requestId = typeof last.data?.["request_id"] === "string" ? last.data["request_id"] : undefined;
+        announceStreamEvent(last, humanizeEvent(last), requestId ? { requestId } : {});
+      }
+    } catch (e) {
+      eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
+      if (!disposed) renderActivity();
+    }
+  }
+
+  // One task read for the several triggers (a task event and a digest change usually arrive together).
+  const scheduleTasks = debounce(() => void loadTasks(), 150);
 
   async function reloadAll(): Promise<void> {
     await Promise.all([refresh().catch(() => {}), loadSnapshot(), loadTasks()]);
@@ -488,29 +555,32 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       renderActivity();
       return;
     }
-    if (msg.type === "event" && msg.worker === workerName && msg.events) {
-      const mine = msg.events.map(normalize).filter((e) => e.mission_id === missionId);
-      if (!mine.length) return;
-      const known = new Set(events.map((e) => e.id));
-      events = [...events, ...mine.filter((e) => !known.has(e.id))];
-      renderActivity();
-      // Heartbeats and capacity refreshes change nothing the page shows apart from the hidden count.
-      if (mine.some((e) => e.kind !== "controller-heartbeat" && e.kind !== "capacity-refresh")) {
-        void loadTasks();
-        void loadSnapshot();
-        const last = [...mine].reverse().find((e) => e.kind !== "controller-heartbeat" && e.kind !== "capacity-refresh") ?? mine[mine.length - 1]!;
-        const requestId = typeof last.data?.["request_id"] === "string" ? last.data["request_id"] : undefined;
-        announceStreamEvent(last, humanizeEvent(last), requestId ? { requestId } : {});
-      }
+    // A change notice carries counts, not events. When it names this mission (or its mission list was cut), the new events are read from the
+    // coordinator's own store, which needs no worker round trip. The tasks are read again only for a mission whose tasks changed in the batch.
+    if (msg.type === "event" && msg.worker === workerName) {
+      const named = msg.missions === undefined || msg.truncated === true || msg.missions.some((m) => m.id === missionId && m.events > 0);
+      if (named) void loadNewEvents(Number(msg.cursor ?? 0));
+      if (Array.isArray(msg.task_missions) && msg.task_missions.includes(missionId)) scheduleTasks();
     }
   });
 
   let wasOnline = online();
   let viewKey = "";
+  let workKey = "";
   const offStore = subscribe(() => {
     stamp();
     const e = entry();
-    const key = `${online()}|${store.conn}|${e?.mission.status}|${e?.mission.name}|${e ? missionState(e).id : ""}|${worker(workerName)?.state}|${store.loaded}`;
+    // The tasks are read again when the replicated digest of this mission changed (status, task counts, current task, what needs the
+    // operator), never on a timer. The status itself is drawn from the digest.
+    const nextWork = e ? JSON.stringify([e.mission.status, e.mission.task_counts, e.mission.current_task, e.mission.needs_kind, e.mission.needs_you?.message, e.mission.attention, e.mission.station, e.mission.model]) : "";
+    if (nextWork !== workKey) {
+      const first = workKey === "";
+      workKey = nextWork;
+      const replicated = digestSnapshot();
+      if (replicated) snapshot = replicated;
+      if (!first && online()) scheduleTasks();
+    }
+    const key = `${online()}|${store.conn}|${e?.mission.status}|${e?.mission.name}|${e ? missionState(e).id : ""}|${worker(workerName)?.state}|${store.loaded}|${nextWork}`;
     if (key === viewKey) return;
     viewKey = key;
     renderHeader();

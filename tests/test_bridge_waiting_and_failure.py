@@ -203,6 +203,25 @@ def test_unexpected_exception_is_recorded_as_a_one_line_reason(store, tmp_path, 
     assert status_snapshot(mission_id)["lifecycle"]["failure_reason"] == "provider launcher exploded"
 
 
+def test_exception_after_an_operator_stop_request_ends_stopped_not_failed(store, tmp_path, state, monkeypatch) -> None:
+    """`stop --force` makes the running operation UNCERTAIN while the controller may still be launching it.
+
+    The controller then fails on that operation ("operation is not running: UNCERTAIN"). The operator
+    asked for the stop, so the mission must end STOPPED, with no controller-failed reason recorded.
+    """
+    mission_id = _failing_mission(tmp_path, store)
+
+    def stopped_underneath(*_args, **_kwargs):
+        store.set_mission_status(mission_id, "STOPPING")
+        raise bridge_runtime.TransitionError("operation is not running: UNCERTAIN")
+
+    monkeypatch.setattr(bridge_runtime.ralph_robin, "main", stopped_underneath)
+    assert run_controller(mission_id, headless=True) == 1
+    assert store.get_mission(mission_id)["status"] == "STOPPED"
+    assert status_snapshot(mission_id)["lifecycle"]["failure_reason"] is None
+    assert "controller-failed" not in [event["kind"] for event in store.events(mission_id)]
+
+
 def test_system_exit_reason_comes_from_the_last_logged_error(store, tmp_path, state, monkeypatch) -> None:
     mission_id = _failing_mission(tmp_path, store)
     log = bridge_runtime._runtime_directory(mission_id) / "controller.log"

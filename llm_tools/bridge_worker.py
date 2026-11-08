@@ -25,25 +25,37 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from . import bridge_commands as commands
 from .bridge_format import printable
-from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
-from .bridge_states import FINISHED_MISSION_STATUSES
+from .bridge_protocol import MAX_DELETED_MISSIONS_PER_MESSAGE, MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
+from .bridge_states import FINISHED_MISSION_STATUSES, LIVE_MISSION_STATUSES
+from .bridge_status_bound import mission_digest
 from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
 CA_FILE = "coordinator-ca.pem"
+CLIENT_CERT_FILE = "worker-client.pem"
+CLIENT_KEY_FILE = "worker-client.key"
 AUDIT_FILE = "audit.jsonl"
 AUDIT_MAX_BYTES = 1024 * 1024  # one rotation is kept: audit.jsonl.1
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PING_INTERVAL = 20.0
 SILENCE_LIMIT = 60.0
-EVENT_BATCH = 200
+EVENT_BATCH = 25  # events per batch
+EVENT_BATCH_BYTES = 16 * 1024  # serialized event bytes per batch (one oversized event still goes alone)
+EVENT_SCAN_ROWS = 400  # database rows read per batch, including rows that are not replicated
+EVENT_RATE_BYTES_PER_SECOND = 20 * 1024  # sustained upper bound for event traffic
+# Bookkeeping the controller writes every few seconds. The coordinator never reads either kind, and the
+# web console lists them only as hidden plumbing, so a heartbeat is not replicated and only the newest
+# capacity refresh of each mission is.
+UNREPLICATED_EVENT_KINDS = frozenset({EventKind.CONTROLLER_HEARTBEAT.value})
+LATEST_ONLY_EVENT_KINDS = frozenset({EventKind.CAPACITY_REFRESH.value})
 MISSION_QUESTION_REFRESH_SECS = 5.0
 MAX_QUESTION_MISSIONS_PER_REFRESH = 64
 # Event kinds the controller writes every few seconds. They cannot change a mission summary, so a
@@ -72,6 +84,7 @@ class WorkerConfig:
     allow_roots: tuple[str, ...] = ()
     allow_power: bool = False
     allow_restore: bool = False
+    client_certificate: bool = False
 
     @property
     def terminal_view(self) -> bool:
@@ -83,7 +96,7 @@ class WorkerConfig:
         return {"worker_id": self.worker_id, "name": self.name, "coordinator_url": self.coordinator_url,
                 "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation,
                 "allow_create": self.allow_create, "allow_root": list(self.allow_roots), "allow_power": self.allow_power,
-                "allow_restore": self.allow_restore}
+                "allow_restore": self.allow_restore, "mutual_tls": self.client_certificate}
 
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
@@ -286,7 +299,8 @@ def _path_allowed(path: str, roots: tuple[str, ...]) -> bool:
 
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
            allow_terminal_view: bool = False, allow_create: bool = False, allow_roots: tuple[str, ...] | list[str] = (),
-           allow_power: bool = False, allow_restore: bool = False) -> WorkerConfig:
+           allow_power: bool = False, allow_restore: bool = False, client_cert_pem: str | None = None,
+           client_key_pem: str | None = None) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
         raise WorkerConfigError("worker name must be lowercase letters, digits and '-' (at most 63)")
@@ -299,6 +313,12 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         raise WorkerConfigError("--allow-create requires at least one --allow-root")
     if allow_restore and not roots:
         raise WorkerConfigError("--allow-restore requires at least one --allow-root")
+    if (client_cert_pem is None) != (client_key_pem is None):
+        raise WorkerConfigError("client certificate and key must be supplied together")
+    if client_cert_pem is not None and "-----BEGIN CERTIFICATE-----" not in client_cert_pem:
+        raise WorkerConfigError("worker client certificate is not a PEM certificate")
+    if client_key_pem is not None and "PRIVATE KEY-----" not in client_key_pem:
+        raise WorkerConfigError("worker client key is not a PEM private key")
     directory = worker_dir(env)
     try:
         previous = load_config(env)
@@ -310,12 +330,17 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         if "-----BEGIN CERTIFICATE-----" not in ca_pem:
             raise WorkerConfigError("CA file is not a PEM certificate")
         _atomic_private_write(directory / CA_FILE, ca_pem)
+    if client_cert_pem is not None and client_key_pem is not None:
+        _atomic_private_write(directory / CLIENT_CERT_FILE, client_cert_pem)
+        _atomic_private_write(directory / CLIENT_KEY_FILE, client_key_pem)
+    client_certificate = client_cert_pem is not None or (directory / CLIENT_CERT_FILE).is_file() and (directory / CLIENT_KEY_FILE).is_file()
     config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view,
-                          allow_create, roots, allow_power, allow_restore)
+                          allow_create, roots, allow_power, allow_restore, client_certificate)
     _save(config, env)
     audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control,
           allow_terminal_view=allow_terminal_view, allow_create=allow_create, allow_root_count=len(roots),
-          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None)
+          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None,
+          mutual_tls=client_certificate)
     return config
 
 
@@ -335,6 +360,7 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             allow_create=bool(value.get("allow_create", False)),
             allow_roots=_stored_roots(value.get("allow_roots", [])),
             allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
+            client_certificate=bool(value.get("client_certificate", False)),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -343,6 +369,22 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
     if plain:
         raise WorkerConfigError(f"worker configuration {path} must name the coordinator with wss:// (workers never connect without TLS); run llm-bridge worker enroll again")
     return config
+
+
+def rotate_token(token: str, env: dict[str, str] | None = None) -> WorkerConfig:
+    """Replace only this enrollment's bearer token after coordinator-side staging.
+
+    The worker ID, coordinator CA and optional client certificate remain in place, so this does
+    not re-enroll or reset the replication generation. Restart a foreground/service worker after
+    writing the token so its next connection proves the staged credential to the coordinator.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+        raise WorkerConfigError("worker token must be 32-256 URL-safe characters")
+    config = load_config(env)
+    updated = dataclasses.replace(config, token=token)
+    _save(updated, env)
+    audit("token.rotate", env, worker_id=config.worker_id, name=config.name)
+    return updated
 
 
 def unenroll(env: dict[str, str] | None = None) -> bool:
@@ -447,11 +489,38 @@ def tls_context(env: dict[str, str] | None = None) -> ssl.SSLContext:
     ca = worker_dir(env) / CA_FILE
     context = ssl.create_default_context(cafile=str(ca) if ca.exists() else None)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if not (worker_dir(env) / WORKER_FILE).exists():
+        return context  # not enrolled: no client identity to present
+    config = load_config(env)
+    if config.client_certificate:
+        cert = worker_dir(env) / CLIENT_CERT_FILE
+        key = worker_dir(env) / CLIENT_KEY_FILE
+        if not cert.is_file() or not key.is_file():
+            raise WorkerConfigError("worker mTLS is enabled but the enrolled client certificate or key is missing")
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
     return context
 
 
+@dataclass(frozen=True)
+class InFlightBatch:
+    """The one events batch sent but not yet known to be processed by the coordinator."""
+
+    seq: int
+    after: int
+    through: int
+    message_id: str = ""
+    tombstones: tuple[str, ...] = ()  # deleted mission IDs this batch carries; marked replicated once its pong arrives
+
+
 class WorkerSession:
-    """Protocol state for one worker; pure apart from the store and the config file."""
+    """Protocol state for one worker; pure apart from the store and the config file.
+
+    Event replication keeps at most one batch in flight. ``cursor`` is the last position the
+    coordinator is known to have stored. After a batch is sent, ``barrier_ping`` sends a ``ping``;
+    the coordinator handles one connection's messages in order, so its ``pong`` proves the batch was
+    processed, and any ``events.nack`` for it arrived before that pong. No coordinator support
+    beyond protocol v1 is needed.
+    """
 
     def __init__(self, config: WorkerConfig, *, open_store: Callable[[], BridgeStore], software_version: str,
                  save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None,
@@ -462,7 +531,12 @@ class WorkerSession:
         self.software_version = software_version
         self.save = save
         self.generation = 0
-        self.cursor: int | None = None  # coordinator's event cursor; None until welcome
+        self.cursor: int | None = None  # coordinator's confirmed event cursor; None until welcome
+        self.clock: Callable[[], float] = lambda: time.monotonic()
+        self.inflight: InFlightBatch | None = None
+        self.send_not_before = 0.0  # rate cap: no batch before this clock reading
+        self.batch_seq = 0
+        self.pending_pongs: deque[int] = deque(maxlen=64)  # per ping sent: the batch it fences, or 0
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
@@ -470,6 +544,7 @@ class WorkerSession:
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
         self.mission_attention: dict[str, dict[str, Any] | None] = {}  # native RUNNING missions only, like mission_questions
+        self.tombstones_unsupported = False  # the coordinator rejected `deleted_missions` on this connection
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
@@ -506,22 +581,24 @@ class WorkerSession:
             payload["host_name"] = host_name
         return Message("hello", self.config.worker_id, 0, payload)
 
-    def _attention_snapshot(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
+    def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
         """The bounded status projection of one mission (the default task page), or ``None`` when it cannot be read.
 
         ``needs_attention`` looks for a task awaiting review in the page of tasks, so the page must hold the tasks
         of a mission, not only the first one: with a page of one, a review of task 2 was reported as "nothing needed".
+        Prompt text is not needed for the summary, so each prompt is read as one character.
         """
         try:
             from .bridge_monitor import project_snapshot
 
-            return dict(project_snapshot(store, mission_id))
+            return dict(project_snapshot(store, mission_id, prompt_chars=1))
         except Exception:  # noqa: BLE001 - observation must never stop worker replication
             return None
 
     @staticmethod
-    def _provider_question(needs: Any) -> dict[str, str] | None:
-        """The bounded provider question of a status projection's ``needs_you``, as replicated in ``needs_you``."""
+    def _provider_question(snapshot: dict[str, Any] | None) -> dict[str, str] | None:
+        """The pending provider question in a status projection, bounded."""
+        needs = snapshot.get("needs_you") if snapshot else None
         if not isinstance(needs, dict) or needs.get("kind") != "provider":
             return None
         message = needs.get("message")
@@ -546,6 +623,25 @@ class WorkerSession:
         numbers = [item for item in tasks if isinstance(item, int) and not isinstance(item, bool) and item > 0] if isinstance(tasks, list) else []
         return {"kind": needs["kind"], "message": text, "tasks": numbers[:ATTENTION_MAX_TASKS]}
 
+    @staticmethod
+    def _compact_needs(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """What needs the operator, bounded: the kind, the message, the command and the task numbers."""
+        needs = snapshot.get("needs_you")
+        if not isinstance(needs, dict):
+            return None
+        compact: dict[str, Any] = {}
+        if needs.get("kind") in {"approval", "failed", "blocked", "proposal", "capacity", "provider"}:
+            compact["kind"] = needs["kind"]
+        if isinstance(needs.get("message"), str):
+            compact["message"] = needs["message"][:2048]
+        if isinstance(needs.get("command"), str):
+            compact["command"] = needs["command"][:512]
+        if isinstance(needs.get("tasks"), list):
+            compact["tasks"] = [task for task in needs["tasks"][:32] if isinstance(task, int) and task > 0]
+        if isinstance(needs.get("hold"), bool):
+            compact["hold"] = needs["hold"]
+        return compact or None
+
     def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
         mission_id = str(row["id"])
         summary: dict[str, Any] = {
@@ -559,20 +655,28 @@ class WorkerSession:
             summary["task_counts"] = {str(key): int(value) for key, value in store.task_counters(mission_id)["status"].items() if int(value) > 0}
         except Exception:  # noqa: BLE001 - an unreadable count is left out, not reported as zero
             pass
-        snapshot = None if row.get("status") in FINISHED_MISSION_STATUSES else self._attention_snapshot(store, mission_id)
+        finished = row.get("status") in FINISHED_MISSION_STATUSES
+        snapshot = None if finished else self._live_projection(store, mission_id)
         if snapshot is not None:
             summary["attention"] = self._bounded_attention(snapshot.get("needs_you"))
-        elif row.get("status") in FINISHED_MISSION_STATUSES:
+            if row.get("status") in LIVE_MISSION_STATUSES:
+                # Task counts and the current task let a console draw its lists from the replicated
+                # summary instead of asking the worker for the status of every active mission.
+                summary.update(mission_digest(snapshot))
+                compact = self._compact_needs(snapshot)
+                if compact is not None:
+                    summary["needs_you"] = compact
+        elif finished:
             summary["attention"] = None  # a finished mission needs nothing; an unreadable one stays absent (unknown)
         config = row.get("config")
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
-            question = self._provider_question(snapshot.get("needs_you")) if snapshot is not None else None
-            summary["needs_you"] = question
+            question = self._provider_question(snapshot)
+            summary["needs_you"] = question if question is not None else summary.get("needs_you")
             self.mission_questions[mission_id] = question
             self.mission_attention[mission_id] = summary.get("attention")
         elif mission_id in self.mission_questions:
             # Event-driven summaries clear a question when its mission leaves RUNNING.
-            summary["needs_you"] = None
+            summary.setdefault("needs_you", None)
             self.mission_questions.pop(mission_id, None)
             self.mission_attention.pop(mission_id, None)
         return summary
@@ -610,18 +714,26 @@ class WorkerSession:
             self.save(self.config)  # durable before any command of this generation is accepted
             self.generation = generation
             self.cursor = int(message.payload["event_cursor"])
+            self.inflight, self.send_not_before = None, 0.0
+            self.tombstones_unsupported = False
+            self.pending_pongs.clear()
             self.audit("connection.accepted", generation=generation)
             return []
         if message.type == "error":
+            if self.inflight is not None and self.inflight.tombstones and message.payload.get("in_reply_to") == self.inflight.message_id:
+                # A coordinator from before PRD-038 rejects the unknown field. Keep the tombstones pending
+                # (the pong that follows only clears the batch) and stop offering them on this connection.
+                self.tombstones_unsupported = True
             return []  # never answer an error with an error; that can loop forever
         if self.generation == 0:
             return [self.error("not-welcomed", f"{message.type} before welcome", message.id)]
         if message.type == "ping":
             return [self.message("pong", {})]
         if message.type == "pong":
+            self._pong()
             return []
         if message.type == "events.nack":
-            self.cursor = int(message.payload["expected_after"])
+            self._nack(int(message.payload["expected_after"]))
             return []
         if message.type == "terminal.open":
             return self._terminal_open(dict(message.payload))
@@ -651,7 +763,7 @@ class WorkerSession:
         if self.terminal_launcher is None:
             return [self._terminal_refused(session_id, "terminal access is not available on this worker")]
         if not self.config.terminal_view:
-            return [self._terminal_refused(session_id, "this worker does not share terminals; enrol it with --allow-terminal-view or --allow-control")]
+            return [self._terminal_refused(session_id, "Needs --allow-terminal-view or --allow-control")]
         with self.open_store() as store:
             known = store.mission_id_if_exists(mission_id)
         if known is None:
@@ -717,19 +829,88 @@ class WorkerSession:
                 or (operation == "mission.suspend_until_credits" and self.config.allow_power)
                 or (operation == "worker.restore" and self.config.allow_restore))
 
+    def ping(self, fences: int = 0) -> Message:
+        """A ``ping``; ``fences`` is the batch sequence number its ``pong`` will confirm (0 for a keepalive)."""
+        self.pending_pongs.append(fences)
+        return self.message("ping", {})
+
+    def barrier_ping(self) -> Message:
+        """The ping that follows the batch just returned by ``next_events``."""
+        return self.ping(self.inflight.seq if self.inflight else 0)
+
+    def _pong(self) -> None:
+        fenced = self.pending_pongs.popleft() if self.pending_pongs else 0
+        if fenced and self.inflight is not None and self.inflight.seq == fenced:
+            if self.inflight.tombstones and not self.tombstones_unsupported:
+                with self.open_store() as store:
+                    store.mark_tombstones_replicated(self.inflight.tombstones)
+            self.cursor, self.inflight = self.inflight.through, None
+
+    def _nack(self, expected_after: int) -> None:
+        """Rewind to the coordinator's cursor, once per in-flight batch.
+
+        A nack that arrives with no batch in flight, or that names the position the in-flight batch
+        already starts from, answers an earlier batch that has since been superseded. Honouring it
+        would resend data the coordinator is about to accept.
+        """
+        if self.inflight is None or expected_after == self.inflight.after:
+            return
+        self.cursor, self.inflight = expected_after, None
+
+    def _replicable_events(self, store: BridgeStore, after: int) -> tuple[list[dict[str, Any]], int]:
+        """The next bounded batch of events and the cursor it advances to.
+
+        Heartbeats and superseded capacity refreshes are skipped but still advance the cursor, so
+        the returned cursor can exceed the last returned event.
+        """
+        selected: list[dict[str, Any]] = []
+        size, through = 0, after
+        newest_refresh: dict[str, int] = {}
+        for event in store.events_since(after, limit=min(EVENT_SCAN_ROWS, 1000)):
+            kind, mission_id = event.get("kind"), event.get("mission_id")
+            if kind in UNREPLICATED_EVENT_KINDS:
+                through = int(event["id"])
+                continue
+            if kind in LATEST_ONLY_EVENT_KINDS and isinstance(mission_id, str) and mission_id:
+                if mission_id not in newest_refresh:
+                    newest_refresh[mission_id] = store.latest_event_id(mission_id, (str(kind),))
+                if int(event["id"]) < newest_refresh[mission_id]:
+                    through = int(event["id"])
+                    continue
+            weight = len(json.dumps(event, separators=(",", ":")))
+            if selected and (len(selected) >= min(EVENT_BATCH, MAX_EVENTS_PER_BATCH) or size + weight > EVENT_BATCH_BYTES):
+                break
+            selected.append(event)
+            size += weight
+            through = int(event["id"])
+        return selected, through
+
     def next_events(self) -> Message | None:
-        """The next event batch after the coordinator's cursor, or ``None`` when up to date."""
-        if self.cursor is None:
+        """The next event batch after the coordinator's cursor, or ``None``.
+
+        ``None`` while a batch is in flight, while the rate cap holds the next batch back, and when
+        there is nothing new.
+        """
+        if self.cursor is None or self.inflight is not None:
+            return None
+        moment = self.clock()
+        if moment < self.send_not_before:
             return None
         with self.open_store() as store:
-            events = store.events_since(self.cursor, limit=min(EVENT_BATCH, MAX_EVENTS_PER_BATCH))
-            moment = time.monotonic()
+            pending = [] if self.tombstones_unsupported else store.pending_tombstones(MAX_DELETED_MISSIONS_PER_MESSAGE)
+            if pending:
+                # Tombstones travel alone, in an events message that carries no events and moves no cursor, so a
+                # coordinator that rejects the field loses nothing else.
+                batch = self.message("events", {"after": self.cursor, "through": self.cursor, "events": [], "deleted_missions": pending})
+                self.batch_seq += 1
+                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, tuple(pending))
+                self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+                return batch
+            events, through = self._replicable_events(store, self.cursor)
             refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
-            if not events and not refresh_questions:
+            if through == self.cursor and not refresh_questions:
                 return None
             after = self.cursor
-            if events:
-                self.cursor = int(events[-1]["id"])
             # Ordinary summaries remain event-scoped. A small, periodic scan of
             # active native missions catches provider questions, which can arrive
             # without a Bridge database event.
@@ -759,10 +940,14 @@ class WorkerSession:
                 current = (self.mission_questions.get(mission_id), self.mission_attention.get(mission_id))
                 if mission_id in event_mission_ids or current != previous:
                     missions.append(summary)
-            if not events and not missions:
+            if through == after and not missions:
                 return None
-        return self.message("events", {"after": after, "through": self.cursor, "events": events,
-                                        "mission_cursor": self.cursor, "missions": missions})
+        batch = self.message("events", {"after": after, "through": through, "events": events,
+                                         "mission_cursor": through, "missions": missions})
+        self.batch_seq += 1
+        self.inflight = InFlightBatch(self.batch_seq, after, through, batch.id)
+        self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+        return batch
 
 
 Connector = Callable[[WorkerConfig], Any]
@@ -833,6 +1018,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
         try:
             connection = connect(session.config)
             session.generation, session.cursor, session.close_reason = 0, None, None
+            session.inflight = None
             connection.send_text(session.hello().encode())
             last_heard = last_ping = time.monotonic()
             while not stop.is_set():
@@ -858,10 +1044,12 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 batch = session.next_events()
                 if batch is not None:
                     connection.send_text(batch.encode())
+                    connection.send_text(session.barrier_ping().encode())
+                    last_ping = now
                 if now - last_heard > SILENCE_LIMIT:
                     raise TimeoutError("coordinator silent")
                 if now - last_ping > PING_INTERVAL and session.generation:
-                    connection.send_text(session.message("ping", {}).encode())
+                    connection.send_text(session.ping().encode())
                     last_ping = now
         except Exception as exc:  # noqa: BLE001 - every failure leads to a bounded reconnect
             log(f"worker connection ended: {type(exc).__name__}: {str(exc)[:200]}")

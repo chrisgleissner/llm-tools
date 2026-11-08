@@ -1,6 +1,6 @@
 // Password reset from an SSH session (PRD-036): the sign-in page hint, the notice after a reset on the host and the
 // forced password change after a temporary password. The coordinator is real; the reset runs as the host command.
-import { expect, expectAccessible, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test, type Coordinator } from "./fixtures";
+import { expect, expectAccessible, loginViaUi, PASSWORD, setupViaUi, signOutViaUi, test, type Coordinator } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 const NEW_PASSWORD = "a different long passphrase";
@@ -102,7 +102,14 @@ test.describe("forgotten password", () => {
       if (body["authenticated"]) body["password_change_required"] = true;
       await route.fulfill({ response: res, json: body });
     });
-    await navTo(page, "Workers");
+    // The page's own background refresh (after a stream event, on connect) also calls /api/v1/workers, and it can
+    // reach the 403 first and replace the whole shell while a click on the Workers link waits for that link to be
+    // stable. The click then never lands (seen on the macOS ARM64 runner). Navigate through the router instead,
+    // which does not depend on the navigation element still being on the page.
+    await page.evaluate(() => {
+      history.pushState(null, "", "/workers");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
     await expect(page.getByRole("heading", { name: "Choose a new password" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
   });
