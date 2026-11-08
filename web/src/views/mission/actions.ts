@@ -19,6 +19,7 @@ export function taskActions(ctx: PageCtx): TaskActions {
     if (why) announce(why, "failed");
     return Boolean(why);
   };
+  const plain = (verb: "retry" | "resume" | "pause", t: Task): Promise<void> => (refuse() ? Promise.resolve() : ctx.mutateTask(verb, `task.${verb}`, t));
   const quote = (t: Task) => `"${t.title || `Task ${t.ordinal}`}"`;
   return {
     async approve(t) {
@@ -45,9 +46,9 @@ export function taskActions(ctx: PageCtx): TaskActions {
       if (reason === null) return;
       await ctx.mutateTask("reject", "task.reject", t, { reason });
     },
-    retry: (t) => (refuse() ? Promise.resolve() : ctx.mutateTask("retry", "task.retry", t)),
-    resume: (t) => (refuse() ? Promise.resolve() : ctx.mutateTask("resume", "task.resume", t)),
-    pause: (t) => (refuse() ? Promise.resolve() : ctx.mutateTask("pause", "task.pause", t)),
+    retry: (t) => plain("retry", t),
+    resume: (t) => plain("resume", t),
+    pause: (t) => plain("pause", t),
     async cancel(t) {
       if (refuse()) return;
       const reason = await confirm({ title: `Cancel task ${t.ordinal}?`, message: `Cancel ${quote(t)} on ${ctx.workerName}. This cannot be undone from the browser.`, confirmLabel: "Cancel task", danger: true });

@@ -100,14 +100,22 @@ export function approvalOrdinals(m: Pick<HeaderModel, "needs" | "tasks">): numbe
   return m.needs && (m.needs.kind === "approval" || m.needs.kind === "proposal") ? (m.needs.tasks ?? []) : [];
 }
 
-function retryOrdinal(m: HeaderModel): number | undefined {
+/** The task the header's primary action is about (Approve or Retry): its row offers no second copy of that action. */
+export function headerSubject(m: Pick<HeaderModel, "needs" | "tasks" | "state" | "status">): number | undefined {
+  if (m.status === "COMPLETED" || m.status === "CANCELLED") return undefined;
+  if (m.status === "FAILED" || m.state.id === "failed") return retryOrdinal(m);
+  const ords = m.state.id === "needs-approval" ? approvalOrdinals(m) : [];
+  return ords.length === 1 ? ords[0] : undefined;
+}
+
+function retryOrdinal(m: Pick<HeaderModel, "needs" | "tasks">): number | undefined {
   return m.needs?.kind === "failed" && m.needs.tasks?.length ? m.needs.tasks[0] : m.tasks.find((t) => t.status === "FAILED")?.ordinal;
 }
 
 export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[] {
   const why = m.blocked;
   const find = (n: number | undefined) => m.tasks.find((t) => t.ordinal === n);
-  // Pause and Stop carry an icon: on a phone they show the icon alone (the label stays for screen readers) so the actions fit one row.
+  // Pause and Stop carry an icon; on a phone Stop shows the icon alone (the label stays for screen readers) so the actions fit one row.
   const icons: Record<string, IconName> = { pause: "pauseBars", stop: "square" };
   const b = (label: string, action: string, fn: () => void, kind = "", reason = why): HTMLButtonElement => button(label, fn, { kind, action, reason, ...(icons[action] ? { icon: icons[action] } : {}) });
   const out: HTMLElement[] = [];
@@ -118,22 +126,22 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
   let primaryUsed = false;
   const primary = (): string => (primaryUsed ? "" : ((primaryUsed = true), "primary"));
 
-  if (status === "FAILED") {
+  const retry = (): void => {
     const n = retryOrdinal(m);
     const t = find(n);
     out.push(b(n ? `Retry task ${n}` : "Retry", "retry", () => t && hd.retry(t), primary(), why || (t ? "" : "Loading the task list")));
-    return out;
-  }
+  };
+  if (status === "FAILED") return retry(), out;
   if (!finished && s === "failed") {
-    const n = retryOrdinal(m);
-    const t = find(n);
-    out.push(b(n ? `Retry task ${n}` : "Retry", "retry", () => t && hd.retry(t), primary(), why || (t ? "" : "Loading the task list")));
+    retry();
   } else if (!finished && s === "needs-approval") {
     const ords = approvalOrdinals(m);
     if (ords.length === 1) {
       const t = find(ords[0]);
       const loading = why || (t ? "" : "Loading the task list");
-      out.push(b(`Approve task ${ords[0]}`, "approve", () => t && hd.approve(t), primary(), loading));
+      const approve = b("Approve", "approve", () => t && hd.approve(t), primary(), loading);
+      approve.setAttribute("aria-label", `Approve task ${ords[0]}`); // the task number is in the answer line and the row; the name keeps it
+      out.push(approve);
       out.push(b("Reject", "reject", () => t && hd.reject(t), "danger", loading));
     } else out.push(b(ords.length ? `Review ${ords.length} tasks` : "Review tasks", "review", hd.review, primary(), ""));
   } else if (!finished && s === "needs-input") out.push(b("Take control", "take-control", hd.takeControl, primary(), ""));
@@ -141,7 +149,8 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
   if (status === "CREATED" || status === "STOPPED" || status === "QUEUED" || status === "READY") out.push(b("Start", "start", hd.start, primary()));
   else if (status === "PAUSED") out.push(b("Resume", "resume", hd.resume, primary()));
   else if (pausable) out.push(b("Pause", "pause", hd.pause));
-  if (pausable || status === "PAUSED") out.push(b("Stop", "stop", hd.stop, "danger"));
+  // Stop beside Reject is a plain button: two red outlines side by side invite the wrong tap.
+  if (pausable || status === "PAUSED") out.push(b("Stop", "stop", hd.stop, out.some((x) => x.dataset["action"] === "reject") ? "" : "danger"));
   return out;
 }
 

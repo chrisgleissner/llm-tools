@@ -7,11 +7,11 @@ import { absTime, copyText, emptyState, button, h, hooks } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
 import { missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import type { DerivedState } from "../../state";
-import { announce, announceStreamEvent, confirmDialog as confirm, reportOutcome } from "../../ui";
+import { announce, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
-import { approvalOrdinals, buildHeader, providerModel, type HeaderHandlers, type HeaderModel } from "./header";
+import { approvalOrdinals, buildHeader, headerSubject, providerModel, type HeaderHandlers, type HeaderModel } from "./header";
 import { SHORTCUT_EVENT } from "../../shell";
 import { sessionReserve } from "../../session-box";
 import { loadSession, type SessionHandle } from "./session";
@@ -124,6 +124,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const verifiers = new Map<number, string>();
   const ctx: PageCtx = {
     workerName, missionId, blocked, needs, mutateTask, status,
+    subject: () => { const m = headerModel(); return m ? headerSubject(m) : undefined; },
     answer: () => handlers.takeControl(),
     verified: (ordinal, text) => {
       if (verifiers.get(ordinal) === text) return;
@@ -188,24 +189,21 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     }
   }
 
+  /** A mission change that asks first: Stop and Cancel. `verb` is the button and dialog word, `done` the past tense, `op` the operation suffix. */
+  async function sure(verb: string, text: string, done: string, op: string, optimistic: string | null): Promise<void> {
+    if (blocked()) return void announce(blocked(), "failed");
+    const reason = await confirm({ title: `${verb} mission?`, message: `${verb} "${entry()?.mission.name || missionId}" on ${workerName}. ${text}`, confirmLabel: `${verb} mission`, danger: true });
+    if (reason !== null) await missionAction(`Mission ${done}`, `${op} the mission`, `mission.${op}`, optimistic);
+  }
+
   // ---- header
   const handlers: HeaderHandlers = {
-    pause: () => void missionAction("Mission paused", "pause the mission", "mission.pause", "PAUSED"),
+    pause: () => void missionAction("Mission paused", "pause the mission", "mission.pause", "PAUSED", { label: "Undo", run: () => handlers.resume() }),
     resume: () => void missionAction("Mission resumed", "resume the mission", "mission.resume", "RUNNING"),
     start: () => void missionAction("Mission started", "start the mission", "mission.start", "RUNNING"),
     runNext: () => void missionAction("Next task started", "run the next task now", "mission.continue", null),
-    stop: () =>
-      void (async () => {
-        if (blocked()) return void announce(blocked(), "failed");
-        const reason = await confirm({ title: "Stop mission?", message: `Stop "${entry()?.mission.name || missionId}" on ${workerName}. Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open.`, confirmLabel: "Stop mission", danger: true });
-        if (reason !== null) await missionAction("Mission stopped", "stop the mission", "mission.stop", "STOPPING");
-      })(),
-    cancel: () =>
-      void (async () => {
-        if (blocked()) return void announce(blocked(), "failed");
-        const reason = await confirm({ title: "Cancel mission?", message: `Cancel "${entry()?.mission.name || missionId}" on ${workerName}. This cannot be undone from the browser.`, confirmLabel: "Cancel mission", danger: true });
-        if (reason !== null) await missionAction("Mission cancelled", "cancel the mission", "mission.cancel", null);
-      })(),
+    stop: () => void sure("Stop", `Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open.`, "stopped", "stop", "STOPPING"),
+    cancel: () => void sure("Cancel", "This cannot be undone from the browser.", "cancelled", "cancel", null),
     approve: (t) => void actions.approve(t),
     reject: (t) => void actions.reject(t),
     retry: (t) => void actions.retry(t),
@@ -440,7 +438,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   /** Pause, Resume, Start, Stop and the rest. The pill changes at once (`optimisticStatus`) and rolls back if the worker refuses. */
-  async function missionAction(did: string, action: string, operation: string, optimisticStatus: string | null): Promise<void> {
+  async function missionAction(did: string, action: string, operation: string, optimisticStatus: string | null, undo?: ToastAction): Promise<void> {
     const why = blocked();
     if (why) return void announce(`Could not ${action}. ${why}`, "failed");
     const r = await api.optimisticMutation(
@@ -454,7 +452,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       },
       () => api.mutateMission(workerName, operation, missionId, {}),
     );
-    reportOutcome(r, did, action);
+    reportOutcome(r, did, action, undo);
     await reloadAll();
     optimistic = null;
     renderHeader();

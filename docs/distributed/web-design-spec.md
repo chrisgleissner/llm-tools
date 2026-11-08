@@ -239,6 +239,8 @@ Rules:
 | danger | outline in `--danger`; `danger solid` only inside confirmation dialogs | Stop, Reject, Cancel, Remove |
 | icon | square, `--control-h` | menus, header controls; always `aria-label` and `title` |
 
+Stop is a plain secondary button (no red outline) while Reject is shown next to it, which is the header of a task awaiting approval: two red outlines side by side invite the wrong tap. Without Reject, Stop keeps the danger variant (decision D28.3). A primary action is offered once per viewport: the mission header on a desktop, the docked action bar on a phone. The row of the task the header is about (the one Approve or Retry concerns) and the evidence block have no inline copy of it; a row of any other task keeps its own inline action and its menu (D28, finding R2).
+
 Heights: 32 px (28 px small) with a fine pointer, 44 px with a coarse pointer. States: hover, active (`transform: translateY(1px)` is not used; background change only), disabled (muted text, reason in an adjacent text or `title`, never a dashed border), busy (`aria-busy="true"`; the leading icon is replaced by a ring, the label stays). A disabled control for a permission reason says why ("This worker allows viewing only", closes WUX-003). A worker without mutating capabilities disables every mutation with that text.
 
 ### 6.2 Overflow menu and disclosure
@@ -265,7 +267,7 @@ Disclosure is the native `<details>/<summary>`, styled with a chevron, 32 px (44
 | 2 toast | status region, at most two | result of the operator's own action; a new needs-you item while the tab is focused and the composer is not | heartbeat, capacity refresh, routine task change, reconnect shorter than 10 s, done, copy confirmation |
 | 3 browser notification | opt-in after the first needs-you event, requested from a user gesture; hidden tab only; at most one per mission per 5 minutes | needs approval, needs input, failed | completion, offline under 5 minutes |
 
-Toast mechanics: `role="status"` region labelled "Notifications" inside the page landmarks (closes WUX-025); at most two visible (one on a phone, with "+n" for the rest); success toasts last 4 s, pause on hover and focus; errors and actionable toasts stay until dismissed; each has a dismiss button and, for needs-you, an "Open" action. On a phone a toast is a 48 px single-line bar above the composer or bottom bar and never covers the header or the primary controls. One toast per operator action: the stream event caused by the same request id is suppressed (closes WUX-015). "Copied" is shown inline on the button (check icon for 1.5 s) and in the live region. Connection changes use the banner, not a toast. Focus never moves, no dialog opens by itself, sound is off.
+Toast mechanics: `role="status"` region labelled "Notifications" inside the page landmarks (closes WUX-025); at most two visible (one on a phone, with "+n" for the rest); success toasts last 4 s, pause on hover and focus; errors and actionable toasts stay until dismissed, with one exception: the toast that answers Pause ("Mission paused." with an Undo button, which sends `mission.resume`) expires after 8 s like a success toast, and waits while the pointer or focus is on it (decision D28.3); each has a dismiss button and, for needs-you, an "Open" action. On a phone a toast is a 48 px single-line bar above the composer or bottom bar and never covers the header or the primary controls. One toast per operator action: the stream event caused by the same request id is suppressed (closes WUX-015). "Copied" is shown inline on the button (check icon for 1.5 s) and in the live region. Connection changes use the banner, not a toast. Focus never moves, no dialog opens by itself, sound is off.
 
 ### 6.5 Motion budget in practice
 
@@ -309,8 +311,8 @@ Text field and select: 16 px text, 44 px high on coarse pointers, `--border-stro
 - Navigation items, in full words at every width: Inbox (badge: number needing the operator), Missions, Sessions, Workers, Usage. Diagnostics, Account, theme, density and keyboard shortcuts move to the user menu. The "More" sheet is removed.
 - Bottom bar labels are 12 px, full words, and must not clip at 320 px (64 px per item); a test checks `scrollWidth <= clientWidth` (T35).
 - Skip link is the first focusable element; the first Tab lands on it (closes WUX-010).
-- Header right side: capacity chips, connection state, user menu. The connection state is an 8 px dot, labelled only when not live. When not live a banner under the header says "Disconnected. Showing data as of 14:02 (3m ago)." (`role="status"`), and mutations are disabled with that reason. Regions that show live data carry `data-asof` with the last-sync time.
-- Capacity chips (`usage.snapshot` of the first online worker, refreshed every 60 s while the tab is visible): "Claude 5h 62% | Codex 5h 75%", each the lowest-remaining scope of the provider, always neutral (text, small meter, no attention colour), click opens Usage. Below 30rem container width only the limiting provider shows. The chip always has the text value.
+- Header right side: capacity chips, connection state, user menu. The connection state is an 8 px dot, labelled only when not live. When not live a banner under the header says "Disconnected. Showing data as of 14:02." (`role="status"`), with the age of the data ("(15s ago)") added once the data is 10 s old (decision D28.6), and mutations are disabled with that reason. Regions that show live data carry `data-asof` with the last-sync time.
+- Capacity chips (`usage.snapshot` of the first online worker, refreshed every 60 s while the tab is visible): "Claude 5h 62% | Codex 5h 75%", each the lowest-remaining scope of the provider, neutral (text, small meter) while the provider is ready. While the provider waits for capacity (`ready` is false in `usage.snapshot`) its chip takes the attention tone (`--alert-attention-*`) and the text adds the reset time of the limiting scope: "Claude 5h 4% left, resets 12:25" (decision D28.2). Click opens Usage. Below 30rem container width only the limiting provider shows. The chip always has the text value; when the waiting chip does not fit (320 px), its scope and meter go first, then the visible percentage gives way to "resets 12:25" (the percentage stays in the accessible text and the title) and the chip uses the 12 px size.
 - Command palette (Ctrl or Cmd+K, `/` focuses the current page search): `role="dialog"` with a combobox and a listbox (`aria-activedescendant`), results for missions (name, worker, id), sessions and actions (go to page, Pause the open mission, Toggle theme). The first result is preselected, Enter runs it. It is loaded by dynamic import on first use.
 - Keyboard map (one table in `shell.ts` feeds both the handlers and the `?` dialog, so they cannot drift): `g i` Inbox, `g m` Missions, `g s` Sessions, `g w` Workers, `g u` Usage, `j`/`k` move between rows, `Enter` open, `a` approve, `r` reject, `p` pause (mission page), `c` focus the composer, `/` search, `t` theme, `?` help, Ctrl/Cmd+K palette. Shortcuts are inactive in fields and in the terminal.
 
@@ -330,14 +332,14 @@ Level map. L0: header (title, state pill, state-dependent actions, one meta line
 1440x900, running mission with a task awaiting approval
 +--------+--------------------------------------------------------------------------------------+
 | rail   | Missions                                                                             |
-|        | Refactor the parser   [(<>) Needs approval]    [Approve task 2][Reject] [Pause][Stop][...]
+|        | Refactor the parser   [(<>) Needs approval]    [Approve][Reject] [Pause][Stop][...]
 |        | Codex gpt-5 - alpha - parser - updated 2m ago                          (header ~80 px)|
 |        +-------------------------------------------------------+------------------------------+
 |        | Session  Watching, read only  [Follow][Transcript][ ] | Tasks 6 | Activity    [+ Add] |
 |        | +---------------------------------------------------+ | 3 completed >               |
 |        | | xterm, remote geometry, fills the pane (~676 px) | | 2 Implement the new tokeni- |
 |        | | codex  task 2 of 6: ...                           | |   zer                       |
-|        | | > Reading src/tokenizer.rs ...                    | |   [Approve] [Reject]    [...] |
+|        | | > Reading src/tokenizer.rs ...                    | |                       [...] |
 |        | |                                                   | | 3 Update golden files       |
 |        | |                           [Jump to latest 14]     | |   (x) Failed   [Retry]  [...]|
 |        | +---------------------------------------------------+ | 5 Write the changelog       |
@@ -350,7 +352,7 @@ Header. Breadcrumb "Missions" (muted link), h1 title (wraps to two lines, `title
 
 | Mission state | Level-0 actions |
 |---|---|
-| Needs approval (one task) | Approve task N (primary), Reject, Pause, Stop |
+| Needs approval (one task) | Approve (primary; the accessible name is "Approve task N"), Reject, Pause, Stop |
 | Needs approval (several) | Review N tasks (primary, focuses the Tasks panel), Pause, Stop |
 | Needs input | Take control (primary, focuses the composer), Pause, Stop |
 | Running, Waiting for capacity | Pause, Stop |
@@ -359,11 +361,11 @@ Header. Breadcrumb "Missions" (muted link), h1 title (wraps to two lines, `title
 | Failed | Retry task N (primary) |
 | Done, Stopped (finished) | none; the menu has "Copy ID" |
 
-The header menu holds: "Run next task now" (`mission.continue`, with the sentence "Release the held checkpoint"), "Cancel mission" (`mission.cancel`, confirmation), Copy mission ID, Copy folder path. Pause is one interaction. Stop (`mission.stop`) opens a confirmation (dialog on desktop, bottom sheet on a phone): two interactions. After either, the pill changes within 500 ms from the optimistic result and reconciles on the worker's answer; on failure it rolls back with an error toast.
+The header menu holds: "Run next task now" (`mission.continue`, with the sentence "Release the held checkpoint"), "Cancel mission" (`mission.cancel`, confirmation), Copy mission ID, Copy folder path. Pause is one interaction and answers with an Undo toast for 8 s (D28.3). Stop (`mission.stop`) opens a confirmation (dialog on desktop, bottom sheet on a phone): two interactions. After either, the pill changes within 500 ms from the optimistic result and reconciles on the worker's answer; on failure it rolls back with an error toast.
 
 Meta line: provider and model (from `station_observation` or `station_context`; unknown parts are omitted, never "Provider unknown", closes WUX-029), worker (link; the host and address are in the About block), folder name, "updated 2m ago". There is no status table; cwd, created and updated timestamps are in About.
 
-Side column. A segmented control "Tasks | Activity" (state in `?tab=`). A task row is a two-line `TaskRow` (64 px): ordinal, title (clamped to two lines), pill, muted meta. Rows that need the operator show their inline buttons, at most two: Approve and Reject for Needs approval, Retry for Failed, Resume for Paused. Everything else is in the row menu: Pause task, Cancel task (confirmation), Copy title, Copy prompt. Completed tasks are grouped in a disclosure "Completed (3)" above the open tasks. Selecting a task opens Evidence under the list (level 1): the verifier line from `task.show` (or "No verifier result recorded"), changed files and counts parsed from `task.diff` text (`diff --git` headers, `+`/`-` line counts; "Diff unavailable: <plain reason>"), the last output lines from `task.output`, then Approve and Reject. "Add task" (level 0 in the panel header) opens an inline field: Add task (1), type the prompt, Ctrl/Cmd+Enter or Add (3 interactions plus typing), posting `task.add` with the first line as the title. No drag reordering exists, so WCAG 2.5.7 is not engaged.
+Side column. A segmented control "Tasks | Activity" (state in `?tab=`). A task row is a two-line `TaskRow` (64 px): ordinal, title (clamped to two lines), pill, muted meta. Rows that need the operator show their inline buttons, at most two: Approve and Reject for Needs approval, Retry for Failed, Resume for Paused; except the row of the task the header's primary action is about, which shows none (the header has them; section 6.1). Everything else is in the row menu: Pause task, Cancel task (confirmation), Copy title, Copy prompt. Completed tasks are grouped in a disclosure "Completed (3)" above the open tasks. Selecting a task opens Evidence under the list (level 1): the verifier line from `task.show` (or "No verifier result recorded"), changed files and counts parsed from `task.diff` text (`diff --git` headers, `+`/`-` line counts; "Diff unavailable: <plain reason>"), the last output lines from `task.output`, and no buttons of its own (the header's Approve and Reject, or the row's, are the one place; section 6.1). "Add task" (level 0 in the panel header) opens an inline field: Add task (1), type the prompt, Ctrl/Cmd+Enter or Add (3 interactions plus typing), posting `task.add` with the first line as the title. No drag reordering exists, so WCAG 2.5.7 is not engaged.
 
 Activity (Milestones by default). Rows: relative time, phrase, optional task chip. Event classes come from `event-humanizer.ts`: milestone (task transitions, verification, approvals, mission lifecycle, handoff, failures, provider waits), detail (commands, operations, terminal and worker connection, provider selection) and plumbing (the current `PLUMBING` set). A two-option segmented control: Milestones (default) and All activity (milestones plus detail, newest first). Plumbing is never in either; a footer line states "86 background events hidden (82 controller checks, 4 capacity refreshes)" with a Show button that reveals them inside a nested disclosure in muted type. Each row has "Raw", a per-row disclosure showing kind, id, task, time and only the allowlisted fields of `event.data` (the same allowlist the humanizer reads; other fields are never rendered, so the `do-not-render-this` test stays). Default view shows at most 20 rows with "Show 20 more". The two filter selects and "Load older events" are replaced by this control and the existing paging.
 
@@ -376,12 +378,12 @@ Pixel 4:
 | < Missions            A        | 48 | < Missions            A        |
 | Refactor the parser            |    | Refactor the parser            |
 | [(<>) Needs approval]          |    | [(<>) Needs approval]          |
-| [Approve task 2][||][ ][...]   | 72 | [Approve task 2][||][ ][...]   |
+| [Approve][|| Pause][Stop][...] | 72 | [Approve][|| Pause][Stop][...] |
 | [Session][Tasks 6][Activity]   | 44 | [Session][Tasks 6][Activity]   |
 | +----------------------------+ |    | +----------------------------+ |
 | | terminal, pan horizontally | |    | | 2 Implement the new tokeni- | |
 | | ...                        | |    | |   zer                       | |
-| | (about 25 rows at 12 px)   | |    | |   [Approve] [Reject]    [...]| |
+| | (about 25 rows at 12 px)   | |    | |                     [...]| |
 | +----------------------------+ |    | | 3 Update golden files       | |
 | [Esc][Tab][Ctrl][^][v][...]    |    | |   (x) Failed  [Retry]  [...] | |
 | [Take control] Message  [Send] | 56 | | [+ Add task]                 | |
@@ -389,7 +391,7 @@ Pixel 4:
 | Inbox Missions Sessions Workers Usage | 56 + inset
 ```
 
-On a phone the header is two lines (back, title and menu on line 1; pill on line 2; actions on line 3 as 44 px controls, Pause and Stop as icon buttons with `aria-label`). Segmented Session / Tasks / Activity, state in `?tab=`. While the composer or terminal has focus the bottom bar and the actions line hide and the header collapses to one 40 px line (`body[data-kb]`), which leaves at least 8 rows at 360x640; "Expand" (full screen) is the way to get more. At 320x568 the composer and the key bar still fit one row each. On a landscape phone the header is 40 px and the navigation is behind a menu button.
+On a phone the header is two lines (back, title and menu on line 1; pill on line 2); the actions are docked above the bottom bar as one row of 44 px controls: the primary action with its short label ("Approve", "Take control", "Resume"), Pause and Stop as an icon with the short label "Pause" and "Stop", and the menu. Pause and Stop are always visible. At 320 to 335 px the row does not fit with the labels beside "Take control" and they become icon only (`aria-label` and `title` keep the names). Reject is in the menu below 30rem (D28.4). Segmented Session / Tasks / Activity, state in `?tab=`. While the composer or terminal has focus the bottom bar and the actions line hide and the header collapses to one 40 px line (`body[data-kb]`), which leaves at least 8 rows at 360x640; "Expand" (full screen) is the way to get more. At 320x568 the composer and the key bar still fit one row each. On a landscape phone the header is 40 px and the navigation is behind a menu button.
 
 ### 8.2 Session pane (terminal and composer)
 
@@ -402,7 +404,7 @@ Contract: `sessionPane(workerName, missionId, opts) -> { element, focusComposer(
 - **Phones and the shared PTY (UXR-041).** Viewing never sends `{t:"r"}` (worker already ignores it). Taking control on a narrow screen (`(pointer: coarse), (max-width: 60rem)`) also does not resize: xterm stays at the remote columns and rows, the font floor is 12 px, and when the columns do not fit the pane scrolls horizontally with an edge fade and the label "Narrow view, 92 columns. Pan, or open Transcript." Resizing the session to the phone is an explicit menu item "Resize session to this screen" that opens a confirmation naming the effect ("Other viewers and the tmux station will change size") and sends one `{t:"r"}`. Wide screens keep today's auto-fit while controlling.
 - **Transcript.** A toggle shows a plain-text wrapped `<pre tabindex="0">` built from the xterm buffer (`translateToString`), updated at most once per second while visible, with no live announcement; it is the reflowable alternative for 1.4.10 and for screen readers.
 - **Full screen.** One tap hides the header, navigation and tab bar, keeps the pane, composer and key bar; exit by button, Back or Escape (focus is restored to the Expand button).
-- **Key bar.** One row of six 44 px keys (Esc, Tab, Ctrl sticky, Alt sticky, Up, Down) and a "..." key that opens a second row (Left, Right, `|`, `~`, `/`, `-`, PgUp, PgDn); the keys stay disabled with a reason until the client holds control; they never take focus.
+- **Key bar.** One row of six 44 px keys (Esc, Tab, Ctrl sticky, Alt sticky, Up, Down) and a "..." key that opens a second row (Left, Right, `|`, `~`, `/`, `-`, PgUp, PgDn); on a phone the whole bar is hidden until the client holds control, at every screen height (progressive disclosure: keys that cannot be used give their row to the terminal; decision D28.5); where it is shown (a desktop with a coarse pointer, a tablet) the keys stay disabled with a reason until the client holds control; they never take focus.
 - **Rows.** Desktop pane height is the grid row: 900 px minus the 56 px header, the 80 px mission header, a 32 px pane toolbar and the 56 px composer row leaves about 676 px, which is 75% of the viewport and 40 rows at 17 px. Pixel 4 capacity is about 25 rows at 12 px (745 px minus header, state, actions, tabs, composer, key bar and bottom bar), above the 14-row requirement and the addendum's 18-row budget.
 - **Not available.** Not running: "Session not running. Last run ended 2m ago." plus the `task.output` tail in a `<pre>` when present. No permission: the reason in words and no dead button (closes WUX-014).
 
@@ -426,7 +428,9 @@ L0: one answer line ("3 need you. 4 running." or "All quiet. 4 running."), "Need
 ```
 
 - Rows: pill, title (two lines), one reason line (never raw JSON or ids), age, inline actions, a row menu (Copy ID, Open session). Alert rows have a 3 px leading `--alert-*-bar`; they are the only saturated element on the page.
-- Needs you shows at most 8 rows and a "Show N more" button; sorted failed, approval, input. Order inside a group is oldest first. Closes WUX-028.
+- Needs you shows at most 6 rows and a "Show N more" button; sorted failed, approval, input. Order inside a group is oldest first. Closes WUX-028. Failures count for this order only for 24 hours (from the mission's last update). Older failures come after the input rows as one row, "5 older failures", with a Show button that lists them below that row (and Hide); the heading count includes them (decision D28.1).
+- One number everywhere: the answer line, the heading "Needs you (n)", the navigation badge and the tab title all show the same figure. It has a "+" only while some active mission has not been read yet (an older worker without `attention` in its list, more than the 12 missions the fan-out reads); then the line below says "Checked 12 of 40 active missions" (finding R3). The third part of the answer line names the kinds that need the operator ("2 failed, 1 awaits approval"), not an instruction (finding R4).
+- The state pill column is as wide as its section's pills: 8.5rem in Needs you, 6.5rem in Running, 11rem in Waiting, so the title starts close to the pill at 1440 (finding R5).
 - Approve (1) opens a confirmation dialog that holds the evidence (task title, verifier line, changed files and counts); confirming is the second interaction. Reject (1) opens a dialog with a required reason; confirming with an empty reason shows an inline error and sends nothing; type (2) and confirm (3). Answer and Open navigate to the mission with `?focus=composer` (the answer needs the writer role, so it cannot happen on the Inbox). Failed rows offer Retry and Open.
 - Running rows show the provider and model, the current task title and "updated 3m" (the status projection's task or mission update time, at minute granularity). The one-line "what it is doing now" is the typed projection plus, when available, the last non-empty line of `task.output` (ANSI and control characters stripped, 160 characters, set as text) for at most 8 visible running rows, refreshed on mission events and every 30 s while the tab is visible. Terminal output is never fetched for the list.
 - Preview (>= 70rem container only): selecting a row with `j`/`k` or click shows a right panel with the `task.output` tail (20 lines) as plain text and an "Open session" button. Below 70rem Enter opens the mission. No second terminal or WebSocket is created on the Inbox (DEV-4).
@@ -587,18 +591,18 @@ New specs live in `web/e2e/`. All run on the four existing projects unless marke
 | T14 | `uxr-mission` task panel | no task row holds more than two visible buttons; Pause, Cancel, Copy are in the menu; menu keyboard model (open, arrows, Escape, focus return) | render Pause and Cancel on each row |
 | T15 | `uxr-mission` activity | default list at most 20 rows, all `milestone`; `[data-plumbing-count]` shows the hidden count; Show reveals them muted; Raw disclosure shows allowlisted fields only (the `do-not-render-this` value never appears) | drop the plumbing filter |
 | T16 | `uxr-noise` soak | with the fake clock, fast-forward 10 minutes while the mock stream emits a heartbeat and a capacity refresh every minute: 0 `.toast`, 0 visible `[data-event-class=plumbing]`, no header mutation outside the count; then one approval event adds exactly one Inbox row, at most one toast, no dialog. An optional real-stack variant (`E2E_SOAK=1`, seeded worker) is nightly | call `announce` for plumbing events |
-| T17 | `uxr-noise` toast policy | one operator action yields exactly one toast; role `status`; dismissible; at most two (one on a phone); Copy shows no toast; a toast never intersects a primary control's box; error toasts stay | toast the stream event too |
+| T17 | `uxr-noise` toast policy | one operator action yields exactly one toast; role `status`; dismissible; at most two (one on a phone); Copy shows no toast; a toast never intersects a primary control's box; error toasts stay; success toasts expire after 4 s and the Undo toast of Pause after 8 s | toast the stream event too |
 | T18 | `uxr-inbox` needs-you first | zero interactions: the first Needs you row and its primary action are fully inside the fold at each matrix viewport; Needs you precedes Running in DOM order | move the queue under the tiles |
 | T19 | `uxr-inbox` running rows | each running row shows provider state or last line and "updated Nm" without interaction; no "Provider unknown" text | print the old current-work string |
 | T20 | `uxr-inbox` approve and reject | Approve opens a dialog containing task title, verifier line and changed-file counts and needs 2 interactions to complete; Reject with an empty reason sends no request and shows an inline error; with a reason it completes in 3 interactions | remove the evidence block |
 | T21 | `uxr-mission` add task and steer | Add task is at most 3 interactions plus typing and posts `task.add`; each Steer kind posts `mission.steer` with the right body; the queued chip appears | remove the Add task field |
-| T22 | `uxr-fleet` capacity | the header shows provider, scope, percent (reset in the title) with 0 interactions on `/`; one click opens Usage; below 30rem only the limiting provider; Usage shows text values and reset times for every meter | remove the chip |
+| T22 | `uxr-fleet` capacity | the header shows provider, scope, percent (reset in the title; in the text for a provider that waits for capacity, T48) with 0 interactions on `/`; one click opens Usage; below 30rem only the limiting provider; Usage shows text values and reset times for every meter | remove the chip |
 | T23 | `uxr-fleet` missions | needs-you and active rows precede finished; finished are collapsed with a count; row height at most 56 px (comfortable); no id column; worker name has no mid-word wrap | sort by updated time only |
 | T24 | `uxr-fleet` sessions and workers | active sessions first and History collapsed; Workers has offline first, one pill each, last seen present; no wrapped identifier | drop the History group |
 | T25 | `uxr-palette` | Ctrl/Cmd+K finds a mission by name and by id, a session and an action; Ctrl+K, type, Enter is 3 key groups; every key in the `?` dialog is bound and every bound key is listed | remove one key from the table |
 | T26 | `uxr-calm` motion and colour | at most one running animation in the document (terminal excluded); none with reduced motion; on the seeded states only rank 1 and 2 rows have a saturated background or leading bar | add a pulse to the Running pill |
 | T27 | `uxr-calm` interrupts | tab title carries `(n)`; favicon dot present when n is above 0; no toast for done, offline under 10 s, reconnect under 10 s; Notification permission is requested only from a gesture, after the first needs-you item | request permission on load |
-| T28 | `uxr-calm` disconnected | closing the stream keeps the data, shows `#conn-banner` with "as of hh:mm (Nm ago)", disables mutations with the reason, never empties the page; recovery clears it | blank the page when offline |
+| T28 | `uxr-calm` disconnected | closing the stream keeps the data, shows `#conn-banner` with "as of hh:mm" and, from 10 s, "(Ns ago)", disables mutations with the reason, never empties the page; recovery clears it | blank the page when offline |
 | T29 | `uxr-matrix` fold (matrix) | for every page and viewport in the addendum table, each `[data-l0]` of that page ends at or above the fold (`svh` minus chrome) | add a hero block above the queue |
 | T30 | `uxr-matrix` no horizontal scroll (matrix) | `scrollWidth <= innerWidth` on every route from 320 to 2560 and in landscape; only the terminal pane and diff block scroll in x | give a row `min-width: 600px` |
 | T31 | `uxr-matrix` targets (matrix) | every interactive element is at least 44 px on coarse pointers and at least 24 px on fine pointers (spacing exception only by the 24 px circle test) | shrink an icon button to 28 px |
@@ -608,7 +612,7 @@ New specs live in `web/e2e/`. All run on the four existing projects unless marke
 | T35 | `uxr-matrix` navigation | five bottom-bar labels are full words and not clipped at 320; the last list item is not covered by the bar after scrolling to the end | abbreviate a label |
 | T36 | `uxr-perf` (Pixel 4, 4x CPU) | on mission detail with a live terminal: five runs, INP lab proxy at most 200 ms per interaction (open row, type, send, approve, switch tab; median reported against 100 ms), typing under a 200 lines/s stream at most 50 ms per key (p95), CLS at most 0.02 per route including mount and live refresh | mount the terminal without a reserved box |
 | T37 | `scripts/lighthouse.mjs` (CI job `web-lighthouse`) | mobile preset on `/`, `/missions`, `/missions/:id` against a seeded coordinator and worker: performance at least 90, accessibility 100, best practices at least 95, LCP at most 2.5 s, TBT at most 200 ms | add an unoptimised blocking script |
-| T38 | `uxr-terminal` small screen | font at least 12 px at 360 px; after Take control on a phone no `{t:"r"}` frame is sent; the explicit resize item sends exactly one after the confirmation; Transcript toggle shows the buffer text; Expand and Escape round trip; the key bar has six keys plus "..." and the keys stay disabled in view mode | re-enable the auto resize observer on phones |
+| T38 | `uxr-terminal` small screen | font at least 12 px at 360 px; after Take control on a phone no `{t:"r"}` frame is sent; the explicit resize item sends exactly one after the confirmation; Transcript toggle shows the buffer text; Expand and Escape round trip; the key bar is hidden in view mode and, after Take control, has six keys plus "..." | re-enable the auto resize observer on phones |
 | T39 | `budget` (existing, updated) | initial, CSS, terminal and routes caps; the lazy routes are not in the initial graph | import `account` statically |
 | T40 | `uxr-state` refresh | a stream refresh causes CLS 0 and keeps `document.activeElement`; a skeleton appears only after 150 ms; Pause updates optimistically and rolls back on a failed mock | rebuild the list with `replaceChildren` and lose focus |
 | T41 | `uxr-empty` | with the "none" mocks every page shows a heading, one sentence and one primary action or command | remove an empty state |
@@ -617,6 +621,8 @@ New specs live in `web/e2e/`. All run on the four existing projects unless marke
 | T44 | `tests/test_distributed_spec_status.py` (extended by the lead) | every `[x]` UXR row names an existing test id and, for visible rows, existing screenshots under `docs/distributed/ux-evidence/<id>/` | cite a missing file |
 | T45 | `uxr-config` | `playwright.config.ts` defines the nine matrix projects and `.github/workflows/test.yml` runs them | delete a project |
 | T46 | `uxr-critique` | `ux-audit.md` critique section lists, for every page at 1440 and 360 widths and both themes, an existing screenshot path | remove a screenshot |
+| T47 | `uxr-fresh-eyes` | one test per fixed defect of the fresh-eyes critique (`watch/prd037-critique.md`) | the fix of that finding undone |
+| T48 | `uxr-decisions` D28 | Inbox order and the "N older failures" row; waiting chip tone and reset text (fits 320 px); Stop plain beside Reject; Undo toast 8 s; "Approve" label, Pause and Stop with labels in one row on phones; key bar hidden until control; banner age from 10 s (`shell.spec`); phone arrival on Session; one place for Approve and Reject; one Inbox number; summary without instruction; pill column; search button at rest | each decision's change undone (D28 lists the revert per test) |
 
 The matrix projects (addendum section 5): 2560x1440, 1280x720, 768x1024 (also 1024x768), 430x932, 360x640, 320x568, and landscape 740x360 and 568x320, in addition to the existing 1440x900, Pixel 4 and Firefox 393x851. Nightly cross factors: forced colors, reduced motion, 200% and 400% zoom emulated by viewport and device scale factor, text spacing stylesheet, keyboard simulation.
 
@@ -668,13 +674,21 @@ Each row maps to a spec section, a work package and the tests that prove it. Vis
 | 040 Fresh-eyes critique with proof | 11.4 | lead | T46 |
 | 041 Viewing never resizes the shared PTY, fit or scroll, Transcript | 8.2, 2 | 2 | T38, T11 |
 | 042 Addendum adopted: interrupt ladder, one animation, last-known state, viewport meta, full-word nav | 6.4, 6.5, 7.1, 4.6 | 0, 1 | T27, T26, T28, T04, T35 |
+| 047 Phone mission opens on the live session, also while a task awaits approval | 8.1, 8.2 | 3 | T48, T10 |
+| 048 One place per viewport for the primary action | 6.1, 8.1 | 3 | T48 |
+| 049 One exact Inbox number everywhere | 8.3, 7.2 | 4 | T48, T47 |
+| 050 Inbox summary names what needs the operator | 8.3 | 4 | T48 |
+| 051 Pill column as wide as its pills | 8.3 | 4 | T48 |
+| 052 Phone search button looks like the other header icons at rest | 7.1 | 1 | T48 |
 
 WUX findings closed by this design (test or section): WUX-001 (8.1, T10, T13), 002 (8.6), 003 (6.1, T11), 004 (8.8), 005 (6.3, T08), 006 (6.6, T28), 007 (8.3), 008 (tiles removed, 8.3), 009 (7.2), 010 (7.1), 011 (4.6, T34), 012 and 027 (8.8), 013 (not closed, DEV-11), 014 (8.2), 015 (6.4, T17), 016 (8.1, 8.3, T23), 017 (8.5, 8.7), 020 and 021 (8.8, 6.7), 022 (6.6), 023 (8.8), 024 (6.1, T31), 025 (6.4, T33), 026 (8.8), 028 (8.3), 029 (8.1, T19), 030 (8.2, T38), 033 (4.3). WUX-018, 019, 031 and 032 concern the project site and are outside this task.
 
-## 14. Decisions the operator must make
+## 14. Decisions (answered)
 
-1. **Backend fields for the Inbox (optional, recommended).** Without them the Inbox reads attention state from up to 12 per-mission status calls and says "Checked 12 of 40". Two additive changes would remove the fan-out and the 12 limit: (a) the worker's mission summary carries `attention` (the existing `needs_attention` kind and message) and `task_counts`; (b) a bounded `mission.activity_line` operation returning one sanitized line of at most 160 characters for the "doing now" text. Both are additive to protocol v1. Recommendation: build the front end first on the fan-out and file the backend change as a follow-up. A third small fix: heartbeat events should not advance the coordinator's replication comparison that sets `stale`.
-2. **Bundle caps.** Approve a separate `routes` cap in `budget.json` (to be measured after WP-5 and recorded as D18) in exchange for moving seven routes out of the first load; initial caps stay unchanged.
-3. **Free-text steering API.** The composer types into the live terminal. A web "message to the provider" without taking control would need a new typed operation. Not planned.
-4. **Mission creation and snooze (DEV-10, DEV-11).** Confirm both stay out of PRD-037.
-5. **Inbox preview content (DEV-4, DEV-5).** Confirm the plain `task.output` tail is acceptable instead of a live terminal preview.
+The questions of the design phase were answered by the operator and the overseer; D28 in `DECISIONS.md` records them with the six redesign decisions.
+
+1. **Backend fields for the Inbox.** Done by WP-7: the mission summary carries `attention` and `task_counts`, and `mission.activity_line` returns the one-line "doing now" text. The DOG-021 digest covers the heartbeat and replication point; the Inbox rows switch to the digest after PR #35 merges. Until then the fan-out of up to 12 status reads stays as the fallback for an older worker.
+2. **Bundle caps.** Approved: a separate `routes` cap in `budget.json` at the figures measured in D18; the initial caps stay unchanged.
+3. **Free-text steering API.** Not in 1.5.0. A web "message to the provider" without taking control needs a new typed operation; it is a follow-up.
+4. **Mission creation and snooze (DEV-10, DEV-11).** Both stay out of PRD-037.
+5. **Inbox preview content (DEV-4, DEV-5).** The plain `task.output` tail is accepted instead of a live terminal preview.

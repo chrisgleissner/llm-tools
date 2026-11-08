@@ -20,7 +20,10 @@ test("a reconnect shorter than the debounce never shows the banner; a longer out
   await expect(banner, "before the debounce has passed").toBeHidden();
   await page.clock.runFor(2500);
   await expect(banner).toBeVisible();
-  await expect(banner).toContainText(/as of \d{1,2}:\d{2} \(\d+s ago\)/);
+  await expect(banner).toContainText(/as of \d{1,2}:\d{2}/);
+  await expect(banner, "no age while the data is younger than 10 s").not.toContainText(/ago/);
+  await page.clock.runFor(6000);
+  await expect(banner, "the age appears once the data is 10 s old").toContainText(/\(\d+s ago\)/);
   await expect(page.locator("main")).toHaveAttribute("data-conn", /reconnecting|offline/);
   await expect(page.locator("#conn")).toContainText(/Reconnecting|Offline/);
   app.restoreStream();

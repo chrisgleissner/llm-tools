@@ -13,10 +13,10 @@ uxr({ t: "T38", uxr: ["UXR-028"], needs: [...NEEDS] }, "the terminal font is at 
   const font = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector("#terminal-host .xterm-rows") as Element).fontSize));
   expect(font, "terminal font size in px").toBeGreaterThanOrEqual(12);
   const keys = page.locator("#terminal-keys button:visible");
-  await expect(keys).toHaveCount(7);
-  for (const key of await keys.all()) if ((await key.textContent())?.trim() !== "...") await expect(key, "key bar keys are disabled in view mode").toBeDisabled();
+  await expect(keys, "the key bar is hidden until control (D28.5)").toHaveCount(0);
   await page.locator('[data-action="take-control"]').click();
   await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "write");
+  await expect(keys).toHaveCount(7);
   await expect(page.locator("#key-esc")).toBeEnabled();
   await evidence(page, info, ["UXR-028"], "key-bar");
 });

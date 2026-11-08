@@ -9,8 +9,12 @@
 .page-state:empty, .more:empty { display: none; }
 .section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-1) var(--sp-3); margin-block: var(--sp-3) var(--sp-1); }
 .section-head h2 { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
+[data-section="needs-you"] .rows { --pillw: 8.5rem; }
+[data-section="running"] .rows { --pillw: 6.5rem; }
 .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); container-type: inline-size; }
 .quiet { margin-block: var(--sp-4); }
+/* On a phone the line may take two lines once the kinds that need you are known ("5 failed, 1 awaits approval, 5 need input"); the room is kept from the start so the rows do not move. */
+@media (max-width: 47.99rem) { [data-l0="inbox.answer"] { min-block-size: calc(2 * var(--lh-sm)); } }
 /* Phones and tablets: tighter spacing around the page head so the first rows stay above the fold (the addendum's fold budget). */
 @media (max-width: 63.99rem) {
   .answer { margin-block-end: var(--sp-2); }
@@ -20,7 +24,7 @@
 /* MissionRow: pill, title, reason or cells, inline actions, menu. The layout follows the width of the list, not the device. */
 .mrow {
   display: grid; align-items: center; column-gap: var(--sp-3); padding: 4px var(--sp-3);
-  grid-template-columns: 11rem minmax(0, 1fr) auto auto; grid-template-areas: "pill title actions menu" "pill sub actions menu";
+  grid-template-columns: var(--pillw, 11rem) minmax(0, 1fr) auto auto; grid-template-areas: "pill title actions menu" "pill sub actions menu";
   background: var(--surface-1); border: 1px solid var(--border); border-inline-start: 3px solid var(--border); border-radius: var(--r-2);
 }
 .mrow[data-layout="cells"] { grid-template-areas: "pill title sub menu"; padding-block: 3px; }
@@ -43,7 +47,7 @@
 .row-menu { grid-area: menu; }
 /* From 60rem an Inbox row is one line: pill, title, reason and age, actions, menu. */
 @container (min-width: 60rem) {
-  .mrow[data-layout="stack"] { grid-template-columns: 11rem minmax(0, 1fr) minmax(0, 1.1fr) auto auto; grid-template-areas: "pill title sub actions menu"; }
+  .mrow[data-layout="stack"] { grid-template-columns: var(--pillw, 11rem) minmax(0, 1fr) minmax(0, 1.1fr) auto auto; grid-template-areas: "pill title sub actions menu"; }
 }
 /* From 36rem to 48rem (a tablet) a row without inline actions keeps two lines: the provider, worker and age move up beside the title, and
    the reason takes the whole second line. Without this, a running row wraps its reason and meta over three lines. */

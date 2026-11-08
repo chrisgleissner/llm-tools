@@ -16,7 +16,7 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F2: a failed Inbox row n
   await expect(row).toContainText(/Task 2 failed/);
   const text = (await row.innerText()).toLowerCase();
   expect(text, "commands for a shell are not shown in the console").not.toMatch(/llm-bridge|inspect with/);
-  await expect(page.locator("[data-q=next]")).toHaveText("Retry or open");
+  await expect(page.locator("[data-q=next]")).toHaveText("1 failed, 1 awaits approval"); // R4: the kinds, not an instruction
 });
 
 // ---- F3: one count of what needs the operator on every page ---------------------------------------------------------
@@ -41,7 +41,7 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F3: the Inbox badge, the
 uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F4: a successful Pause says 'Mission paused.', with no 'Applied.' prefix", async ({ page }) => {
   await openApp(page, DENSE, DENSE_CALM_URL);
   await page.locator('[data-action="pause"]').click();
-  await expect(page.locator(".toast")).toHaveText(/^Mission paused\.$/);
+  await expect(page.locator(".toast")).toHaveText(/^Mission paused\.\s*Undo$/); // with the Undo button (D28.3)
 });
 
 uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F4: a refused Pause says what could not be done, not 'Rejected.' and not the fixture text", async ({ page }) => {

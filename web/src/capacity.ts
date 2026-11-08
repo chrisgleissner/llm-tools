@@ -1,5 +1,5 @@
 // Capacity chips in the header (spec 7.1): the lowest-remaining scope of each provider, from `usage.snapshot` of the first online worker.
-// Chips are always neutral (text, a small meter, no attention colour) and open Usage. Below 30rem of available width only the limiting provider shows.
+// A chip is neutral (text, a small meter) while its provider is ready; while the provider waits for capacity it takes the attention tone and says when it resets. A chip opens Usage. Below 30rem of available width only the limiting provider shows.
 import * as api from "./api";
 import { absTime, h, relFromMs } from "./dom";
 import { store, subscribe } from "./store";
@@ -12,6 +12,10 @@ interface Chip {
   scope: string;
   percent: number;
   title: string;
+  /** The provider is not ready: it waits for capacity. */
+  waiting: boolean;
+  /** "14:25", the reset of the limiting scope; "" when unknown. */
+  reset: string;
 }
 
 const label = (id: string): string => id.charAt(0).toUpperCase() + id.slice(1);
@@ -25,8 +29,9 @@ export function chipsFrom(snapshot: api.UsageSnapshot | null, now = Date.now()):
     const low = scopes.reduce<api.UsageScope | null>((a, s) => (a === null || (s.remaining_percent as number) < (a.remaining_percent as number) ? s : a), null);
     if (!low) continue;
     const percent = Math.round(low.remaining_percent as number);
-    const reset = low.reset_epoch ? `. Resets ${absTime(new Date(low.reset_epoch * 1000)).slice(11)} (${relFromMs(low.reset_epoch * 1000, now)})` : "";
-    out.push({ provider: label(p.provider), scope: low.scope, percent, title: `${label(p.provider)} ${low.scope}: ${percent}% left${reset}` });
+    const at = low.reset_epoch ? absTime(new Date(low.reset_epoch * 1000)).slice(11) : "";
+    const reset = at ? `. Resets ${at} (${relFromMs((low.reset_epoch as number) * 1000, now)})` : "";
+    out.push({ provider: label(p.provider), scope: low.scope, percent, title: `${label(p.provider)} ${low.scope}: ${percent}% left${reset}`, waiting: p.ready === false, reset: at });
   }
   return out.sort((a, b) => a.percent - b.percent);
 }
@@ -45,7 +50,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     el.classList.remove("tight");
     el.replaceChildren(
       ...(narrow ? chips.slice(0, 1) : chips).map((c) =>
-        h("a", { class: "cap-chip", href: "/usage", title: c.title }, h("span", {}, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), ` ${c.percent}% left`),
+        h("a", { class: `cap-chip${c.waiting ? " waiting" : ""}`, href: "/usage", title: c.title }, h("span", {}, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), h("span", {}, h("span", { class: "cap-pct" }, ` ${c.percent}% left${c.waiting && c.reset ? "," : ""}`), c.waiting && c.reset ? h("span", {}, ` resets ${c.reset}`) : null)),
       ),
     );
     el.classList.toggle("tight", (el.firstElementChild?.getBoundingClientRect().left ?? 0) < el.getBoundingClientRect().left - 0.5);

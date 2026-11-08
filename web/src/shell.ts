@@ -314,6 +314,7 @@ const ago = (ms: number): string => {
 };
 const FIRST_CONNECT_MS = 10_000; // the first connection of a page load gets longer: a slow device is not a dropped stream
 const SHOW_AFTER_MS = 4000; // a reconnect shorter than this never shows the banner
+const AGE_AFTER_MS = 10_000; // the banner names the age of the data only once it is 10 s old: "(4s ago)" says nothing a short outage needs
 const HIDE_AFTER_MS = 1000; // and a recovery must hold this long before the banner goes, so a bouncing stream does not blink it
 
 type Shown = "connecting" | "live" | "reconnecting" | "offline";
@@ -365,8 +366,11 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   let hideTimer = 0;
   let ageTimer = 0;
   const paintAge = (): void => {
-    if (store.lastSync) bannerAge.textContent = `(${ago(store.lastSync)})`;
+    window.clearTimeout(ageTimer);
+    const wait = store.lastSync ? AGE_AFTER_MS - (Date.now() - store.lastSync) : 0;
+    bannerAge.textContent = store.lastSync && wait <= 0 ? `(${ago(store.lastSync)})` : "";
     main.setAttribute("data-asof", store.lastSync ? new Date(store.lastSync).toISOString() : "");
+    ageTimer = window.setTimeout(paintAge, wait > 0 ? wait : 15000);
   };
   const paintConn = (): void => {
     conn.dataset["s"] = shown;
@@ -374,13 +378,12 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     connText.className = shown === "live" || shown === "connecting" ? "conn-text sr-only" : "conn-text";
     main.dataset["conn"] = shown;
     const down = shown === "reconnecting" || shown === "offline";
-    window.clearInterval(ageTimer);
+    window.clearTimeout(ageTimer);
     if (!down) return banner.replaceChildren();
     const at = store.lastSync ? absTime(new Date(store.lastSync)).slice(11) : "";
     bannerText.textContent = `${shown === "offline" ? "Disconnected" : "Reconnecting"}. ${at ? `Showing data as of ${at}` : "No data yet"} `;
     banner.replaceChildren(icon("plugOff", 18), bannerText, bannerAge);
     paintAge();
-    ageTimer = window.setInterval(paintAge, 15000);
   };
   const onConn = (): void => {
     if (store.conn === "live") {
@@ -524,7 +527,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       caps.dispose();
       mo?.disconnect();
       for (const t of [showTimer, hideTimer]) window.clearTimeout(t);
-      window.clearInterval(ageTimer);
+      window.clearTimeout(ageTimer);
       window.clearInterval(asOf);
       document.title = document.title.replace(prefix, "");
       if (iconLink) iconLink.href = faviconHref(false);

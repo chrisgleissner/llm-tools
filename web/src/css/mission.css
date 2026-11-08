@@ -99,9 +99,11 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .head-state { grid-column: 2; grid-row: 1; justify-self: end; }
   .head-id h1 { grid-row: 2; grid-column: 1 / -1; margin: 0 0 var(--sp-1); }
   .head-actions { grid-column: 1 / -1; grid-row: 3; }
-  .head-actions [data-action="pause"] > span, .head-actions [data-action="stop"] > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .head-actions .btn { padding-inline: var(--sp-2); } /* Approve, Pause, Stop and the menu share one row at 353 px */
   body[data-kb] .crumbs, body[data-kb] .mission-answer, body[data-kb] .head-actions, body[data-kb] .head-state, body[data-kb] .mission-tabs { display: none; }
 }
+/* At 320 px the labels of Pause and Stop do not fit beside Take control: icon only (the label stays for screen readers, spec 6.1). */
+@media (max-width: 20.99rem) { .head-actions :is([data-action="pause"], [data-action="stop"]) > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } }
 /* Below the two-pane layout the session takes the height under the header and tabs. */
 @media (max-width: 59.99rem) {
   .mission-session > [data-pane] { block-size: max(14rem, calc(100svh - var(--head-h) - var(--tab-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; } /* never less than the pane's own chrome, so nothing in it is clipped */

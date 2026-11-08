@@ -18,12 +18,12 @@ const TOAST: Record<ToastKind, IconName> = { info: "info", error: "alert", atten
  * Report what happened to the operator's own request as one toast, in words: "Mission paused." on success, "Could not pause the mission. The worker
  * refused the change." on a refusal. `did` is the past tense ("Mission paused"), `action` the verb phrase ("pause the mission"). Returns whether it went through.
  */
-export function reportOutcome(r: { outcome: string; message: string }, did: string, action: string): boolean {
+export function reportOutcome(r: { outcome: string; message: string }, did: string, action: string, undo?: ToastAction): boolean {
   const ok = r.outcome === "applied" || r.outcome === "accepted";
   const text = r.outcome === "applied" ? `${did}.` : r.outcome === "accepted" ? `Asked the worker to ${action}.`
     : r.outcome === "uncertain" ? `The worker did not confirm: ${action}. Refresh and check before trying again.`
     : `Could not ${action}. ${r.message || (r.outcome === "rejected" ? "The worker refused the change." : "Nothing was changed.")}`;
-  announce(text, r.outcome as ToastKind);
+  announce(text, r.outcome as ToastKind, "", ok && undo ? { action: undo, ms: UNDO_MS } : {});
   return ok;
 }
 
@@ -52,6 +52,7 @@ interface ToastSpec {
   kind: ToastKind;
   detail: string;
   action: ToastAction | undefined;
+  ms: number | undefined;
 }
 
 export interface ToastAction {
@@ -62,13 +63,16 @@ export interface ToastAction {
 export interface ToastOptions {
   /** Button inside the toast, for example "Open" on a needs-you toast. A toast with an action stays until dismissed. */
   action?: ToastAction;
+  /** Makes a toast with an action expire after this many milliseconds instead of staying until dismissed (the Undo toast, spec 6.4). */
+  ms?: number;
 }
 
 const queue: ToastSpec[] = [];
 const SUCCESS_MS = 4000;
+const UNDO_MS = 8000;
 const isPhone = () => window.matchMedia("(max-width: 47.99rem)").matches;
 const maxVisible = () => (isPhone() ? 1 : 2);
-const sticky = (spec: ToastSpec) => spec.kind === "error" || spec.kind === "failed" || spec.kind === "uncertain" || spec.kind === "rejected" || spec.action !== undefined;
+const sticky = (spec: ToastSpec) => spec.kind === "error" || spec.kind === "failed" || spec.kind === "uncertain" || spec.kind === "rejected" || (spec.action !== undefined && spec.ms === undefined);
 
 function showToast(spec: ToastSpec): void {
   if (!toastBox) return;
@@ -91,10 +95,10 @@ function showToast(spec: ToastSpec): void {
   };
   close.addEventListener("click", dismiss);
   if (!sticky(spec)) {
-    // Success and information toasts last 4 s and wait while the pointer or keyboard focus is on them.
+    // Success and information toasts last 4 s (an Undo toast 8 s) and wait while the pointer or keyboard focus is on them.
     const arm = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(dismiss, SUCCESS_MS);
+      timer = window.setTimeout(dismiss, spec.ms ?? SUCCESS_MS);
     };
     const hold = () => window.clearTimeout(timer);
     el.addEventListener("mouseenter", hold);
@@ -133,7 +137,7 @@ export function announce(message: string, kind: ToastKind = "info", detail = "",
     const active = document.activeElement as HTMLElement | null;
     if (!document.hasFocus() || active?.closest("[data-composer], .xterm, textarea, input")) return;
   }
-  queue.push({ message, kind, detail, action: opts.action });
+  queue.push({ message, kind, detail, action: opts.action, ms: opts.ms });
   pump();
 }
 

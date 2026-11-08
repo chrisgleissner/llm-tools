@@ -5,7 +5,7 @@ import { button, deferSkeleton, disclosure, emptyState, errorBlock, h } from "..
 import { icon } from "../icons";
 import { onStream, refresh, store, subscribe } from "../store";
 import {
-  attentionCount, attentionGaps, attentionPending, failedTaskOf, hasLine, hasStatus, itemOf, loadLines, loadRowEvidence, loadStatuses, missionHref, missionRow, onDetails,
+  attentionCount, attentionGaps, attentionPending, hasLine, hasStatus, itemOf, loadLines, loadRowEvidence, loadStatuses, missionHref, missionRow, onDetails,
   reconcile, rowSig, sectionOf, stateOrder, taskOf, type Item, type RowOptions, type RowSpec,
 } from "../rows";
 
@@ -16,8 +16,12 @@ const PREVIEW_LINES = 20;
 const WEEK_MS = 7 * 86400000;
 
 const updatedMs = (i: Item) => Date.parse(i.entry.mission.updated_at ?? "") || 0;
-/** The order of the Needs you group (spec 8.3): failed, approval, input; oldest first within each. */
-const needsOrder = (items: Item[]): Item[] => items.filter((i) => sectionOf(i.state) === "needs-you").sort((a, b) => (a.state.id === "failed" ? 0 : a.state.id === "needs-approval" ? 1 : 2) - (b.state.id === "failed" ? 0 : b.state.id === "needs-approval" ? 1 : 2) || updatedMs(a) - updatedMs(b));
+const DAY_MS = 86400000;
+/** A failure that has been waiting for more than a day: it is grouped after the other rows instead of leading them (spec 8.3). */
+const isOlderFailure = (i: Item) => i.state.id === "failed" && updatedMs(i) > 0 && Date.now() - updatedMs(i) > DAY_MS;
+const rank = (i: Item) => (i.state.id === "failed" ? (isOlderFailure(i) ? 3 : 0) : i.state.id === "needs-approval" ? 1 : 2);
+/** The order of the Needs you group (spec 8.3): failures of the last 24 hours, approval, input, then older failures; oldest first within each. */
+const needsOrder = (items: Item[]): Item[] => items.filter((i) => sectionOf(i.state) === "needs-you").sort((a, b) => rank(a) - rank(b) || updatedMs(a) - updatedMs(b));
 // The control characters of terminal output are removed before it is shown as text.
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]|${String.fromCharCode(27)}[()][0-9A-B]`, "g");
 const CONTROL = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(8)}${String.fromCharCode(11)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`, "g");
@@ -26,6 +30,7 @@ const plain = (s: string) => s.replace(ANSI, "").replace(/\r/g, "").replace(CONT
 export function inbox(root: HTMLElement): () => void {
   let disposed = false;
   let expandedNeeds = false;
+  let expandedOlder = false;
   let expandedRunning = false;
   let selected = "";
   let loadError = "";
@@ -97,7 +102,7 @@ export function inbox(root: HTMLElement): () => void {
     const l = everything ? t.lines : t.lines.filter((e) => !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
-    void loadRowEvidence(needsOrder(all()).slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
+    void loadRowEvidence(needsOrder(all()).filter((i) => expandedOlder || !isOlderFailure(i)).slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
   }
 
   async function afterAction(item: Item): Promise<void> {
@@ -167,8 +172,10 @@ export function inbox(root: HTMLElement): () => void {
     const checking = !store.loaded || (pending && needs.length === 0);
     need.textContent = checking ? "Checking..." : count.n ? `${count.text} ${count.n === 1 && !count.partial ? "needs" : "need"} you` : "Nothing needs you";
     what.textContent = !store.loaded ? "" : running.length ? `${running.length} running` : workers === 0 ? "No workers yet" : items.length === 0 ? "No missions yet" : "Nothing is running";
-    const first = needs[0]?.state.id;
-    next.textContent = checking ? "Reading missions" : first === "failed" ? (needs.some((i) => i.state.id === "failed" && failedTaskOf(i) !== null) ? "Retry or open" : "Open to retry") : first === "needs-approval" ? "Approve or reject" : first === "needs-input" ? "Answer in the mission" : workers === 0 ? "Add a worker" : items.length === 0 ? "Create a mission" : "Nothing to do";
+    // What the rows are, in numbers, instead of an instruction: "2 failed, 1 awaits approval".
+    const n = (id: string) => needs.filter((i) => i.state.id === id).length;
+    const kinds = [[n("failed"), "failed", "failed"], [n("needs-approval"), "awaits approval", "await approval"], [n("needs-input"), "needs input", "need input"]] as const;
+    next.textContent = checking ? "Reading missions" : needs.length ? kinds.filter(([c]) => c > 0).map(([c, one, many]) => `${c} ${c === 1 ? one : many}`).join(", ") : workers === 0 ? "Add a worker" : items.length === 0 ? "Create a mission" : "Nothing to do";
 
     // loading, error and empty states
     if (!store.loaded) {
@@ -193,10 +200,17 @@ export function inbox(root: HTMLElement): () => void {
     const populated = workers > 0 && items.length > 0;
 
     needsSection.hidden = !populated || needs.length === 0;
-    needsHead.textContent = `Needs you (${needs.length})`;
-    const shownNeeds = expandedNeeds ? needs : needs.slice(0, NEEDS_VISIBLE);
-    reconcile(needsList, specs(shownNeeds, "needs-you"));
-    moreButton(needsMore, needs.length - shownNeeds.length, expandedNeeds, () => { expandedNeeds = !expandedNeeds; render(); }, "needs-you");
+    needsHead.textContent = `Needs you (${count.text})`;
+    // Older failures are one row, "3 older failures" with a Show button; Show lists them after that row.
+    const older = needs.filter(isOlderFailure);
+    const entries = [...specs(needs.filter((i) => !isOlderFailure(i)), "needs-you")];
+    if (older.length) {
+      entries.push({ key: "older-failures", sig: `${older.length}|${expandedOlder}`, build: () => olderRow(older.length) });
+      if (expandedOlder) entries.push(...specs(older, "needs-you"));
+    }
+    const shownNeeds = expandedNeeds ? entries : entries.slice(0, NEEDS_VISIBLE);
+    reconcile(needsList, shownNeeds);
+    moreButton(needsMore, entries.length - shownNeeds.length, expandedNeeds, () => { expandedNeeds = !expandedNeeds; render(); }, "needs-you");
 
     runSection.hidden = !populated || running.length === 0;
     runHead.textContent = `Running (${running.length})`;
@@ -216,6 +230,12 @@ export function inbox(root: HTMLElement): () => void {
       ...(populated && count.note ? [h("span", { class: "checked" }, `${finished.length ? " · " : ""}${count.note}`)] : []),
     );
     fetchDetails(false);
+  }
+
+  function olderRow(n: number): HTMLElement {
+    const toggle = button(expandedOlder ? "Hide" : "Show", () => { expandedOlder = !expandedOlder; render(); }, { kind: "small", id: "show-older-failures" });
+    toggle.setAttribute("aria-expanded", String(expandedOlder));
+    return h("li", { class: "section-head", "data-l0": "inbox.older-failures", "data-older-failures": String(n) }, h("span", {}, `${n} older ${n === 1 ? "failure" : "failures"}`), toggle);
   }
 
   function moreButton(host: HTMLElement, hidden: number, expanded: boolean, toggle: () => void, id: string): void {

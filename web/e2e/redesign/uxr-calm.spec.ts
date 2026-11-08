@@ -94,16 +94,20 @@ uxr({ t: "T27", uxr: ["UXR-042"], needs: [...FOUNDATIONS, "WP-1"] }, "browser no
 
 // ---- T28 -----------------------------------------------------------------------------------------------------------
 uxr({ t: "T28", uxr: ["UXR-042", "UXR-034"], needs: [...FOUNDATIONS, "WP-3"] }, "when the stream drops the page keeps its data, shows 'as of', disables mutations and recovers", async ({ page }, info) => {
-  const app = await openApp(page, { auth: "in", dataset: "dense", terminalScreen: true }, `/missions/alpha/${MISSIONS[0]!.mission.id}`);
+  // A fake clock, not the fixed one: the age of the data appears at 10 s (D28.6), so the clock has to move.
+  const app = await openApp(page, { auth: "in", dataset: "dense", terminalScreen: true, fakeClock: true }, `/missions/alpha/${MISSIONS[0]!.mission.id}`);
   const header = page.locator('[data-entity^="mission:"]').first();
   await expect(header).toBeVisible();
   const pillBefore = await header.locator(".pill").first().textContent();
   const textBefore = (await page.locator("main").innerText()).length;
   app.dropStream();
   const banner = page.locator("#conn-banner");
+  await page.clock.runFor(5500);
   await expect(banner).toBeVisible({ timeout: 20_000 });
   await expect(banner).toContainText(/as of \d{1,2}:\d{2}/i);
-  await expect(banner).toContainText(/ago/i);
+  await expect(banner, "no age before the data is 10 s old").not.toContainText(/ago/i);
+  await page.clock.runFor(6000);
+  await expect(banner, "the age appears at 10 s").toContainText(/ago/i);
   expect(await page.locator("[data-asof]").count(), "live regions carry data-asof").toBeGreaterThan(0);
   expect((await header.locator(".pill").first().textContent()), "the last-known state is kept, not recomputed to Offline").toBe(pillBefore);
   expect((await page.locator("main").innerText()).length, "the page is not blanked").toBeGreaterThan(textBefore * 0.6);
@@ -114,6 +118,7 @@ uxr({ t: "T28", uxr: ["UXR-042", "UXR-034"], needs: [...FOUNDATIONS, "WP-3"] }, 
   }
   await evidence(page, info, ["UXR-042"], "disconnected");
   app.restoreStream();
+  await page.clock.runFor(20_000);
   await expect(banner).toBeHidden({ timeout: 30_000 });
 });
 

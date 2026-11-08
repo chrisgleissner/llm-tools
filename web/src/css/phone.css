@@ -39,9 +39,9 @@
   html .mission-session > [data-pane] { block-size: max(var(--pane-min, 14rem), calc(100svh - var(--head-h) - var(--tab-h) - var(--dock-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; }
 }
 
-/* 640 px tall and below: keys that cannot be used (view only) give their row to the terminal; taking control brings them back. At 568 px: the session bar is one row of
+/* On a phone, at every height: keys that cannot be used (view only) give their row to the terminal; taking control brings them back. At 568 px tall and below: the session bar is one row of
    icon buttons (the labels stay for screen readers), the terminal keeps 6 rows, and the pane is as tall as the space under the head (at least 12.5rem), so the composer ends above the dock. */
-@media (max-width: 47.99rem) and (min-height: 30.01rem) and (max-height: 40rem) { html .keybar:has(> .key:disabled) { display: none; } }
+@media (max-width: 47.99rem) { html .keybar:has(> .key:disabled) { display: none; } }
 @media (max-width: 47.99rem) and (min-height: 30.01rem) and (max-height: 36rem) {
   html .session-bar { flex-wrap: nowrap; padding-block: 1px; }
   html .term-status { flex: 1 1 0; min-inline-size: 0; }

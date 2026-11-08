@@ -25,6 +25,8 @@ export interface PageCtx {
   status(): string;
   /** Take control of the session to answer the provider (the Answer button of a task that needs input). */
   answer(): void;
+  /** The task the header's primary action is about (Approve or Retry), or undefined: its row has no inline copy of that action. */
+  subject(): number | undefined;
   /** The verifier result of a task whose evidence was read ("" when none is recorded): the header quotes it. */
   verified(ordinal: number, text: string): void;
   /** Send a task change, toast the outcome once ("Approved task 2" or "Could not approve task 2. ..."), then reload. */

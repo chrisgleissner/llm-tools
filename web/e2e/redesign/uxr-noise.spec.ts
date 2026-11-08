@@ -55,7 +55,8 @@ uxr({ t: "T17", uxr: ["UXR-011"], needs: [...FOUNDATIONS, "WP-3"] }, "one operat
   app.pushEvent({ kind: "mission-status", mission_id: DENSE_CALM_URL.split("/")[3]!, data: { from: "RUNNING", to: "PAUSED" } });
   await page.clock.runFor(1500);
   await expect(page.locator(".toast"), "the stream event of the same action adds no second toast").toHaveCount(1);
-  await page.locator(".toast button").first().click();
+  // The Pause toast has an Undo button (D28.3), so the dismiss button is chosen by its name.
+  await page.getByRole("button", { name: "Dismiss notification" }).click();
   await expect(page.locator(".toast")).toHaveCount(0);
 });
 
@@ -73,7 +74,8 @@ uxr({ t: "T17", uxr: ["UXR-011"], needs: [...FOUNDATIONS, "WP-3"] }, "toasts: at
     return targets.filter((t) => boxes.some((b) => b.left < t.r.right && b.right > t.r.left && b.top < t.r.bottom && b.bottom > t.r.top)).map((t) => t.name);
   });
   expect(overlaps, "primary controls covered by a toast").toEqual([]);
-  await page.clock.runFor(10_000);
+  // Success toasts last 4 s and the Undo toast of Pause 8 s; on a phone one shows at a time and the rest wait, so the last one ends after 24 s.
+  await page.clock.runFor(30_000);
   await expect(page.locator(".toast"), "success toasts expire").toHaveCount(0);
   expect(app.operations().filter((o) => o === "mission.pause" || o === "mission.resume").length).toBeGreaterThanOrEqual(2);
 });

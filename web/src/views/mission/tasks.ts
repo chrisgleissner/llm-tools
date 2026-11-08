@@ -1,10 +1,9 @@
 // The Tasks panel (spec 8.1): TaskRow with at most two visible buttons and an overflow menu, completed tasks grouped under a
 // disclosure, the inline "Add task" field, and the Evidence block of the selected task.
 import * as api from "../../api";
-import { button, copyText, disclosure, emptyState, h, hooks, keepFocus, setBusy } from "../../dom";
+import { button, copyText, disclosure, emptyState, h, hooks, keepFocus, setBusy, statePill } from "../../dom";
 import { menu, type MenuItem } from "../../menu";
 import { deriveState } from "../../state";
-import { statePill } from "../../dom";
 import { type TaskActions } from "./actions";
 import { evidenceBody } from "./evidence";
 import type { PageCtx, Task } from "./types";
@@ -138,6 +137,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
   }
 
   function inlineButtons(t: Task, state: ReturnType<typeof rowState>): HTMLElement[] {
+    if (t.ordinal === ctx.subject()) return []; // the header offers this action (spec 6.1: one place per viewport)
     const why = ctx.blocked();
     // The header holds the one primary button of the page (the same Approve or Retry); the buttons of a row are secondary.
     const b = (label: string, fn: () => void, kind: string, action: string): HTMLElement =>
@@ -230,12 +230,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
     evidenceBox.hidden = false;
     const view = evidenceBody(ctx.workerName, ctx.missionId, t, true);
     void view.done.then((e) => ctx.verified(t.ordinal, e.verifier));
-    const state = rowState(t);
-    evidenceBox.replaceChildren(
-      h("h3", {}, `Evidence, task ${t.ordinal}`),
-      view.el,
-      ...(state.id === "needs-approval" ? [h("div", { class: "actions" }, ...inlineButtons(t, state))] : []),
-    );
+    evidenceBox.replaceChildren(h("h3", {}, `Evidence, task ${t.ordinal}`), view.el);
   }
 
   const el = h("div", { class: "tasks-panel stack" }, headBox, form, notices, listBox, evidenceBox);
