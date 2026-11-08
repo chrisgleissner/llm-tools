@@ -3103,6 +3103,38 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
             }
             "mission.agents"
         }
+        "sessions" => {
+            let limit = q.get("limit").map_or(Ok(100), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| (1..=1000).contains(n))
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be an integer from 1 to 1000"))
+            })?;
+            let mut offset = q.get("offset").map_or(Ok(0), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "offset must be a non-negative integer"))
+            })?;
+            let mission = q.get("mission").map(String::as_str).unwrap_or("");
+            if let Some(cursor) = q.get("cursor") {
+                if q.contains_key("offset") {
+                    return Err(err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor cannot be combined with offset"));
+                }
+                let filters = format!("worker={worker};mission={mission};resource=operations;limit={limit}");
+                offset = u64::try_from(
+                    crate::cursor::read(&st.cursor_key, "missions/operations", &filters, cursor)
+                        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "invalid or mismatched page cursor"))?,
+                )
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "page cursor is out of range"))?;
+            }
+            params.insert("mission".into(), json!(mission));
+            params.insert("limit".into(), json!(limit));
+            params.insert("offset".into(), json!(offset));
+            "session.list"
+        }
+        "usage" => "usage.snapshot",
         "gc" => {
             params = parse_body(&body.bytes)?;
             no_extra(&params, &["wait_ms"])?;
@@ -3122,6 +3154,10 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
         &["limit", "wait_ms"][..]
     } else if matches!(action.as_str(), "doctor" | "agents") {
         &["mission", "wait_ms"][..]
+    } else if action == "sessions" {
+        &["mission", "limit", "offset", "cursor", "wait_ms"][..]
+    } else if action == "usage" {
+        &["wait_ms"][..]
     } else {
         &[][..]
     };
@@ -3182,6 +3218,54 @@ async fn worker_agents_resource(
         WorkerResourceRequest {
             worker,
             action: "agents".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_sessions_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "sessions".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_usage_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "usage".into(),
             q,
             headers,
             body: Buffered {
@@ -4177,6 +4261,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/restore", &["POST"], Access::Session, ""),
     ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/sessions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/usage", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET"], Access::Authed, "admin"),
@@ -4441,6 +4527,8 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
         .route("/api/v1/workers/{name}/doctor", get(worker_doctor_resource))
         .route("/api/v1/workers/{name}/agents", get(worker_agents_resource))
+        .route("/api/v1/workers/{name}/sessions", get(worker_sessions_resource))
+        .route("/api/v1/workers/{name}/usage", get(worker_usage_resource))
         .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))

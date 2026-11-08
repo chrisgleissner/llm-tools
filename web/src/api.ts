@@ -230,11 +230,25 @@ function commandRequest(operation: string, missionId: string | null, params: Rec
 /** Submit a typed command to a worker and wait for its result. Throws ApiError on a failed outcome. */
 export async function command(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<CommandRow> {
   const row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
+  return checkedReadCommand(row);
+}
+
+function checkedReadCommand(row: CommandRow): CommandRow {
   if (row.state !== "done") throw new ApiError(202, "pending", "The worker has not answered yet; the command stays queued.");
   const r = row.result;
   if (r?.error) throw new ApiError(422, r.error.code, r.error.message);
   if (r?.outcome && ["rejected", "failed", "uncertain"].includes(r.outcome)) throw new ApiError(422, r.outcome, `The worker reported: ${r.outcome}.`);
   return row;
+}
+
+/** Read worker metadata through its documented resource endpoint. */
+export async function workerResource(target: string, resource: "sessions" | "usage", params: Record<string, unknown> = {}, waitMs = 10000): Promise<CommandRow> {
+  const query = new URLSearchParams({ wait_ms: String(waitMs) });
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) query.set(key, String(value));
+  }
+  const row = await get<CommandRow>(`/api/v1/workers/${encodeURIComponent(target)}/${resource}?${query}`);
+  return checkedReadCommand(row);
 }
 
 export interface MutationResult {

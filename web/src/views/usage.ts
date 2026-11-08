@@ -22,7 +22,7 @@ const pct = (v: number | null) => (v === null ? "-" : `${v}%`);
 export function usage(root: HTMLElement, query: URLSearchParams): () => void {
   return workerReadView(root, {
     title: "Provider usage",
-    operation: "usage.snapshot",
+    resource: "usage",
     query,
     render: (result, workerName) => {
       if (result["available"] === false) return h("p", { class: "notice", role: "status" }, `Usage is not available from ${workerName}: ${String(result["reason"] ?? "unknown reason")}.`);

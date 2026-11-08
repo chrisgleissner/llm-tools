@@ -276,6 +276,7 @@ pub fn caps() -> Value {
         {"operation": "task.list", "summary": "list tasks", "mutating": false, "needs_mission": true, "params": {"limit": {"type": "int"}, "offset": {"type": "int"}}},
         {"operation": "mission.events", "summary": "events", "mutating": false, "needs_mission": true, "params": {"after": {"type": "int"}, "limit": {"type": "int"}}},
         {"operation": "session.list", "summary": "operations", "mutating": false, "needs_mission": false, "params": {"mission": {"type": "str"}, "limit": {"type": "int"}, "offset": {"type": "int"}}},
+        {"operation": "usage.snapshot", "summary": "provider usage", "mutating": false, "needs_mission": false, "params": {}},
         {"operation": "task.amend", "summary": "amend", "mutating": true, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}, "prompt": {"type": "str", "required": true}}},
         {"operation": "task.add", "summary": "add", "mutating": true, "needs_mission": true, "params": {"title": {"type": "str", "required": true}}},
         {"operation": "mission.delete", "summary": "delete", "mutating": true, "needs_mission": true, "params": {"confirm": {"type": "bool", "required": false}}}
