@@ -2105,7 +2105,9 @@ async fn command_resource_redacts_private_request_and_event_fields() {
         "target": "w1",
         "params": {
             "cwd": "/private/request-path-sentinel",
-            "prompt": "private-request-prompt-sentinel"
+            "prompt": "private-request-prompt-sentinel",
+            "environment": {"PRIVATE_ENV_SENTINEL":"environment-secret-sentinel"},
+            "config": {"credential":"request-credential-sentinel"}
         }
     });
     env.srv.state.db.command_insert("w1", "mission.create", true, &request).unwrap();
@@ -2126,6 +2128,9 @@ async fn command_resource_redacts_private_request_and_event_fields() {
                             "terminal_output": "raw-terminal-sentinel",
                             "screen": "captured-terminal-screen-sentinel",
                             "provider_api_key": "provider-secret-sentinel",
+                            "access_token": "access-token-sentinel",
+                            "stdout": "stdout-terminal-sentinel",
+                            "transcript": "transcript-terminal-sentinel",
                             "summary": "mission created"
                         }
                     }]
@@ -2153,6 +2158,11 @@ async fn command_resource_redacts_private_request_and_event_fields() {
         "raw-terminal-sentinel",
         "captured-terminal-screen-sentinel",
         "provider-secret-sentinel",
+        "environment-secret-sentinel",
+        "request-credential-sentinel",
+        "access-token-sentinel",
+        "stdout-terminal-sentinel",
+        "transcript-terminal-sentinel",
     ] {
         assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
     }
