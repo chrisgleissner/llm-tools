@@ -843,6 +843,14 @@ async fn wait_offline(api: &Api) {
     .expect("worker goes offline");
 }
 
+fn assert_internal_503(problem: &Value) {
+    assert_eq!(problem["status"], 503);
+    assert_eq!(problem["error"]["code"], "internal");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/internal");
+    assert_eq!(problem["detail"], "internal server error");
+    assert!(problem["correlation_id"].as_str().is_some_and(|id| !id.is_empty()));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
     let env = boot().await;
@@ -855,13 +863,16 @@ async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
     // A read is refused at once, through /commands and through the resource routes, and leaves no journal entry.
     for (id, op) in [("read-1", "mission.list"), ("read-2", "mission.status")] {
         let (st, body) = api.post("/api/v1/commands", json!({"target": "w1", "request": request(id, op)})).await;
-        assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+        assert_eq!(st, 503);
+        assert_internal_503(&body);
         assert_eq!(api.get(&format!("/api/v1/commands/{id}")).await.0, 404, "a refused read must not be journaled");
     }
     let (st, body) = api.get("/api/v1/missions/m1?worker=w1").await;
-    assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+    assert_eq!(st, 503);
+    assert_internal_503(&body);
     let (st, body) = api.get("/api/v1/missions/m1/tasks?worker=w1").await;
-    assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+    assert_eq!(st, 503);
+    assert_internal_503(&body);
 
     // A write is queued as before and is delivered once after the reconnect, with no read before it.
     assert_eq!(api.post("/api/v1/commands", submit("write-1")).await.0, 202);
