@@ -253,6 +253,8 @@ class Client:
         elif op == "mission.status":
             query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}?{query}", timeout=wait + 15)
+        elif op == "mission.delete":
+            status, body = self.call("DELETE", f"{base}?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op in {"mission.start", "mission.resume", "mission.pause", "mission.stop", "mission.cancel", "mission.continue", "mission.suspend_until_credits"}:
             action = "suspend-until-credits" if op == "mission.suspend_until_credits" else op.removeprefix("mission.")
             status, body = self.call("POST", f"{base}/{action}?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
@@ -455,6 +457,9 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             "unsupported_options": unsupported_options,
         }
         return make("mission.create", params, with_mission=False), fmt.format_mission_created
+    if command == "mission" and args.mission_action == "delete":
+        request = make("mission.delete", {"confirm": True})
+        return request, lambda value: str(value.get("detail") or f"Deleted mission {fmt.short_id(request.mission_id or '')}")
     if command == "mission" and args.mission_action == "set":
         params = {
             "auto_continue": None if args.auto_continue is None else args.auto_continue == "on",
@@ -579,7 +584,7 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         operation = "task.dependency" if action == "dependencies" else "task.verify" if action == "approve" else f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
-    raise ValueError(f"{command} is not available with --target {target}; remote commands: mission create|list, restore, suspend-until-credits, status, events, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
+    raise ValueError(f"{command} is not available with --target {target}; remote commands: mission create|list|delete, restore, suspend-until-credits, status, events, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
 
 
 def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:
@@ -616,6 +621,30 @@ def _cancel_confirmed(target: str, args: argparse.Namespace, client: Client) -> 
     return _confirm_cancel(args, fmt.short_id(args.mission), fmt.clipped_name(name))
 
 
+def _delete_confirmed(target: str, args: argparse.Namespace, client: Client) -> bool:
+    """The local `mission delete` confirmation for a mission on ``target``; `--yes` skips it.
+
+    The mission's name comes from the worker. A mission the worker would refuse (running, paused) gets no
+    question: the worker's refusal is the answer. When the worker cannot answer, the question names the
+    reference alone.
+    """
+    from .bridge import _confirm_delete
+    from .bridge_states import DELETABLE_MISSION_STATUSES
+
+    if getattr(args, "yes", False):
+        return True
+    status, name = "", ""
+    try:
+        envelope = client.submit_resource(target, commands.CommandRequest("mission.status", mission_id=args.mission, target=target))
+        mission = ((envelope or {}).get("result") or {}).get("mission") or {}
+        status, name = str(mission.get("status") or ""), str(mission.get("name") or "")
+    except (RemoteError, ValueError, OSError):
+        pass
+    if status and status not in DELETABLE_MISSION_STATUSES:
+        return True
+    return _confirm_delete(args, fmt.short_id(args.mission), fmt.clipped_name(name))
+
+
 def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = None) -> int:
     """Execute one parsed command on ``target`` (a worker name or ``all``)."""
     as_json = bool(getattr(args, "json", False))
@@ -627,6 +656,8 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
         spec = commands.lookup(request.operation)
         if target != commands.ALL_TARGET:
             if args.command == "cancel" and not _cancel_confirmed(target, args, client):
+                return 2
+            if args.command == "mission" and getattr(args, "mission_action", "") == "delete" and not _delete_confirmed(target, args, client):
                 return 2
             resource_result = client.submit_resource(target, request)
             envelope = client.submit(target, request) if resource_result is None else resource_result

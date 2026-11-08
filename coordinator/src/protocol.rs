@@ -7,6 +7,8 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_EVENTS_PER_BATCH: usize = 500;
 pub const MAX_EVENT_BATCH_BYTES: usize = 128 * 1024;
 pub const MAX_MISSIONS_PER_HELLO: usize = 5000;
+/// Mission tombstones in one `events` message (PRD-038).
+pub const MAX_DELETED_MISSIONS_PER_MESSAGE: usize = 100;
 pub const COMMAND_SCHEMA_VERSION: u64 = 1;
 
 const ENVELOPE: [&str; 6] = ["v", "type", "id", "worker_id", "generation", "payload"];
@@ -50,7 +52,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
         "command.ack" => (&["request_id", "status"], &[]),
         "command.result" => (&["schema_version", "request_id", "operation", "outcome", "result", "error"], &[]),
-        "events" => (&["after", "through", "events"], &["mission_cursor", "missions"]),
+        "events" => (&["after", "through", "events"], &["mission_cursor", "missions", "deleted_missions"]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
         "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
@@ -169,6 +171,17 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                 };
                 if missions.iter().any(|m| !m.is_object()) {
                     return perr("invalid-message", "each mission snapshot must be an object");
+                }
+            }
+            if let Some(deleted) = p.get("deleted_missions") {
+                let ok = deleted
+                    .as_array()
+                    .is_some_and(|ids| ids.len() <= MAX_DELETED_MISSIONS_PER_MESSAGE && ids.iter().all(|id| id.as_str().is_some_and(valid_id)));
+                if !ok {
+                    return perr(
+                        "invalid-message",
+                        format!("deleted_missions must be a list of at most {MAX_DELETED_MISSIONS_PER_MESSAGE} mission IDs"),
+                    );
                 }
             }
             if let Some(mission_cursor) = p.get("mission_cursor") {
