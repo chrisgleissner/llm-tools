@@ -410,3 +410,66 @@ with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until 
 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
+
+## D28 Operator decisions on the redesign and the overseer's findings R1 to R6 (PRD-037)
+
+The numbers D19 to D27 belong to the release branch (PR #35); this entry is D28 so that both branches merge without a clash.
+
+The fresh-eyes critique (`watch/prd037-critique-outcome.md`, "Needs operator decision") left six questions. The operator
+answered: "I agree with all your suggestions and for the redesign decisions." The overseer then reviewed screenshots of
+the redesign at 72930c5 (`watch/prd037-overseer-review.md`, 2026-11-08 00:20), accepted decisions 1, 2, 3, 5 and 6,
+replaced decision 4 and added the findings R1 to R6. The decisions are implemented as follows. `web/e2e/redesign/uxr-decisions.spec.ts`
+(T48) guards each of them; the revert column says what was undone to see the guarding test fail (each check was run in the Playwright
+image with that one change made and then restored).
+
+| # | Decision | What changed | Guarding test (T48 unless stated) | Revert that fails it |
+|---|---|---|---|---|
+| 1 | Inbox order | Failures from the last 24 hours rank first, then approval, then input. Older failures are one row after the input rows, "N older failures", with a Show button (and Hide) that lists them below that row. The heading count includes them. | "D28.1: failures of the last 24 hours come first..." and "D28.1: failures older than 24 hours are one row..." | the older-failures group removed; approval and input ranks swapped; the preview not following a visible row |
+| 2 | Capacity chip | Neutral while the provider is ready. While `usage.snapshot` says the provider is not ready, the chip has the attention tone and "resets 12:25" in its text. At 320 px the scope, the meter and the visible percentage give way ("Claude resets 12:25", 12 px, 6 px padding); the percentage stays in the accessible text and the title. | "D28.2: a chip is neutral..." and "D28.2: the waiting chip... fits the header at 320 px"; T35 and T22 still pass | `waiting: false` in `chipsFrom` |
+| 3 | Stop beside Reject, Undo for Pause | Stop has no danger outline while Reject is in the same header and stays visible. Pause answers with "Mission paused." and an Undo button; the toast expires after 8 s (spec 6.4 has the exception) and Undo sends `mission.resume`. | "D28.3: Stop has no danger outline..." and "D28.3: Pause answers with an Undo toast..." | Stop always `danger`; the toast with an action sticky again |
+| 4 | Phone action bar | Replaced by the overseer, because UXR-007 needs Pause and Stop always visible. The primary label is "Approve" (the accessible name keeps "Approve task 2"). Pause and Stop show icon and label in 44 px buttons; padding is 8 px so Take control, Pause, Stop and the menu fit one row at 353 and 360 px. At 320 px (below 21 rem) Pause and Stop are icon only with their names for screen readers, because Take control, Pause, Stop and the menu need 315 px and 296 px are available. Stop is never moved into the menu. | "D28.4: the primary action reads 'Approve'..." and "D28.4: on a phone Pause and Stop are 44 px buttons..." | the label back to "Approve task 2"; the icon-only rule at every phone width |
+| 5 | Key bar | On a phone it is hidden until the client holds control, at every height (it was hidden only up to 640 px). T38 changes with it: hidden before control, six keys plus "..." after. | "D28.5: on a phone the key bar is hidden until control..." and T38 | the old height condition in `phone.css` |
+| 6 | Reconnect banner age | The banner says "Showing data as of 12:00" and adds "(15s ago)" once the data is 10 s old. `shell.spec.ts` and T28 wait for it; T28 uses the fake clock because the fixed clock never reaches 10 s. | `shell.spec.ts` "a reconnect shorter than the debounce..." and T28 | `AGE_AFTER_MS = 0` |
+
+The overseer's findings, registered here as UXR-047 to UXR-052 (`SPEC_STATUS.md` has no UXR group on this branch, so the
+lead registers them on the release branch from this table):
+
+| Row | Finding | Change | Guarding test | Revert that fails it |
+|---|---|---|---|---|
+| UXR-047 | R1: a phone opens the live session also while a task awaits approval | The product already opened on Session (`let tab = ... "session"`); the Tasks tab in the screenshots came from the screen definitions. A test now asserts the selected tab, the live pane and 14 rows with Approve in reach. | "R1: a mission that awaits approval opens on the Session tab on a phone..." | default tab "tasks" |
+| UXR-048 | R2: one place for the primary action | The header offers Approve, Reject and Retry for the task it is about; that task's row and the evidence block have no copy. A row of another task keeps its inline action and its menu; with several approvals the header says "Review N tasks" and each row keeps Approve and Reject. The evidence block has no buttons. | "R2: Approve and Reject are offered once..." and "R2: with several tasks awaiting approval..." | `subject` always undefined |
+| UXR-049 | R3: one number everywhere | The heading "Needs you (n)" uses the same figure as the badge, the tab title and the answer line; "+" appears only while some active mission is unread. | "R3: ... one number" and "R3: when every mission has been read..." | the heading using the row count |
+| UXR-050 | R4: the summary is not an instruction | The third part of the Inbox answer line names the kinds: "1 failed, 1 awaits approval". On phones the line keeps room for two lines from the start, so a late status does not move the rows (CLS). | "R4: the Inbox summary names the kinds..."; T47 F2 and T36 | the text "Retry or open" |
+| UXR-051 | R5: the pill column | The column is 8.5 rem in Needs you, 6.5 rem in Running and 11 rem elsewhere, so the title starts 40 px closer at 1440 px in Needs you and no pill reaches a title. | "R5: at 1440 px an Inbox title starts close to its pill..." | 11 rem in Needs you |
+| UXR-052 | R6: the phone search button | No fill and no border at rest, like the account button. | "R6: on a phone the search button has no fill and no border..." | the old border colour |
+
+UXR-043 to UXR-046 have no row in `SPEC_STATUS.md` on this branch; their guarding tests are `uxr-paths.spec.ts` (UXR-043, UXR-044),
+`uxr-keyboard.spec.ts` and `uxr-keyboard-only.spec.ts` (UXR-045) and `uxr-reach.spec.ts` (UXR-046).
+
+Answers to the questions of section 14 of `web-design-spec.md` (the section now records them):
+
+1. Backend fields for the Inbox: done by WP-7 and the DOG-021 digest. The Inbox rows switch to the digest after PR #35 merges.
+2. Routes cap: approved at the measured values of D18.
+3. Free-text steering without taking control: not in 1.5.0; a follow-up.
+4. Mission creation and snooze (DEV-10, DEV-11): out of PRD-037.
+5. Inbox preview content: the plain `task.output` tail is accepted.
+
+Existing tests changed only as far as the decisions require: T17 (the Pause toast has an Undo button, so its dismiss button is chosen by name,
+and the last queued toast of a phone ends after 24 s), T28 (fake clock, no age before 10 s, age after), T38 (key bar hidden before control),
+T47 F2 (the summary text) and F4 (the toast text includes Undo), `shell.spec.ts` (banner age), and the Reject screen (opens the
+dialog from the header, or from the header menu below 30 rem).
+
+Budget (bytes, raw / gzip, caps in `web/budget.json` not raised):
+
+| Measure | Before (72930c5) | Now | Cap |
+|---|---:|---:|---:|
+| Initial JavaScript | 79509 / 30905 | 80440 / 31313 | 91000 / 31750 |
+| Initial CSS | 33525 / 7451 | 33927 / 7547 | 34000 / 9000 |
+| Initial total | 113034 / 38356 | 114367 / 38860 | 124000 / 40000 |
+| Terminal chunk | 355631 / 92442 | 355631 / 92441 | 360000 / 93000 |
+| Route JavaScript | 93987 / 35975 | 93965 / 36098 | 94000 / 38700 |
+| Route CSS | 18296 / 4848 | 18358 / 4869 | 18400 / 4900 |
+
+The route JavaScript had 13 raw bytes left. The additions (the Undo option of a toast, the header's subject, the Approve label) were paid for by
+folding the Stop and Cancel confirmations into one function, merging the two Retry branches of the header, one helper for the task
+Retry, Resume and Pause calls, and dropping the evidence block's second pair of Approve and Reject buttons. The initial CSS has 73 bytes left.

@@ -209,12 +209,13 @@ uxr({ t: "T48", uxr: ["UXR-048"], needs: [...NEEDS] }, "R2: with several tasks a
 });
 
 // ---- R3: one number everywhere (UXR-049) ---------------------------------------------------------------------------------------------------
-uxr({ t: "T48", uxr: ["UXR-049"], needs: [...NEEDS] }, "R3: the Inbox badge, the answer line and the Needs you heading show one number; '+' only while missions are unread", async ({ page }) => {
+uxr({ t: "T48", uxr: ["UXR-049"], needs: [...NEEDS] }, "R3: the Inbox badge, the answer line and the Needs you heading show one number; '+' only while missions are unread", async ({ page }, info) => {
   await openApp(page, DENSE, "/");
   const figure = async (text: string | null): Promise<string> => (text ?? "").match(/\d+\+?/)?.[0] ?? "";
   const numbers = async () => [await figure(await page.locator(".main-nav .nav-count").textContent()), await figure(await page.locator("[data-q=need-me]").textContent()), await figure(await page.locator('[data-section="needs-you"] h2').textContent())];
   await expect.poll(async () => new Set(await numbers()).size, { message: "badge, answer line and heading agree" }).toBe(1);
   expect((await numbers())[0], "more missions are unread than the fan-out reads: a lower bound says so").toMatch(/\+$/);
+  await evidence(page, info, ["UXR-049"], "one-number");
 });
 
 uxr({ t: "T48", uxr: ["UXR-049"], needs: [...NEEDS] }, "R3: when every mission has been read the number is exact, with no '+', in all three places", async ({ page }) => {
@@ -225,10 +226,11 @@ uxr({ t: "T48", uxr: ["UXR-049"], needs: [...NEEDS] }, "R3: when every mission h
 });
 
 // ---- R4: the summary says what the rows are, not an instruction (UXR-050) ------------------------------------------------------------------------------
-uxr({ t: "T48", uxr: ["UXR-050"], needs: [...NEEDS] }, "R4: the Inbox summary names the kinds that need you instead of 'Retry or open'", async ({ page }) => {
+uxr({ t: "T48", uxr: ["UXR-050"], needs: [...NEEDS] }, "R4: the Inbox summary names the kinds that need you instead of 'Retry or open'", async ({ page }, info) => {
   await openApp(page, { auth: "in" }, "/");
   await expect(page.locator("[data-q=next]")).toHaveText("1 failed, 1 awaits approval");
   await expect(page.locator('[data-l0="inbox.answer"]')).not.toContainText(/Retry or open|Open to retry|Approve or reject/);
+  await evidence(page, info, ["UXR-050"], "summary");
 });
 
 // ---- R5: the pill column is as wide as the pills (UXR-051) ----------------------------------------------------------------------------------------------
