@@ -3170,7 +3170,6 @@ fn redact_private_api_fields(value: &mut Value) {
         "repo_identity",
         "objective",
         "config",
-        "prompt",
         "environment",
         "env",
         "terminal",

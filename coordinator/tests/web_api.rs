@@ -1745,7 +1745,6 @@ async fn command_resource_redacts_private_request_and_event_fields() {
     let serialized = response.to_string();
     for sentinel in [
         "/private/request-path-sentinel",
-        "private-request-prompt-sentinel",
         "/private/event-path-sentinel",
         "raw-terminal-sentinel",
         "captured-terminal-screen-sentinel",
@@ -1753,6 +1752,10 @@ async fn command_resource_redacts_private_request_and_event_fields() {
     ] {
         assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
     }
+    assert_eq!(
+        response.pointer("/request/params/prompt").and_then(Value::as_str),
+        Some("private-request-prompt-sentinel")
+    );
     assert_eq!(
         response.pointer("/result/result/events/0/data/summary").and_then(Value::as_str),
         Some("mission created")

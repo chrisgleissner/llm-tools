@@ -47,11 +47,11 @@ must have a concrete reason and a narrowly scoped regression gate. The independe
 - **Severity:** Medium
 - **Location:** `coordinator/src/http.rs::command_response_json`
 - **Evidence:** A read-scoped command lookup returned durable request/result JSON without a public
-  projection. Mission creation request values included private working paths and prompts; event
-  results could contain working paths and raw terminal output.
-- **Disposition:** Fixed by recursively removing private path, prompt, credential and terminal field
+  projection. Mission creation request values included private working paths; event results could
+  contain working paths, provider credentials and raw terminal output.
+- **Disposition:** Fixed by recursively removing private path, credential and terminal field
   names from generic command responses. Resource-specific endpoints remain the preferred public
   projection.
 - **Regression evidence:** `coordinator/tests/web_api.rs::command_resource_redacts_private_request_and_event_fields`
-  checks distinctive request-path, prompt, event-path and terminal-output sentinels through a
+  checks distinctive request-path, event-path, provider-key and terminal-output sentinels through a
   read-scoped token while retaining a safe event summary.
