@@ -165,7 +165,19 @@ pub fn valid_password(p: &str) -> Result<(), String> {
     if p.len() > MAX_PASSWORD_LEN {
         return Err(format!("password must be at most {MAX_PASSWORD_LEN} bytes"));
     }
+    if is_common_password(p) {
+        return Err("password is on the bundled common-password blocklist".to_string());
+    }
     Ok(())
+}
+
+/// The small offline blocklist is bundled with the coordinator and bounded at build time.
+/// Matching is ASCII case-insensitive; passwords themselves are never logged or persisted here.
+fn is_common_password(password: &str) -> bool {
+    let candidate = password.to_ascii_lowercase();
+    include_str!("../data/common-passwords.txt")
+        .lines()
+        .any(|blocked| !blocked.is_empty() && candidate == blocked)
 }
 
 /// Rate-limit key for a client address. IPv6 clients are keyed by their /64 (a single subscriber
@@ -423,6 +435,13 @@ mod tests {
         assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN)).is_ok());
         assert!(valid_password(&"correct horse battery staple".repeat(8)).is_ok());
         assert!(valid_password(&"x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn password_policy_rejects_bundled_common_passwords_case_insensitively() {
+        assert!(valid_password("correcthorsebatterystaple").is_err());
+        assert!(valid_password("CorrectHorseBatteryStaple").is_err());
+        assert!(valid_password("a less common passphrase").is_ok());
     }
 
     #[test]

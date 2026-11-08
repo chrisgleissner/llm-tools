@@ -339,7 +339,9 @@ revoked and added again receives a generation above every earlier one),
 `known_addrs` and `meta` (schema version 2). Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
 session and API tokens are 32 random bytes stored as SHA-256 hashes. Until a second factor is
 enrolled, new passwords must contain at least 15 characters; longer passphrases are accepted up
-to the 256-byte limit, with no composition rules.
+to the 256-byte limit, with no composition rules. Password creation and change also reject entries
+in the coordinator's bundled, size-bounded common-password list, matched without ASCII case
+sensitivity; this check is offline and never logs the candidate password.
 
 ## Content Security Policy
 
