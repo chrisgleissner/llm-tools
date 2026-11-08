@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
+import textwrap
 import threading
 
+from .bridge_glyphs import localize
 from .bridge_input import wrapped_row_for_column, cell_width
 
 _HEADING_START = re.compile(r"^\s{0,3}#{1,6}\s+")
@@ -39,6 +41,8 @@ class DocumentViewer:
     anchor_column: int = 0
     anchor_active: bool = False
     source_anchor: int = 0
+    plain: bool = False  # a help page: rendered mode is a word-wrapped reflow of plain text, and the file-viewer controls are off
+    footer_extra: str = ""  # one more key hint for a plain page, e.g. "T quickstart"
     source_lines: tuple[str, ...] = field(init=False, repr=False)
     _line_cache: dict[tuple[bool, bool, int], tuple[str, ...]] = field(default_factory=dict, init=False, repr=False)
     _rich_cache: dict[tuple[int, bool], tuple[tuple[tuple[str, str], ...], ...]] = field(default_factory=dict, init=False, repr=False)
@@ -70,6 +74,10 @@ class DocumentViewer:
 
     def rich_lines(self, width: int | None = None) -> tuple[tuple[tuple[str, str], ...], ...]:
         key = (max(20, width or self.width), self.wrap)
+        if self.plain:
+            if key not in self._rich_cache:
+                self._rich_cache[key] = tuple(((row, "brand" if number == 0 else "info"),) for number, row in enumerate(wrap_plain_lines(tuple(localize(line) for line in self.source_lines), key[0])))
+            return self._rich_cache[key]
         if key not in self._rich_cache:
             # Rich takes seconds for one very long line (4 600 tabs) or for many lines of a highlighted block (about 4 ms a line),
             # so those render in the background like a source over 32 KB.
@@ -357,6 +365,26 @@ def _column_for_wrapped_row(text: str, row: int, width: int) -> int:
             current_row += 1
             cells = 0
     return len(text)
+
+
+def wrap_plain_lines(lines: tuple[str, ...], width: int) -> list[str]:
+    """Word-wrap plain text: each source line keeps its break, a wrapped row keeps the line's indent, and no word is split unless it is wider than a row."""
+    rows: list[str] = []
+    for line in lines:
+        text = line.expandtabs(4).rstrip()
+        if cell_width(text) <= width:
+            rows.append(text)
+            continue
+        indent = text[:len(text) - len(text.lstrip())]
+        # A hanging indent also aligns the text of a numbered step ("3. Press ...") under its first word.
+        numbered = re.match(r"\s*(?:\d+[.)]|[-*])\s+", text)
+        if numbered:
+            indent = " " * len(numbered.group(0))
+        if cell_width(indent) >= width // 2:
+            indent = ""
+        rows.extend(textwrap.wrap(text, width=width, subsequent_indent=indent, break_long_words=True,
+                                  break_on_hyphens=False, replace_whitespace=False, drop_whitespace=True) or [""])
+    return rows
 
 
 def _wrap_all(lines: tuple[str, ...], width: int) -> tuple[str, ...]:

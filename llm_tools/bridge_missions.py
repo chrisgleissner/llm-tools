@@ -11,6 +11,10 @@ database reads go through named ``BridgeStore`` methods (``mission_id_if_exists`
 
 from __future__ import annotations
 
+import os
+import socket
+import stat
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,18 +25,59 @@ if TYPE_CHECKING:
     from .bridge_store import BridgeStore
 
 
-MIN_MISSION_PREFIX = 4
+MIN_MISSION_PREFIX = 3
 
 
 class MissionNotFound(ValueError):
     """No saved mission matches the given ID or prefix."""
 
 
+class NoMissionInFolder(ValueError):
+    """The current folder has no mission the command can use (none, or only finished ones)."""
+
+
+class MissionAmbiguous(ValueError):
+    """An ID prefix or a folder matches several missions."""
+
+
+# The two probes below live here, not in ``bridge_switcher``, so that ``mission list`` can order
+# missions without importing curses (Windows has none) or the provider launcher.
+def socket_listening(path: str | Path, timeout: float = 0.2) -> bool:
+    """Whether a server accepts connections on the Unix socket ``path``; a dead socket file refuses."""
+    try:
+        if not stat.S_ISSOCK(os.lstat(path).st_mode):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        probe.settimeout(timeout)
+        probe.connect(str(path))
+    except OSError:  # refused, gone, or not answering in time
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def default_station_probe(mission_id: str) -> bool:
+    """Whether a tmux server is listening on this mission's station socket.
+
+    This is for display (the mission lists), so it only connects to the socket
+    in-process instead of starting a tmux client per mission. Actions that act
+    on a station (close, attach, switch) check ownership themselves.
+    """
+    try:
+        from . import bridge_sockets
+
+        return socket_listening(bridge_sockets.mission_socket_path(mission_id))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def station_live(mission_id: str) -> bool:
     """Whether a Bridge-owned provider station is running for this mission."""
-    from . import bridge_switcher
-
-    return bool(bridge_switcher.default_station_probe(mission_id))
+    return bool(default_station_probe(mission_id))
 
 
 def mission_live(mission_id: str) -> bool:
@@ -48,11 +93,42 @@ def order_missions(rows: list[Any]) -> list[Any]:
     return sorted(newest, key=lambda row: (not mission_live(str(row["id"])), str(row["status"]) in FINISHED_MISSION_STATUSES))
 
 
+def _stamp(value: Any) -> str:
+    """``YYYY-MM-DD HH:MM:SS`` in local time for a stored UTC timestamp, or ``-``."""
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "-"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def mission_choices(rows: list[Any]) -> str:
+    """One line per mission with its ID, name, state and last-updated time, so look-alike missions can be told apart."""
+    ordered = order_missions(rows)
+    name_width = min(40, max((len(str(row["name"])[:40]) for row in ordered), default=0))
+    state_width = max((len(str(row["status"])) for row in ordered), default=0)
     return "\n".join(
-        f"  {str(row['id'])[:8]}  {str(row['name'])[:40]}  {row['status']}" + ("  (live)" if mission_live(str(row["id"])) else "")
-        for row in order_missions(rows)
+        f"  {str(row['id'])[:8]}  {str(row['name'])[:40]:<{name_width}}  {str(row['status']):<{state_width}}  updated {_stamp(row['updated_at'])}"
+        + ("  (live)" if mission_live(str(row["id"])) else "")
+        for row in ordered
     )
+
+
+def missions_in_folder(store: BridgeStore, here: Path) -> list[Any]:
+    """Missions whose folder equals or contains ``here``, newest first."""
+    return [
+        row
+        for row in store.missions_newest_first()
+        if here == Path(row["cwd"]) or Path(row["cwd"]) in here.parents
+    ]
+
+
+def unfinished_in_folder(store: BridgeStore, cwd: str | Path) -> list[Any]:
+    """Unfinished missions that folder inference would consider for ``cwd``, in display order."""
+    here = Path(cwd).expanduser().resolve()
+    return order_missions([row for row in missions_in_folder(store, here) if row["status"] not in FINISHED_MISSION_STATUSES])
 
 
 def resolve_mission_ref(
@@ -62,6 +138,8 @@ def resolve_mission_ref(
     cwd: str | Path | None = None,
     read_only: bool = False,
     prefer_station: bool = False,
+    reopen_completed: bool = False,
+    station_command: bool = False,
 ) -> str:
     """Return the full mission ID for an ID, a unique ID prefix, or the current folder.
 
@@ -71,7 +149,11 @@ def resolve_mission_ref(
     ``prefer_station`` narrows several matches to the ones with a running
     station (attach and detach). ``read_only`` lets a folder whose only
     missions are finished resolve to the finished one, so ``status`` and
-    ``task list`` still work after completion.
+    ``task list`` still work after completion. ``reopen_completed`` (task add)
+    does the same for a folder whose only finished mission is COMPLETED,
+    because a new task reopens a completed mission; a cancelled one never
+    qualifies. ``station_command`` (attach, detach, finish, station) names a
+    finished mission as having no station instead of suggesting follow-up work.
     """
     if ref:
         exact = store.mission_id_if_exists(ref)
@@ -83,14 +165,10 @@ def resolve_mission_ref(
         if not rows:
             raise MissionNotFound(f"no mission matches {ref!r}; run llm-bridge mission list")
         if len(rows) > 1:
-            raise ValueError(f"mission ID prefix {ref!r} is ambiguous; matches:\n{mission_choices(rows)}")
+            raise MissionAmbiguous(f"mission ID prefix {ref!r} is ambiguous; matches:\n{mission_choices(rows)}")
         return str(rows[0]["id"])
     here = Path(cwd if cwd is not None else Path.cwd()).expanduser().resolve()
-    in_folder = [
-        row
-        for row in store.missions_newest_first()
-        if here == Path(row["cwd"]) or Path(row["cwd"]) in here.parents
-    ]
+    in_folder = missions_in_folder(store, here)
     candidates = [row for row in in_folder if row["status"] not in FINISHED_MISSION_STATUSES]
     live = [row for row in candidates if row["status"] in LIVE_MISSION_STATUSES]
     pool = live or candidates
@@ -104,14 +182,21 @@ def resolve_mission_ref(
         if read_only and len(finished) == 1:
             return str(finished[0]["id"])
         if read_only and finished:
-            raise ValueError(f"several finished missions match folder {here}; pass --mission ID:\n{mission_choices(finished)}")
+            raise MissionAmbiguous(f"several finished missions match folder {here}; pass --mission ID:\n{mission_choices(finished)}")
+        completed = [row for row in finished if row["status"] == "COMPLETED"]
+        if reopen_completed and len(completed) == 1:
+            return str(completed[0]["id"])
+        if reopen_completed and len(completed) > 1:
+            raise MissionAmbiguous(f"several completed missions match folder {here}; pass --mission ID:\n{mission_choices(completed)}")
         if finished:
             newest = order_missions(finished)[0]
             short = str(newest["id"])[:8]
+            if station_command:
+                raise ValueError(f"mission {short} in folder {here} is {str(newest['status']).lower()} and has no station · llm-bridge status shows its result")
             if newest["status"] == "COMPLETED":
-                follow_up = f"add follow-up work with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
+                follow_up = f"add follow-up work, which reopens it, with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
             else:
                 follow_up = "create a new mission with: llm-bridge mission create --prompt \"...\""
-            raise ValueError(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")
-        raise ValueError(f"no unfinished mission for folder {here}; pass --mission ID (see llm-bridge mission list) or create one with: llm-bridge mission create --prompt \"...\"")
-    raise ValueError(f"several missions match folder {here}; pass --mission ID:\n{mission_choices(pool)}")
+            raise NoMissionInFolder(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")
+        raise NoMissionInFolder(f"no unfinished mission for folder {here}; pass --mission ID (see llm-bridge mission list) or create one with: llm-bridge mission create --prompt \"...\"")
+    raise MissionAmbiguous(f"several missions match folder {here}; pass --mission ID:\n{mission_choices(pool)}")

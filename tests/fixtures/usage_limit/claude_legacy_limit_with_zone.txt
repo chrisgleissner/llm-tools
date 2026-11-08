@@ -1,0 +1,8 @@
+> continue
+
+Claude usage limit reached. Your limit will reset at 4pm (Europe/Berlin).
+
+      • /upgrade to increase your usage limit.
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯

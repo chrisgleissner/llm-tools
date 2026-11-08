@@ -255,6 +255,18 @@ impl Fw {
         (fw, welcome)
     }
 
+    /// Like `connect`, but also waits until the connection is past the coordinator's resend pass.
+    /// After the welcome, the coordinator redelivers every unfinished command. A command submitted
+    /// over HTTP before that pass finishes would reach the worker twice: once through the live queue
+    /// and once through the pass (documented at-least-once delivery). Use this when the test submits a
+    /// command right after connecting and does not itself test redelivery; use `connect` for tests
+    /// that expect the redelivered commands.
+    pub async fn connect_settled(env: &Env, token: &str, worker_id: &str, cursor: u64) -> (Fw, Value) {
+        let (mut fw, welcome) = Fw::connect(env, token, worker_id, cursor).await;
+        fw.barrier().await;
+        (fw, welcome)
+    }
+
     pub async fn send_raw(&mut self, text: String) {
         self.ws.send(WsMsg::Text(text.into())).await.unwrap();
     }
@@ -306,4 +318,22 @@ pub async fn expect_close(ws: &mut Ws) -> Option<u16> {
             Some(Ok(_)) => {}
         }
     }
+}
+
+/// Register a live connection for `name` that nobody reads, so the coordinator treats the worker as
+/// online (it refuses read-only commands for an offline worker). Keep the returned receiver alive.
+pub fn mark_online(env: &Env, name: &str, worker_id: &str) -> tokio::sync::mpsc::Receiver<bridge_coordinator::hub::Outbound> {
+    let (tx, rx) = tokio::sync::mpsc::channel(bridge_coordinator::hub::OUTBOUND_QUEUE);
+    let (close, _) = tokio::sync::watch::channel(None);
+    env.srv.state.hub.register(
+        name,
+        bridge_coordinator::hub::ConnHandle {
+            conn_id: env.srv.state.hub.next_conn_id(),
+            generation: 1,
+            worker_id: worker_id.to_string(),
+            tx,
+            close,
+        },
+    );
+    rx
 }

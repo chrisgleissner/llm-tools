@@ -32,17 +32,49 @@ from pathlib import Path
 from typing import Callable
 
 from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
-from .bridge_documents import DocumentViewer, heading_label
+from .bridge_documents import DocumentViewer, heading_label, wrap_plain_lines
 from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
 from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
-from .bridge_vocab import EventKind
+from .bridge_vocab import EventKind, MISSION_NEEDS_YOU_LABEL, status_label
+from . import bridge_format
 from .bridge_format import plain_reason
-from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
+from .bridge_glyphs import FINISHED_STATES, ascii_mode, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .common import fmt_duration
 from . import terminal
 from .terminal import TerminalAction
 from .bridge_actions import ACTIONS, Action, actions_for
+from .bridge_wording import NEXT_NOTHING, approval_row, controller_hint, finished_next, proposals_row
+from .bridge_event_text import (  # noqa: F401  (moved to bridge_event_text so the CLI can phrase events; other modules and tests reach these through bridge_tui)
+    _HUMANIZERS,
+    _MISSION_STATE_WORDS,
+    _NO_VALUE,
+    _REVIEW_HOLD_EVENTS,
+    _SEP,
+    _TASK_STATE_WORDS,
+    _WINDOW_NAMES,
+    _EventContext,
+    _age,
+    _capacity_brief,
+    _compact_pairs,
+    _decision_owner,
+    _dict,
+    _event_kind,
+    _event_summary,
+    _humanize_event,
+    _humanizer,
+    _int_or_none,
+    _known,
+    _percent_left,
+    _relative_epoch,
+    _rotation_text,
+    _short_id,
+    _span,
+    _text,
+    _window_brief,
+    _with_reason,
+    restoration_word,
+)
 from . import bridge_draw
 from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests reach these through bridge_tui)
     QUIET,
@@ -95,8 +127,17 @@ def compose_document(
     *,
     title: str = "Bridge document",
     window: curses.window | None = None,
+    placeholder: str = "",
+    restored_from: Path | None = None,
+    draft_prefix: str = "composer-recovery-",
 ) -> str | None:
-    """Full-screen UTF-8 composer with a private crash checkpoint and recovery action."""
+    """Full-screen UTF-8 composer with a private crash checkpoint and recovery action.
+
+    ``placeholder`` is dim guidance shown while the buffer is empty. ``restored_from``
+    names a retained draft whose text is ``initial``: it is deleted once this
+    composer has its own checkpoint, and the notice line says when it was written.
+    ``draft_prefix`` names the kept draft's file, so a kind of draft can be found again.
+    """
     curses.use_env(False)
     global LAST_RECOVERY_DRAFT
     import termios
@@ -110,10 +151,15 @@ def compose_document(
     paste_activity = 0.0
     preferred_column: int | None = None
     notice = ""  # transient warnings only; the status line below carries the keys
+    if restored_from is not None:
+        try:
+            notice = f"Restored draft from {time.strftime('%H:%M', time.localtime(restored_from.stat().st_mtime))} · Ctrl-X discard"
+        except OSError:
+            notice = "Restored draft · Ctrl-X discard"
     draft_dir = default_state_dir() / "drafts"
     draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(draft_dir, 0o700)
-    checkpoint_fd, checkpoint_name = tempfile.mkstemp(prefix="composer-recovery-", suffix=".md", dir=draft_dir)
+    checkpoint_fd, checkpoint_name = tempfile.mkstemp(prefix=draft_prefix, suffix=".md", dir=draft_dir)
     os.close(checkpoint_fd)
     checkpoint_path = Path(checkpoint_name)
     os.chmod(checkpoint_path, 0o600)
@@ -180,6 +226,8 @@ def compose_document(
         return checkpoint_path
 
     checkpoint()
+    if restored_from is not None and restored_from != checkpoint_path:
+        restored_from.unlink(missing_ok=True)  # the new checkpoint holds the same text
 
     def loop(window: curses.window) -> str | None:
         nonlocal preferred_column, notice, escape_pending, escape_at, paste_activity, buffer, last_checkpoint, discarded
@@ -241,8 +289,12 @@ def compose_document(
                         _put(window, row, 0, value, width, preserve_spacing=True)
                     _put(window, height - 2, 0, notice, width,
                          role="warn" if notice.startswith(("Paste rejected", "Input rejected", "Incomplete", "Recovery")) else "dim")
-                    status = f"F2/Ctrl-S Save · Esc Recover · Ctrl-D Discard · {buffer.size_bytes}/{buffer.max_bytes} bytes · {len(lines)} lines"
-                    _put(window, height - 1, 0, status, width, role="dim")
+                    if not buffer.text and placeholder:
+                        # A no-break space keeps a quoted example such as "- criterion" on one row.
+                        hint_rows = wrap_plain_lines((localize(placeholder).replace('"- ', '"-\xa0'),), max(1, width))
+                        for offset, hint_row in enumerate(hint_rows[:max(1, height - 3)]):
+                            _put(window, 1 + offset, 0, hint_row.replace("\xa0", " "), width, role="dim", attr=curses.A_DIM)
+                    _put(window, height - 1, 0, _composer_status(buffer.size_bytes, buffer.max_bytes, len(lines)), width, role="dim")
                     visible_row = line_no - top + 1
                     try:
                         curses.curs_set(1)
@@ -314,7 +366,7 @@ def compose_document(
                         paste_decoder.reset()
                     preferred_column = None
                     continue
-                if key == "\x13" or key == curses.KEY_F2:
+                if key == "\x13":  # F-keys only switch views, so F2 does not save here
                     checkpoint()
                     return buffer.text
                 if key == "\x0f":
@@ -360,7 +412,11 @@ def compose_document(
                     name = retain_draft()
                     notice = f"Draft retained at {name}"
                     return None
-                if key == "\x04":
+                if key == "\x04":  # Ctrl-D closes like Esc and never discards; Ctrl-X discards
+                    name = retain_draft()
+                    notice = f"Draft retained at {name}"
+                    return None
+                if key == "\x18":
                     with write_lock:  # an in-flight periodic write must not recreate the discarded draft
                         discarded = True
                         checkpoint_path.unlink(missing_ok=True)
@@ -427,6 +483,14 @@ def compose_document(
     finally:
         sys.stdout.write("\x1b[?2004l")
         sys.stdout.flush()
+
+
+def _composer_status(size_bytes: int, max_bytes: int, line_count: int) -> str:
+    """Composer footer: the keys, the line count, and the byte count only when the limit is near."""
+    parts = ["Ctrl-S Save", "Esc close (draft kept)", "Ctrl-X Discard", f"{line_count} {'line' if line_count == 1 else 'lines'}"]
+    if size_bytes * 5 > max_bytes * 4:
+        parts.append(f"{size_bytes}/{max_bytes} bytes")
+    return _SEP.join(parts)
 
 
 _NOT_PRINTABLE_ASCII = re.compile(r"[^ -~]")
@@ -522,7 +586,7 @@ PALETTE_COMMANDS = tuple(action.command for action in ACTIONS)
 # Names used before the 1.3 rename stay accepted everywhere a view is named.
 # Words typed in the command line that switch view (the rest are CLI commands).
 _VIEW_COMMANDS = {
-    "overview": "Overview", "control": "Overview", "providers": "Providers", "activity": "Activity",
+    "overview": "Overview", "control": "Overview", "tasks": "Tasks", "orders": "Tasks", "providers": "Providers", "activity": "Activity",
     "sessions": "Sessions", "health": "Health", "actions": "Actions", "usage": "Usage", "agents": "Agents",
     "palette": "Actions", "log": "Activity", "systems": "Health", "stations": "Providers",
 }
@@ -535,6 +599,7 @@ _IDLE_BACKOFF_SECONDS = 10.0  # without input for this long the change probe slo
 _IDLE_REFRESH_SECONDS = 1.0
 _STATUS_SECONDS = 8.0  # how long a command result stays in the bottom row
 _OUTPUT_IDLE_THRESHOLD_SECONDS = 30
+_RECALL_HINT = "Ctrl-P recalls the command"  # the command line is empty after a failure, so Up would move the body selection
 _MAX_COMMAND_CHARS = 4096
 _MAX_OUTPUT_LINES = 80
 _MAX_OUTPUT_LINE_CHARS = 2000
@@ -546,30 +611,17 @@ _MAX_STATION_ROWS = 32
 _MAX_EVENT_ROWS = 80
 _MAX_DETAIL_TEXT = 16000
 _MAX_DETAIL_ITEMS = 12
+_FILE_VIEWER_KEYS = frozenset({"s", "c", "e", "m", "w", "h", "KEY_LEFT", "KEY_RIGHT"})
 _SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions", "Agents"})
 _BRIDGE_LABEL = 12
 _SYSTEM_LABEL = 22
 _SESSION_COLUMNS = ("op", "task", "provider", "model", "status", "native session", "restoration")
 
 
-def _text(value: object, limit: int = 1000) -> str:
-    """Make untrusted snapshot/result text safe for direct curses rendering."""
-    rendered = value if isinstance(value, str) else str(value)
-    # Sanitising and whitespace folding act on single characters, so the cleaned
-    # prefix of the text is a prefix of the cleaned whole. Clean a bounded prefix
-    # and only grow it when whitespace or removed characters left too little.
-    size = max(0, limit) * 4 + 256
-    while True:
-        clean = " ".join(_scrub(rendered[:size]).split())
-        if len(clean) >= limit or size >= len(rendered):
-            return clean[:limit]
-        size *= 4
-
-
 _TASK_VERB_PHRASES = {
     "add": "added", "amend": "amended", "priority": "priority changed", "reorder": "reordered",
     "dependencies": "dependencies updated", "pause": "paused", "resume": "resumed", "cancel": "cancelled",
-    "retry": "queued for another attempt", "verify": "verified", "reject": "sent back",
+    "retry": "queued for another attempt", "verify": "verified", "approve": "approved", "reject": "sent back",
 }
 _TASK_ACK = re.compile(r"^task(?: \S+)? (?:" + "|".join(re.escape(item) for item in _TASK_VERB_PHRASES.values()) + r")")
 # Options whose value is a private path or an id the operator never typed.
@@ -722,7 +774,7 @@ def _confirmation_reason(command: str) -> str | None:
     except ValueError:
         return None
     if words and words[0] == "cancel":
-        return "Cancel this mission and its unfinished tasks?"
+        return "Cancel this mission and its unfinished tasks? This cannot be undone."
     if words and words[0] == "stop" and "--force" in words:
         return "Force stop this mission's owned active work?"
     if words and words[0] == "finish":
@@ -732,11 +784,25 @@ def _confirmation_reason(command: str) -> str | None:
     if words[:2] == ["task", "reject"] and "--task" in words:
         reason = next((word[len("--reason="):] for word in words if word.startswith("--reason=")), "")
         return f"Send task {words[words.index('--task')+1]} back for another attempt? Reason: {reason[:120]}"
-    if words[:2] == ["task", "verify"] and "--approve" in words:
+    if _is_approval_command(words):
         kind, value = _approval_target(words)
         label = f"task {value}" if kind == "task" else f"task with id {value}" if kind == "id" else "(select a task)"
         return f"Approve verification and mark {label} complete?"
     return None
+
+
+def _is_reject_command(command: str) -> bool:
+    """Whether ``command`` is the expanded ``task reject --task N …`` the console confirms."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return words[:2] == ["task", "reject"] and "--task" in words and "--hold" not in words
+
+
+def _is_approval_command(words: list[str]) -> bool:
+    """`task approve …`, or the deprecated spelling `task verify … --approve`."""
+    return words[:2] == ["task", "approve"] or (words[:2] == ["task", "verify"] and "--approve" in words)
 
 
 def _approval_target(words: list[str]) -> tuple[str, str]:
@@ -748,12 +814,12 @@ def _approval_target(words: list[str]) -> tuple[str, str]:
 
 
 def _approval_task(command: str) -> tuple[str, str] | None:
-    """(kind, value) of the task an approval command (`task verify … --approve`) names, else None."""
+    """(kind, value) of the task an approval command (`task approve …`) names, else None."""
     try:
         words = console_words(_strip_slash(command))
     except ValueError:
         return None
-    if words[:2] == ["task", "verify"] and "--approve" in words:
+    if _is_approval_command(words):
         target = _approval_target(words)
         return target if target[0] else None
     return None
@@ -764,7 +830,8 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
 
     Only facts the projection holds are shown. The workspace line comes from the
     repository fingerprints recorded before and after the task's last provider
-    run; no list of changed files is recorded, so none is shown.
+    run, with the changed file names the controller recorded when the run
+    ended (none for a folder that is not a repository).
     """
     kind, value = target
     task = next((item for item in _items(snapshot.get("tasks"))
@@ -787,7 +854,7 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
         last = max(runs, key=lambda op: str(op.get("created_at") or ""))
         who = _text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)
         code = last.get("exit_code")
-        lines.append(f"Last run: {who}" + (f", exit {_text(code, 8)}" if code is not None else "") + (f", {_text(last['status'], 20).lower()}" if _known(last.get("status")) else ""))
+        lines.append(f"Last run: {who}" + (f", {bridge_format.exit_short(_text(code, 8))}" if code is not None else "") + (f", {_text(last['status'], 20).lower()}" if _known(last.get("status")) else ""))
     progress = [
         _dict(event.get("data")) for event in _items(snapshot.get("events"))
         if _event_kind(event) == "operation-progress"
@@ -795,16 +862,58 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
     ]
     known = [data for data in progress if data.get("before") and data.get("after")]
     if known:
-        lines.append("Workspace: " + ("changed during the run" if known[-1]["before"] != known[-1]["after"] else "unchanged by the run"))
+        lines.append(_cut_text(_workspace_line(known[-1]), width))
     return lines
 
 
+_WORKSPACE_FILES_SHOWN = 5
+
+
+def _workspace_line(progress: dict[str, object]) -> str:
+    """`Workspace: 1 file changed: hello.txt`, or the plain change/no-change verdict when no names were recorded."""
+    if progress["before"] == progress["after"]:
+        return "Workspace: unchanged by the run"
+    names = progress.get("changed_files")
+    total = _int_or_none(progress.get("changed_total"))
+    if not isinstance(names, list) or not total:
+        return "Workspace: changed during the run"
+    shown = [_text(name, 80) for name in names[:_WORKSPACE_FILES_SHOWN]]
+    more = total - len(shown)
+    line = f"Workspace: {total} file{'s' if total != 1 else ''} changed: {', '.join(shown)}" + (f" and {more} more" if more > 0 else "")
+    earlier = _int_or_none(progress.get("already_modified"))
+    return line + (f" ({earlier} already modified before the run)" if earlier else "")
+
+
+def _last_run(snapshot: dict[str, object], task: dict[str, object]) -> dict[str, object] | None:
+    """The newest operation the projection holds for ``task``."""
+    task_id = str(task.get("id"))
+    runs = [op for op in _items(snapshot.get("operations")) if str(op.get("task_id")) == task_id]
+    return max(runs, key=lambda op: str(op.get("created_at") or "")) if runs else None
+
+
+def _last_run_line(snapshot: dict[str, object], task: dict[str, object]) -> str | None:
+    """`Last run: claude · exit 0 · 12s · o output · d diff` for the Tasks inspect pane, or None before any run."""
+    from . import common
+
+    last = _last_run(snapshot, task)
+    if last is None:
+        return None
+    parts = [_text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)]
+    if last.get("exit_code") is not None:
+        parts.append(bridge_format.exit_short(_text(last["exit_code"], 8)))
+    started = common.parse_epoch(last.get("created_at"), use_date=False)
+    ended = common.parse_epoch(last.get("updated_at"), use_date=False)
+    if started is not None and ended is not None and ended >= started and str(last.get("status")) not in {"RUNNING", "PREPARED", "INTENT"}:
+        parts.append(_age(int(ended - started), note=False))
+    return "Last run: " + _SEP.join([*parts, "o output", "d diff"])
+
+
 # Console-only shortcuts that expand to public commands.
-_CONSOLE_ALIASES = ("approve", "reject", "overview", "providers", "activity", "health", "actions", "home")
+_CONSOLE_ALIASES = ("approve", "reject", "leave", "overview", "providers", "activity", "health", "actions", "sessions", "home")
 
 
 def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[str, str | None]:
-    """Expand `approve [N]` to `task verify --task N --approve`.
+    """Expand `approve [N]` to `task approve --task N`.
 
     Returns the command to run and an error message. Without N the single
     task that awaits verification is used.
@@ -832,10 +941,10 @@ def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[st
     else:
         waiting = [str(task_number(task)) for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() == "VERIFYING"]
         if len(waiting) != 1:
-            hint = f"tasks awaiting approval: {', '.join(waiting)}" if waiting else "no task awaits approval"
+            hint = f"tasks awaiting review: {', '.join(waiting)}" if waiting else "no task awaits review"
             return command, f"error: approve needs a task number · {hint}"
         task_id = waiting[0]
-    return shlex.join(["task", "verify", *_task_ref(snapshot, task_id), "--approve"]), None
+    return shlex.join(["task", "approve", *_task_ref(snapshot, task_id)]), None
 
 
 def _command_completions(command: str) -> list[str]:
@@ -867,7 +976,55 @@ def _command_completions(command: str) -> list[str]:
     if not complete and groups and not prefix.startswith("-"):
         candidates.extend(name for name in _CONSOLE_ALIASES if name not in candidates)
     base = command if trailing else command[:-len(prefix)] if prefix else command
-    return [base + value for value in candidates if value.startswith(prefix) and value not in {"console", "_controller"}]
+    return [base + value for value in candidates if value.startswith(prefix) and value not in {"console", "_controller"} and not value.startswith("_")]
+
+
+# Commands that lead the list shown when `/` is typed; the rest follow in parser order.
+_SLASH_FIRST = ("start", "approve", "reject", "resume", "pause", "stop", "status", "attach", "task", "steer", "help")
+_SLASH_ALIAS_TEXT = {
+    "approve": "Approve a task that awaits review (asks first)",
+    "reject": "Send a task back with a reason",
+    "leave": "Leave the provider terminal; work keeps running",
+    "resume": "Continue after a pause or a stop",
+    "overview": "Show the Overview view",
+    "providers": "Show the Providers view",
+    "activity": "Show the Activity view",
+    "sessions": "Show the Sessions view",
+    "health": "Show the Health view",
+    "actions": "Show the Actions view",
+    "home": "Pick another mission",
+    "backup": "Copy the Bridge database to a file",
+    "restore": "Replace the Bridge database from a backup",
+    "worker": "Connect this host to a coordinator (optional)",
+    "remote": "Reach other hosts through a coordinator",
+    "theme": "Show the colour theme and a swatch per role",
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _slash_table() -> tuple[tuple[str, str], ...]:
+    """Every slash command with its one-line description, the most used first.
+
+    Names come from the same completion source the Tab key uses. A description is
+    the command table of `llm-bridge help`, else the Actions registry, else the
+    console-only shortcut text.
+    """
+    from .bridge_help import COMMANDS
+
+    effects = {action.command.split()[0]: action.effect for action in ACTIONS if action.command.split()[0] != "task"}  # "task" has one action row but many subcommands
+    names = [item[1:] for item in _command_completions("/")]
+    ordered = [name for name in _SLASH_FIRST if name in names] + [name for name in names if name not in _SLASH_FIRST]
+    return tuple(
+        ("/" + name, effects.get(name) or _SLASH_ALIAS_TEXT.get(name) or COMMANDS.get(name, ("",))[0].split(";")[0])
+        for name in ordered
+    )
+
+
+def _slash_matches(command: str) -> list[tuple[str, str]] | None:
+    """The slash commands whose names start with the typed text, or None when no command name is being typed."""
+    if not command.startswith("/") or any(char.isspace() for char in command):
+        return None
+    return [(name, text) for name, text in _slash_table() if name.startswith(command)]
 
 
 @dataclass(frozen=True)
@@ -876,10 +1033,6 @@ class _CommandResult:
 
     text: str
     outcome: str = "unknown"
-
-
-def _dict(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
 
 
 def _items(value: object) -> list[dict[str, object]]:
@@ -1088,7 +1241,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     result["operations"] = _projected_rows(
         data.get("operations"),
         20,
-        ("id", "operation_id", "task_id", "task_ordinal", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at"),
+        ("id", "operation_id", "task_id", "task_ordinal", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at", "updated_at"),
     )
     pending = data.get("pending_commands")
     result["pending_command_count"] = len(pending) if isinstance(pending, list) else 0
@@ -1206,6 +1359,20 @@ def _mission(snapshot: dict[str, object]) -> dict[str, object]:
     return nested or snapshot
 
 
+def _review_pending(snapshot: dict[str, object]) -> bool:
+    """True when a task of this mission awaits the operator (stored status VERIFYING), whatever page of tasks is loaded."""
+    counts = _dict(snapshot.get("task_counts"))
+    if any(str(name).upper() == "VERIFYING" and isinstance(count, int) and count > 0 for name, count in counts.items()):
+        return True
+    shown = [*_items(snapshot.get("tasks")), _dict(snapshot.get("current_task"))]
+    return any(str(task.get("status") or "").upper() == "VERIFYING" for task in shown)
+
+
+def _mission_state_word(snapshot: dict[str, object], status: str) -> str:
+    """The mission's state word: ``NEEDS YOU`` replaces RUNNING while a task awaits review."""
+    return MISSION_NEEDS_YOU_LABEL if status.upper() == "RUNNING" and _review_pending(snapshot) else status
+
+
 def _mission_role_of(snapshot: dict[str, object], mission_id: str = "") -> str:
     """`mission_N` identity role of the mission in a snapshot (pinned colour, else a stable hash)."""
     mission = _mission(snapshot)
@@ -1215,14 +1382,7 @@ def _mission_role_of(snapshot: dict[str, object], mission_id: str = "") -> str:
     return bridge_theme.mission_role(mission.get("id") or mission_id, _dict(mission.get("config")))
 
 
-_SEP = " · "
-_NO_VALUE = {"", "none", "unknown", "null", "-", "—"}
 _ESTIMATE_MISSING = _NO_VALUE | {"no rate data"}
-
-
-def _known(value: object) -> bool:
-    """True for a value worth showing: not None/empty/unknown placeholder."""
-    return value is not None and str(value).strip().lower() not in _NO_VALUE
 
 
 def _clip(text: str, width: int) -> str:
@@ -1233,50 +1393,6 @@ def _clip(text: str, width: int) -> str:
         return text
     mark = glyph("ellipsis")
     return cell_slice(text, 0, max(0, width - cell_width(mark))) + mark
-
-
-def _int_or_none(value: object) -> int | None:
-    try:
-        return int(float(str(value)))
-    except (TypeError, ValueError, OverflowError):  # not a number, or infinite
-        return None
-
-
-def _span(seconds: object, units: int = 2) -> str:
-    """Human duration limited to the largest units, e.g. 5d 19h or 4h 59m."""
-    from . import common
-
-    return " ".join(common.fmt_duration(seconds).split()[:units])
-
-
-def _age(seconds: object, *, note: bool = True) -> str:
-    """Compact age text with seconds resolution below a minute."""
-    value = _int_or_none(seconds)
-    if value is None:
-        return "—"
-    if note:
-        bridge_redraw.note_age(max(0, value))
-    return f"{max(0, value)}s" if value < 60 else _span(value)
-
-
-def _relative_epoch(value: object, now: float | None = None) -> str | None:
-    """`in 4h 59m` / `3m ago` for an epoch or ISO timestamp, else None."""
-    from . import common
-
-    epoch = common.parse_epoch(value, use_date=False)
-    if epoch is None:
-        return None
-    current = common.now_epoch() if now is None else now
-    delta = int(epoch - current)
-    remaining = epoch - current
-    if delta >= 0:
-        # Whole minutes: the text changes as the remaining time drops below the next minute mark,
-        # and a past-due target is shown as seconds from one second after it.
-        bridge_redraw.note_wall(remaining + 1.01 if remaining < 60 else remaining % 60 + 0.01)
-        return f"in {_span(delta)}"
-    elapsed = current - epoch
-    bridge_redraw.note_wall(int(elapsed) + 1 - elapsed if elapsed < 60 else 60 * (elapsed // 60 + 1) - elapsed)
-    return f"{_age(-delta, note=False)} ago"
 
 
 def _clock_epoch() -> float:
@@ -1291,20 +1407,22 @@ def _clock_epoch() -> float:
 
 
 def _local_clock(value: object) -> str:
-    """Local HH:MM:SS for an ISO/epoch timestamp."""
+    """Local time of an ISO/epoch timestamp: `HH:MM:SS` today, `Mon 03:13` within the last week, else `2026-11-06 03:13`."""
     from . import common
 
     epoch = common.parse_epoch(value, use_date=False)
     if epoch is None:
         return "--:--:--"
     try:
-        return time.strftime("%H:%M:%S", time.localtime(epoch))
+        moment = time.localtime(epoch)
+        now = common.now_epoch()
+        if time.localtime(now)[:3] == moment[:3]:
+            return time.strftime("%H:%M:%S", moment)
+        if 0 <= now - epoch < 7 * 86400:
+            return time.strftime("%a %H:%M", moment)
+        return time.strftime("%Y-%m-%d %H:%M", moment)
     except (OverflowError, OSError, ValueError):  # a timestamp outside the platform's range
         return "--:--:--"
-
-
-def _short_id(value: object, length: int = 8) -> str:
-    return _text(value, 64)[:length] if _known(value) else "-"
 
 
 def _percent_value(value: object) -> float | None:
@@ -1312,14 +1430,6 @@ def _percent_value(value: object) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
-
-
-def _percent_left(value: object) -> str | None:
-    try:
-        number = float(str(value))
-    except (TypeError, ValueError):
-        return None
-    return f"{int(number + 0.5)}%"
 
 
 _DURATION_PART = re.compile(r"(\d+)\s*([dhms])\b")
@@ -1444,6 +1554,50 @@ def _usage_capacity_lines(snapshot: dict[str, object]) -> list[str]:
     ]
 
 
+# Percent points two capacity readings of the same window may differ before they are reported as a disagreement.
+_USAGE_AGREEMENT_TOLERANCE = 5.0
+
+
+def _usage_disagreements(snapshot: dict[str, object]) -> list[str]:
+    """One line per provider whose Usage rows contradict the controller's last capacity observation.
+
+    The dashboard is a live llm-usage read; Overview, Providers and `status` show what the
+    controller last observed. When they differ for a window, say so and give the controller's
+    figures and their age instead of leaving two screens that answer differently.
+    """
+    usage = _dict(snapshot.get("usage"))
+    if not isinstance(usage.get("rows"), list):
+        return []
+    capacity = _dict(snapshot.get("capacity"))
+    age = _int_or_none(capacity.get("source_age_seconds"))
+    now = _clock_epoch()
+    lines: list[str] = []
+    reported: set[str] = set()
+    for decision in _items(_dict(capacity.get("selection")).get("decisions")):
+        provider = str(decision.get("capacity_provider") or decision.get("provider") or "").strip().lower()
+        windows = [window for window in _items(decision.get("windows")) if _percent_value(window.get("remaining_percent")) is not None]
+        rows = _usage_rows_for(snapshot, provider)
+        if not provider or provider in reported or not windows or not rows:
+            continue
+
+        def agrees(window: dict[str, object]) -> bool:
+            """True when the dashboard has no row for this window or a row within the tolerance."""
+            wanted = _percent_value(window.get("remaining_percent"))
+            same = [row for row in rows if row.get("scope") == window.get("name")]
+            return not same or any(
+                (seen := _percent_value(row.get("remaining_percent"))) is not None and wanted is not None
+                and abs(seen - wanted) <= _USAGE_AGREEMENT_TOLERANCE
+                for row in same
+            )
+
+        if all(agrees(window) for window in windows):
+            continue
+        reported.add(provider)
+        observed = _SEP.join(_window_summary(window, now).split(", resets")[0] for window in windows)
+        lines.append(f"{provider} differs from the controller's last observation" + (f" ({_age(age)} ago)" if age is not None else "") + f": {observed}")
+    return lines
+
+
 def _with_square(text: str) -> str:
     """Put the provider square in front of a capacity line (`■ codex (active) · 5h 95% left`)."""
     return f"{glyph('square')} {text}"
@@ -1487,14 +1641,13 @@ def _controller_line(data: dict[str, object]) -> str:
         return f"failed — {_text(lifecycle.get('failure_reason'), 160)}"
     if status in ENDED_MISSION_STATUSES:
         return f"mission {status.lower()} — controller finished"
-    if status == "CREATED":
-        return "not started — type start"
     if status == "STOPPING":
         return "stopping after the current step"
-    if status == "STOPPED":
-        return "stopped — type start or resume"
+    hint = controller_hint(status, "console")
+    if hint:
+        return hint
     if status in STARTED_MISSION_STATUSES and lifecycle.get("controller_running") is False:
-        return "not running — type resume"
+        return "not running — type /resume"
     if status == "PAUSED":
         context = _dict(data.get("station_context"))
         if context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
@@ -1530,17 +1683,17 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
     if waiting:
         from .bridge_monitor import waiting_message
 
-        rows.append(waiting_message(waiting, _clock_epoch()))
+        rows.append(waiting_message(waiting, _clock_epoch(), console=True))
     for task in tasks:
         if str(task.get("status", "")).upper() == "VERIFYING":
             number = _text(task_number(task) if task_number(task) is not None else "?", 12)
             if number == held:
                 rows.append(_review_hold_text(number))
                 continue
-            rows.append(f"task {number} awaits your approval — type /approve {number} (or F7 Actions)")
+            rows.append(approval_row("console", [number]))
     pending = _dict(data.get("proposal_counts")).get("PENDING")
     if isinstance(pending, (int, float)) and pending:
-        rows.append(f"{int(pending)} agent task proposal{'s' if pending != 1 else ''} to review — type proposals")
+        rows.append(proposals_row("console", int(pending)))
     provider_wait = _dict(data.get("provider_wait"))
     question_count = provider_wait.get("question_count")
     if isinstance(question_count, (int, float)) and 1 <= question_count <= 32:
@@ -1566,6 +1719,11 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
         declined = declined_provider(data, task) if str(task.get("status", "")).upper() == "BLOCKED" else ""
         if declined:
             rows.append(declined_message(declined))
+            continue
+        asked = _dict(data.get("awaiting_answer"))
+        if asked.get("question") and asked.get("task_id") == task.get("id") and str(task.get("status", "")).upper() == "BLOCKED":
+            number = _text(task_number(task) if task_number(task) is not None else "?", 12)
+            rows.append(f'task {number} asked: "{_text(asked["question"], 160)}"{_SEP}/amend {number} FILE then /retry {number}{_SEP}/retry {number}{_SEP}/cancel {number}')
             continue
         stuck.append(f"task {_text(task_number(task) if task_number(task) is not None else '?', 12)} {str(task.get('status')).upper()}")
     if stuck:
@@ -1622,6 +1780,37 @@ def _station_idle_phrase(snapshot: dict[str, object]) -> str:
     return _idle_phrase(snapshot)
 
 
+def _station_status_is_implied(mission_status: str, task: dict[str, object]) -> bool:
+    """True when the task text already says what the mission state would add.
+
+    An ordinary RUNNING mission with a current task needs no mission word, and neither does
+    ``NEEDS YOU`` when the current task is the one that awaits review (its own ``REVIEW`` says so).
+    """
+    if mission_status == "UNKNOWN":
+        return True
+    if not task:
+        return False
+    return mission_status == "RUNNING" or (mission_status == MISSION_NEEDS_YOU_LABEL and str(task.get("status") or "").upper() == "VERIFYING")
+
+
+def _strip_task_status(snapshot: dict[str, object], task: dict[str, object]) -> str:
+    """The task status the tmux strip shows.
+
+    The provider's operation row turns EXITED before the controller moves the task on, so a
+    RUNNING task whose newest operation exited with status 0 is shown as VERIFYING, the state
+    the controller records next, in step with the "Provider exited" message in the pane.
+    """
+    status = str(task.get("status") or "unknown")
+    if status.upper() != "RUNNING" or _known(_dict(snapshot.get("station_context")).get("executing_operation")):
+        return status
+    operations = _items(snapshot.get("operations"))
+    last = operations[-1] if operations else {}
+    same_task = str(last.get("task_id")) == str(task.get("id")) if last.get("task_id") is not None and task.get("id") is not None else True
+    if same_task and str(last.get("status") or "").upper() == "EXITED" and str(last.get("exit_code")) == "0":
+        return "VERIFYING"
+    return status
+
+
 def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     """`(mission label, task/state text)` for the tmux status line.
 
@@ -1629,14 +1818,15 @@ def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     a task is running in an ordinary RUNNING mission. The label (repository
     folder or mission name, at most 14 cells) says which mission this station is.
     """
-    mission_status = _text(_mission(snapshot).get("status") or "unknown", 16).upper()
+    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
     task = _dict(snapshot.get("current_task"))
     if task:
-        idle = _station_idle_phrase(snapshot) if str(task.get("status") or "").upper() == "RUNNING" else ""
-        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or _text(task.get('status') or 'unknown', 12).upper())
+        task_status = _strip_task_status(snapshot, task)
+        idle = _station_idle_phrase(snapshot) if task_status.upper() == "RUNNING" else ""
+        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or status_label(_text(task_status, 12).upper()))
     else:
         label = "No task"
-    if not (mission_status == "UNKNOWN" or (task and mission_status == "RUNNING")):
+    if not _station_status_is_implied(mission_status, task):
         label = f"{label}{_SEP}{mission_status}"
     from .bridge_switcher import mission_label
 
@@ -1650,17 +1840,17 @@ def _station_status_segments(snapshot: dict[str, object]) -> list[Segment]:
     Same content as `_station_status_parts` plus the state glyph: `Task 6 ● RUNNING`.
     A silent provider shows its idle phrase (`muted`, `warn` after ten minutes) instead.
     """
-    mission_status = _text(_mission(snapshot).get("status") or "unknown", 16).upper()
+    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
     task = _dict(snapshot.get("current_task"))
     out: list[Segment] = []
     if task:
-        status = str(task.get("status") or "unknown")
+        status = _strip_task_status(snapshot, task)
         idle = _station_idle_phrase(snapshot) if status.upper() == "RUNNING" else ""
         out.append((f"Task {_text(task_number(task) or '?', 8)} ", "info"))
         out.append((idle, _idle_role(idle)) if idle else _state_segment(_text(status, 12)))
     else:
         out.append(("No task", "muted"))
-    if not (mission_status == "UNKNOWN" or (task and mission_status == "RUNNING")):
+    if not _station_status_is_implied(mission_status, task):
         out += [(_SEP, "dim"), _state_segment(mission_status)]
     return out
 
@@ -1727,552 +1917,14 @@ def _project_events(value: object, limit: int = _MAX_EVENT_ROWS) -> list[dict[st
     return projected
 
 
-def _compact_pairs(value: dict[str, object], prefix: str = "", limit: int = 8) -> list[str]:
-    """Flatten a dict to `k=v` words: no braces or quotes, nulls skipped."""
-    pairs: list[str] = []
-    for key, item in value.items():
-        name = prefix + _text(key, 32)
-        if item is None or item == "" or item == []:
-            continue
-        if isinstance(item, dict):
-            pairs.extend(_compact_pairs(item, name + ".", limit))
-        elif isinstance(item, list):
-            pairs.append(f"{name}={len(item)} items")
-        elif isinstance(item, bool):
-            pairs.append(f"{name}={'yes' if item else 'no'}")
-        else:
-            pairs.append(f"{name}={_text(item, 40)}")
-    return pairs[:limit]
-
-
-_REVIEW_HOLD_EVENTS = frozenset({"review-hold", "review-hold-released"})  # operator-meaningful, never bookkeeping
-
-
-def _event_summary(event: dict[str, object]) -> str:
-    """One human line for a durable event."""
-    kind = str(event.get("kind") or event.get("event_type") or event.get("type") or "event")
-    raw = event.get("data")
-    data = raw if isinstance(raw, dict) else {}
-    task = f"task {_text(event['task_id'], 12)}" if _known(event.get("task_id")) else ""
-    op = f"op {_short_id(event.get('operation_id'))}" if _known(event.get("operation_id")) else ""
-    transition = ""
-    if _known(data.get("from")) or _known(data.get("to")):
-        transition = f"{_text(data.get('from') or '?', 20)} → {_text(data.get('to') or '?', 20)}"
-    reason = f" ({_text(data['reason'], 60)})" if _known(data.get("reason")) else ""
-    if kind in _REVIEW_HOLD_EVENTS and _known(data.get("summary")):
-        return _text(data["summary"], 160)
-    if kind == "mission-created":
-        return f"mission created · {_text(data.get('name') or '', 60)}".rstrip(" ·")
-    if kind == "task-added":
-        title = _text(data.get("title") or "", 60)
-        return f"{task or 'task'} added" + (f" · {title}" if title else "")
-    if kind in {"task-ready", "task-status"}:
-        return f"{task or 'task'} {transition}{reason}".strip()
-    if kind == "mission-status":
-        return f"mission {transition}{reason}".strip()
-    if kind == "operation-prepared":
-        return _SEP.join(part for part in (f"{op} prepared", task, _text(data.get("station") or "", 40)) if part)
-    if kind == "operation-running":
-        who = _text(data.get("route_id") or "", 40)
-        model = _text(data.get("model") or "", 40)
-        return _SEP.join(part for part in (f"{op} running", task, " ".join(item for item in (who, model) if item), f"pid {_text(data['process_pid'], 12)}" if _known(data.get("process_pid")) else "") if part)
-    if kind == "operation-exited":
-        state = f"{op} exited {_text(data.get('exit_code', '?'), 8)}"
-        return _SEP.join(part for part in (state, task, f"task now {_text(data['task_status'], 20)}" if _known(data.get("task_status")) else "") if part)
-    if kind in {"provider-selection", "capacity-refresh"}:
-        owner = _text(data.get("route") or data.get("provider") or "", 40)
-        model = _text(data.get("selected_model") if _known(data.get("selected_model")) else "", 40)
-        why = _text(plain_reason(data.get("rotation_reason") or ""), 40)
-        verb = "selected" if kind == "provider-selection" else "capacity refreshed"
-        return _SEP.join(part for part in (f"{verb} {owner}".rstrip(), model, why) if part)
-    if kind.startswith("command-"):
-        return f"command {kind[8:]}: {_text(data.get('command') or '', 60)}".rstrip(": ")
-    if kind == "native-session-restoration":
-        session = _short_id(data.get("session_id"), 13)
-        return _SEP.join(part for part in (f"session {_text(data.get('restoration_state') or 'unknown', 30).lower()}", _text(data.get("provider") or "", 20), session if session != "-" else "", op) if part)
-    if kind == "operation-uncertain":
-        return _SEP.join(part for part in (f"{op} outcome unknown".strip(), _text(data.get("reason") or "", 100)) if part)
-    if kind == "repository-checkpoint":
-        return _SEP.join(part for part in ("repository checkpoint saved", f"task {_text(data['task_id'], 12)}" if _known(data.get("task_id")) else task, f"revision {_text(data['revision'], 8)}" if _known(data.get("revision")) else "") if part)
-    if kind == "task-rejected":
-        return _SEP.join(part for part in (f"{task or 'task'} sent back", _text(data.get("reason") or "", 80)) if part)
-    if kind == "rotation-changed":
-        return f"rotation {transition}".strip()
-    if kind == "task-verified":
-        approved = " approved by operator" if data.get("approved") else ""
-        return f"{task or 'task'} verified · {_text(data.get('evidence_count', 0), 8)} evidence{approved}"
-    if kind == "verification-failed":
-        return _SEP.join(part for part in (f"{task or 'task'} verification failed", " ".join(_compact_pairs(data, limit=4))) if part)
-    if kind == "provider-handoff":
-        return _SEP.join(part for part in (
-            f"{task or 'task'} handed off after exit {_text(data.get('exit_code', '?'), 8)}",
-            f"failure {_text(data.get('failure_count', '?'), 6)}/{_text(data.get('max_failures', '?'), 6)}",
-        ) if part)
-    if kind == "provider-handoff-selected":
-        return f"handoff to {_text(data.get('station') or '?', 40)}"
-    if kind == "provider-handoff-exhausted":
-        return f"{task or 'task'} out of handoffs · {_text(data.get('failures', '?'), 6)} failures, limit {_text(data.get('max_failures', '?'), 6)}"
-    if kind == "provider-wait":
-        until = _relative_epoch(data.get("target_epoch"))
-        return _SEP.join(part for part in (
-            "waiting for capacity",
-            f"resumes {until}" if until else "",
-            _text(data.get("reason") or "", 60),
-        ) if part)
-    if kind == "controller-heartbeat":
-        return _text(data.get("controller_state") or "", 24)
-    pairs = _compact_pairs(data) if data else []
-    if not pairs:
-        fallback = event.get("summary")
-        return _text(fallback, 100) if _known(fallback) else ""
-    return " ".join(pairs)
-
-
 # Derived from the event registry (`bridge_events.EVENTS`), which holds the classification of every kind.
 _COLLAPSED_EVENTS = bridge_events.collapsed_kinds()
 _PLUMBING_EVENTS = bridge_events.plumbing_kinds()
-
-_TASK_STATE_WORDS = {
-    "READY": "ready", "QUEUED": "waiting", "RUNNING": "running", "VERIFYING": "awaiting approval",
-    "COMPLETED": "completed", "FAILED": "failed", "BLOCKED": "blocked", "PAUSED": "paused",
-    "CANCELLED": "cancelled",
-}
-_MISSION_STATE_WORDS = {
-    "PAUSED": "Paused", "STOPPING": "Stopping", "STOPPED": "Stopped", "COMPLETED": "Mission completed",
-    "CANCELLED": "Mission cancelled", "FAILED": "Mission failed",
-}
-_WINDOW_NAMES = {"5h": "5h", "weekly": "week", "monthly": "month"}
-
-
-def _window_brief(window: dict[str, object]) -> str:
-    """`5h 95%` (percent left) for one measurable window, else empty."""
-    if window.get("kind") == "opaque":
-        return ""
-    percent = _percent_left(window.get("remaining_percent"))
-    if percent is None:
-        return ""
-    name = _text(window.get("name") or window.get("kind") or "", 12)
-    return f"{_WINDOW_NAMES.get(name, name)} {percent}".strip()
-
-
-def _decision_owner(row: dict[str, object]) -> str:
-    return str(row.get("route") or row.get("provider") or "")
-
-
-def _capacity_brief(decisions: object, owner: str = "") -> str:
-    """`5h 95%, week 21%` for `owner` (else the first decision with measurable windows)."""
-    rows = [_dict(row) for row in decisions] if isinstance(decisions, list) else []
-    chosen = [row for row in rows if _decision_owner(row) == owner] or rows
-    for row in chosen:
-        windows = row.get("windows")
-        parts = [_window_brief(_dict(window)) for window in windows] if isinstance(windows, list) else []
-        brief = ", ".join(part for part in parts if part)
-        if brief:
-            return brief
-    return ""
-
-
-def _event_kind(event: dict[str, object]) -> str:
-    return str(event.get("kind") or event.get("event_type") or event.get("type") or "event")
-
-
-def _rotation_text(value: object) -> str:
-    """`codex,claude` as `codex → claude`."""
-    names = [item.strip() for item in str(value or "").split(",") if item.strip()]
-    return f" {glyph('arrow')} ".join(_text(item, 30) for item in names) or "default"
 
 
 def _task_numbers(snapshot: dict[str, object]) -> dict[str, str]:
     """Task id to displayed number for the tasks on this page (differs once tasks carry an ordinal)."""
     return {str(task["id"]): str(task_number(task)) for task in _items(snapshot.get("tasks")) if task.get("id") is not None}
-
-
-@dataclass(frozen=True)
-class _EventContext:
-    """What a humaniser needs to phrase one event."""
-
-    kind: str
-    data: dict[str, object]
-    event: dict[str, object]
-    task: str  # `Task 3`, or `Task` when the event names none
-    on_task: str  # ` on task 3`, or empty
-    reason: str  # ` (reason)`, or empty
-    owner: str  # route, provider or station named by the data
-    model: str
-    new_state: str
-    old_state: str
-
-
-# One phrase function per event kind. A handler returns the phrase, or `(phrase, is_plumbing)` when the
-# flag depends on the event; otherwise the flag comes from `bridge_events.EVENTS`.
-_HUMANIZERS: dict[str, Callable[[_EventContext], str | tuple[str, bool]]] = {}
-
-
-def _humanizer(*kinds: EventKind) -> Callable[[Callable[[_EventContext], str | tuple[str, bool]]], Callable[[_EventContext], str | tuple[str, bool]]]:
-    def register(function: Callable[[_EventContext], str | tuple[str, bool]]) -> Callable[[_EventContext], str | tuple[str, bool]]:
-        for kind in kinds:
-            _HUMANIZERS[str(kind)] = function
-        return function
-
-    return register
-
-
-def _with_reason(label: str, data: dict[str, object], limit: int = 100) -> str:
-    return label + (f" · {_text(data['reason'], limit)}" if _known(data.get("reason")) else "")
-
-
-@_humanizer(EventKind.REVIEW_HOLD, EventKind.REVIEW_HOLD_RELEASED)
-def _h_review_hold(ctx: _EventContext) -> str:
-    summary = _text(ctx.data.get("summary") or "", 160)
-    fallback = "Holding the next task for your review" if ctx.kind == "review-hold" else "Review hold released"
-    return summary[:1].upper() + summary[1:] if summary else fallback
-
-
-@_humanizer(EventKind.MISSION_COLOUR)
-def _h_mission_colour(ctx: _EventContext) -> str:
-    value = ctx.data.get("value")
-    if isinstance(value, int) and 1 <= value <= bridge_theme.MISSION_COUNT:
-        return f"Mission colour set to {value} ({bridge_theme.MISSION_HUE_NAMES[value - 1]})"
-    return "Mission colour back to automatic"
-
-
-@_humanizer(EventKind.MISSION_CREATED)
-def _h_mission_created(ctx: _EventContext) -> str:
-    return f"Mission created · {_text(ctx.data.get('name') or '', 60)}".rstrip(" ·")
-
-
-@_humanizer(EventKind.MISSION_STATUS)
-def _h_mission_status(ctx: _EventContext) -> str:
-    if ctx.new_state == "RUNNING":
-        return "Resumed" if ctx.old_state == "PAUSED" else "Mission started"
-    return f"{_MISSION_STATE_WORDS.get(ctx.new_state, 'Mission ' + (ctx.new_state.lower() or 'changed'))}{ctx.reason}"
-
-
-@_humanizer(EventKind.MISSION_SUSPEND_WHEN_RATE_LIMITED)
-def _h_mission_suspend_when_rate_limited(ctx: _EventContext) -> str:
-    return "Capacity-wait suspend " + ("on" if ctx.data.get("value") is True else "off")
-
-
-@_humanizer(EventKind.TASK_ADDED)
-def _h_task_added(ctx: _EventContext) -> str:
-    title = _text(ctx.data.get("title") or "", 60)
-    return f"{ctx.task} added" + (f" · {title}" if title else "")
-
-
-@_humanizer(EventKind.TASK_READY, EventKind.TASK_STATUS)
-def _h_task_status(ctx: _EventContext) -> tuple[str, bool]:
-    if ctx.new_state == "QUEUED" and ctx.data.get("reason") == "dependency-added":
-        return f"{ctx.task} waiting on a new dependency", False
-    word = _TASK_STATE_WORDS.get(ctx.new_state, ctx.new_state.lower() or "updated")
-    return f"{ctx.task} {word}{ctx.reason}", ctx.new_state == "RUNNING"
-
-
-@_humanizer(EventKind.TASK_STATUS_TRANSITION)
-def _h_task_status_transition(ctx: _EventContext) -> str:
-    return f"{ctx.task} {ctx.old_state.lower()} → {ctx.new_state.lower()}" + ctx.reason
-
-
-@_humanizer(EventKind.OPERATION_RUNNING)
-def _h_operation_running(ctx: _EventContext) -> str:
-    return f"Started {ctx.owner or 'provider'}" + (f" ({ctx.model})" if ctx.model else "") + ctx.on_task
-
-
-@_humanizer(EventKind.OPERATION_EXITED)
-def _h_operation_exited(ctx: _EventContext) -> str:
-    return f"Provider exited ({_text(ctx.data.get('exit_code', '?'), 8)}){ctx.on_task}"
-
-
-@_humanizer(EventKind.OPERATION_UNCERTAIN)
-def _h_operation_uncertain(ctx: _EventContext) -> str:
-    return "Provider outcome unknown" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.OPERATION_ABORTED_BEFORE_LAUNCH)
-def _h_operation_aborted(ctx: _EventContext) -> str:
-    return "Launch aborted" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.OPERATION_PREPARED)
-def _h_operation_prepared(ctx: _EventContext) -> str:
-    return f"Preparing {ctx.owner or 'provider'}{ctx.on_task}"
-
-
-@_humanizer(EventKind.PROVIDER_SELECTION)
-def _h_provider_selection(ctx: _EventContext) -> str:
-    return f"Selected {ctx.owner}".rstrip() + (f" ({ctx.model})" if ctx.model else "")
-
-
-@_humanizer(EventKind.PROVIDER_RESULT_DIAGNOSED)
-def _h_provider_result_diagnosed(ctx: _EventContext) -> str:
-    failure = ctx.data.get("failure")
-    cause = failure.get("cause") if isinstance(failure, dict) else None
-    return "Provider result recorded" + (f" · {_text(cause, 60)}" if _known(cause) else "")
-
-
-@_humanizer(EventKind.CAPACITY_REFRESH)
-def _h_capacity_refresh(ctx: _EventContext) -> str:
-    brief = _text(ctx.data.get("capacity_brief") or "", 80)
-    return f"Capacity: {ctx.owner or 'providers'} {brief}".rstrip() if brief else f"Capacity refreshed: {ctx.owner or 'providers'}"
-
-
-@_humanizer(EventKind.CAPACITY_REFRESH_ERROR)
-def _h_capacity_refresh_error(ctx: _EventContext) -> str:
-    return "Capacity refresh failed" + (f" ({_text(ctx.data['reason'], 60)})" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.SUSPEND_DECISION, EventKind.SUSPEND_INTENT, EventKind.SUSPEND_REFUSED, EventKind.SUSPEND_OUTCOME,
-            EventKind.SUSPEND_PROVIDER_STARTED,
-            EventKind.SUSPEND_WORK_RESUMED, EventKind.CAPACITY_WAKE_ARMED,
-            EventKind.CAPACITY_WAKE_UNAVAILABLE, EventKind.CAPACITY_WAKE_RESUMED,
-            EventKind.CAPACITY_WAKE_RESUME_UNVERIFIED, EventKind.CAPACITY_WAKE_PLAN)
-def _h_suspend_capacity(ctx: _EventContext) -> str:
-    labels = {
-        "suspend-decision": "Suspend path",
-        "suspend-intent": "Capacity suspend requested",
-        "suspend-refused": "Capacity suspend refused",
-        "suspend-outcome": "Capacity suspend finished",
-        "suspend-work-resumed": "Capacity-wait work resumed",
-        "suspend-provider-started": "Provider resumed after verified sleep",
-        "capacity-wake-armed": "Capacity wake armed",
-        "capacity-wake-unavailable": "Capacity wake unavailable",
-        "capacity-wake-resumed": "Capacity wake observed",
-        "capacity-wake-resume-unverified": "Capacity wake could not be verified",
-        "capacity-wake-plan": "Shared wake plan updated",
-    }
-    return _with_reason(labels.get(ctx.kind, "Capacity suspend updated"), ctx.data)
-
-
-@_humanizer(EventKind.CONTROLLER_HEARTBEAT)
-def _h_controller_heartbeat(ctx: _EventContext) -> str:
-    return "controller alive"
-
-
-@_humanizer(EventKind.CONTROLLER_HEARTBEAT_ERROR)
-def _h_controller_heartbeat_error(ctx: _EventContext) -> str:
-    return "controller heartbeat failed" + (f" ({_text(ctx.data['reason'], 40)})" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.CONTROLLER_EXITED_UNEXPECTEDLY)
-def _h_controller_exited(ctx: _EventContext) -> str:
-    return "Controller exited unexpectedly" + ctx.reason
-
-
-@_humanizer(EventKind.COMMAND_APPLIED, EventKind.COMMAND_FAILED, EventKind.COMMAND_QUEUED, EventKind.COMMAND_REJECTED)
-def _h_command(ctx: _EventContext) -> str:
-    return f"Command {ctx.kind[len('command-'):]}: {_text(ctx.data.get('command') or '', 60)}".rstrip(": ")
-
-
-@_humanizer(EventKind.STATION_HANDOFF, EventKind.PROVIDER_SWITCHED)
-def _h_provider_switched(ctx: _EventContext) -> str:
-    return f"Switched provider {_text(ctx.data.get('from') or '?', 30)} → {_text(ctx.data.get('to') or '?', 30)}{ctx.reason}"
-
-
-@_humanizer(EventKind.ROTATION_CHANGED)
-def _h_rotation_changed(ctx: _EventContext) -> str:
-    return f"Rotation changed to {_rotation_text(ctx.data.get('to'))}"
-
-
-@_humanizer(EventKind.ROTATION_APPLIED)
-def _h_rotation_applied(ctx: _EventContext) -> str:
-    return f"Rotation applied: {_rotation_text(ctx.data.get('routes') or ctx.data.get('providers'))}"
-
-
-@_humanizer(EventKind.ROTATION_REJECTED)
-def _h_rotation_rejected(ctx: _EventContext) -> str:
-    return "Rotation change rejected" + (f" · {_text(ctx.data['error'], 100)}" if _known(ctx.data.get("error")) else "")
-
-
-@_humanizer(EventKind.TASK_REJECTED)
-def _h_task_rejected(ctx: _EventContext) -> str:
-    return f"{ctx.task} sent back" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.MISSION_REOPENED)
-def _h_mission_reopened(ctx: _EventContext) -> str:
-    return _with_reason("Mission reopened", ctx.data)
-
-
-@_humanizer(EventKind.CONTROLLER_FAILED)
-def _h_controller_failed(ctx: _EventContext) -> str:
-    return _with_reason("Controller failed", ctx.data)
-
-
-@_humanizer(EventKind.STATION_STOPPED)
-def _h_station_stopped(ctx: _EventContext) -> str:
-    return "Provider station stopped"
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF)
-def _h_provider_handoff(ctx: _EventContext) -> str:
-    return (f"{ctx.task} handed off after exit {_text(ctx.data.get('exit_code', '?'), 8)} "
-            f"(failure {_text(ctx.data.get('failure_count', '?'), 6)}/{_text(ctx.data.get('max_failures', '?'), 6)})")
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF_SELECTED)
-def _h_provider_handoff_selected(ctx: _EventContext) -> str:
-    return f"Handing off to {_text(ctx.data.get('station') or '?', 40)}"
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF_EXHAUSTED)
-def _h_provider_handoff_exhausted(ctx: _EventContext) -> str:
-    return f"{ctx.task} out of handoffs ({_text(ctx.data.get('failures', '?'), 6)} failures, limit {_text(ctx.data.get('max_failures', '?'), 6)})"
-
-
-@_humanizer(EventKind.PROVIDER_WAIT)
-def _h_provider_wait(ctx: _EventContext) -> str:
-    until = _relative_epoch(ctx.data.get("target_epoch"))
-    return "Waiting for capacity" + (f", resumes {until}" if until else "") + (f" · {_text(ctx.data['reason'], 60)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.TASK_VERIFIED)
-def _h_task_verified(ctx: _EventContext) -> str:
-    return f"{ctx.task} verified" + (" (approved by you)" if ctx.data.get("approved") else "")
-
-
-@_humanizer(EventKind.VERIFICATION_FAILED)
-def _h_verification_failed(ctx: _EventContext) -> str:
-    return f"{ctx.task} verification failed"
-
-
-@_humanizer(EventKind.TASK_EVIDENCE_RECORDED)
-def _h_task_evidence(ctx: _EventContext) -> str:
-    count = ctx.data.get("evidence_count")
-    return f"{ctx.task} evidence recorded" + (f" ({_text(count, 6)} item{'s' if count != 1 else ''})" if _known(count) else "")
-
-
-@_humanizer(EventKind.TASK_AMENDED)
-def _h_task_amended(ctx: _EventContext) -> str:
-    return f"{ctx.task} amended"
-
-
-@_humanizer(EventKind.TASK_AMENDMENT_APPLIED)
-def _h_task_amendment_applied(ctx: _EventContext) -> str:
-    return f"{ctx.task} amendment applied"
-
-
-@_humanizer(EventKind.TASK_PRIORITY)
-def _h_task_priority(ctx: _EventContext) -> str:
-    return f"{ctx.task} priority changed"
-
-
-@_humanizer(EventKind.TASK_REORDERED)
-def _h_task_reordered(ctx: _EventContext) -> str:
-    return f"{ctx.task} reordered"
-
-
-@_humanizer(EventKind.DEPENDENCY_ADDED)
-def _h_dependency_added(ctx: _EventContext) -> str:
-    deps = ctx.data.get("depends_on")
-    wait = ", ".join(_text(item, 12) for item in deps) if isinstance(deps, list) else _text(deps or "", 40)
-    return f"{ctx.task} now waits for {wait}".rstrip()
-
-
-@_humanizer(EventKind.TASK_PROPOSED)
-def _h_task_proposed(ctx: _EventContext) -> str:
-    return f"Agent proposed {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.TASK_PROPOSAL_ACCEPTED)
-def _h_task_proposal_accepted(ctx: _EventContext) -> str:
-    return f"Proposal accepted: {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.TASK_PROPOSAL_REJECTED)
-def _h_task_proposal_rejected(ctx: _EventContext) -> str:
-    return f"Proposal rejected: {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.NATIVE_SESSION_RESTORATION)
-def _h_native_session(ctx: _EventContext) -> str:
-    state = _text(ctx.data.get("restoration_state") or "unknown", 30).lower().replace("_", " ")
-    return f"Session {state}" + (f" · {_text(ctx.data['provider'], 20)}" if _known(ctx.data.get("provider")) else "")
-
-
-@_humanizer(EventKind.REPOSITORY_CHECKPOINT)
-def _h_repository_checkpoint(ctx: _EventContext) -> str:
-    return "Repository checkpoint saved"
-
-
-@_humanizer(EventKind.OPERATION_PROCESS)
-def _h_operation_process(ctx: _EventContext) -> str:
-    return "Provider process started"
-
-
-@_humanizer(EventKind.OPERATION_PROGRESS)
-def _h_operation_progress(ctx: _EventContext) -> str:
-    return "Provider progress noted"
-
-
-@_humanizer(EventKind.CONTROLLER_MODE)
-def _h_controller_mode(ctx: _EventContext) -> str:
-    return f"Controller mode: {_text(ctx.data.get('actual_mode') or 'unknown', 20)}"
-
-
-@_humanizer(EventKind.CONTROLLER_CONFIG)
-def _h_controller_config(ctx: _EventContext) -> str:
-    return "Controller configured"
-
-
-@_humanizer(EventKind.CONTROLLER_OWNERSHIP)
-def _h_controller_ownership(ctx: _EventContext) -> str:
-    return "Controller ownership verified"
-
-
-@_humanizer(EventKind.STATION_OBSERVATION)
-def _h_station_observation(ctx: _EventContext) -> str:
-    return "Provider screen observed"
-
-
-@_humanizer(
-    EventKind.STEERING_HANDOFF_CONSUMED, EventKind.STEERING_HANDOFF_REQUESTED, EventKind.STEERING_PAUSE_APPLIED,
-    EventKind.STEERING_PAUSE_REQUESTED, EventKind.STEERING_STOP_TASK_APPLIED, EventKind.STEERING_STOP_TASK_REQUESTED,
-    EventKind.STEERING_VERIFY_APPLIED, EventKind.STEERING_VERIFY_DRAINED, EventKind.STEERING_VERIFY_REQUESTED,
-)
-def _h_steering(ctx: _EventContext) -> str:
-    return "Steering " + ctx.kind[len("steering-"):].replace("-", " ")
-
-
-def _humanize_event(event: dict[str, object], numbers: dict[str, str] | None = None) -> tuple[str, bool]:
-    """(operator-facing phrase, is_plumbing) for one durable event.
-
-    `numbers` maps task ids to the number shown for them, when that differs. The phrase comes from
-    the kind's entry in `_HUMANIZERS`; the flag from `bridge_events.EVENTS` unless the handler
-    returns its own. A kind without a handler (including a stored kind this build does not know)
-    reads `Label · detail`.
-    """
-    kind = _event_kind(event)
-    raw = event.get("data")
-    data = raw if isinstance(raw, dict) else {}
-    task_id = event.get("task_id") if _known(event.get("task_id")) else data.get("task_id")
-    if _known(event.get("task_ordinal")):
-        task_id = event["task_ordinal"]
-    elif numbers and _known(task_id):
-        task_id = numbers.get(str(task_id), task_id)
-    model_value = data.get("model") if _known(data.get("model")) else data.get("selected_model")
-    context = _EventContext(
-        kind=kind,
-        data=data,
-        event=event,
-        task=f"Task {_text(task_id, 12)}" if _known(task_id) else "Task",
-        on_task=f" on task {_text(task_id, 12)}" if _known(task_id) else "",
-        reason=f" ({_text(plain_reason(data['reason']), 60)})" if _known(data.get("reason")) else "",
-        owner=_text(data.get("route_id") or data.get("route") or data.get("provider") or data.get("station") or "", 40),
-        model=_text(model_value, 40) if _known(model_value) else "",
-        new_state=str(data.get("to") or "").upper(),
-        old_state=str(data.get("from") or "").upper(),
-    )
-    plumbing = bridge_events.is_plumbing(kind)
-    handler = _HUMANIZERS.get(kind)
-    if handler is None and kind.startswith("command-"):
-        handler = _h_command
-    elif handler is None and kind.startswith("steering-"):
-        handler = _h_steering
-    if handler is not None:
-        result = handler(context)
-        return result if isinstance(result, tuple) else (result, plumbing)
-    detail = _event_summary(event)
-    label = kind.replace("-", " ").capitalize()
-    return (f"{label} · {detail}" if detail else label), plumbing
 
 
 @dataclass(frozen=True)
@@ -2346,10 +1998,9 @@ def _owner_windows(snapshot: dict[str, object], owner: str) -> list[str]:
 
 
 def _next_task(snapshot: dict[str, object]) -> dict[str, object] | None:
-    current = _dict(snapshot.get("current_task"))
+    """The first task waiting to start. A READY current task counts: while nothing runs it is the next task."""
     return next(
-        (task for task in _items(snapshot.get("tasks"))
-         if str(task.get("status", "")).upper() in {"READY", "QUEUED"} and task.get("id") != current.get("id")),
+        (task for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() in {"READY", "QUEUED"}),
         None,
     )
 
@@ -2432,9 +2083,9 @@ def _status_strip(snapshot: dict[str, object], width: int = 0) -> tuple[str, str
                 [f"task {held} awaits your review", f"/approve {held}", "/continue"],
                 [f"task {held} awaits your review", "/continue"],
             ], width), "warn"
-        return _fit_strip([f"task {number} awaits approval{more}", f"type /approve {number}"], width), "warn"
+        return _fit_strip([f"task {number} awaits your review{more}", f"type /approve {number}"], width), "warn"
     following = _next_task(snapshot)
-    upcoming = f"next: task {_text(task_number(following) if task_number(following) is not None else '?', 12)}" if following else "no task waiting · Ctrl-E adds one"
+    upcoming = f"task {_text(task_number(following) if task_number(following) is not None else '?', 12)} ready" if following else "no task waiting · Ctrl-E adds one"
     if status == "STOPPING":
         return _fit_strip(["stopping after the current step"], width), "warn"
     if status in {"CREATED", "STOPPED"}:
@@ -2669,7 +2320,7 @@ def _waiting_on(task: dict[str, object], tasks: list[dict[str, object]], status:
 
 
 def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
-    """`id  ● STATE  P5  after 6  title` as segments, with the columns aligned.
+    """`id  ● STATE  prio 5  after 6  title` as segments, with the columns aligned.
 
     The id, priority and dependencies are secondary (`muted`); the state is the
     one coloured element; the title stays in the default foreground. Rows of
@@ -2678,7 +2329,7 @@ def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
     ids = [_text(task_number(task) if task_number(task) is not None else "?", 40) for task in tasks]
     states = [_text(task.get("status", "unknown"), 24).upper() for task in tasks]
     shown = [_state_text(state) for state in states]
-    priorities = [f"P{_text(task['priority'], 8)}" if _known(task.get("priority")) else "" for task in tasks]
+    priorities = [f"prio {_text(task['priority'], 8)}" if _known(task.get("priority")) else "" for task in tasks]  # `P0` reads as "most urgent"; here a higher number runs first
     task_status = {str(item.get("id")): str(item.get("status", "")).upper() for item in tasks}
     waits = [_waiting_on(task, tasks, task_status) for task in tasks]
     id_width = max((len(item) for item in ids), default=0)
@@ -2704,7 +2355,7 @@ def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
 
 
 def _order_list_rows(tasks: list[dict[str, object]]) -> list[str]:
-    """`id  ● STATE  P5  after 6  title` with the id, state, priority and dependency columns aligned."""
+    """`id  ● STATE  prio 5  after 6  title` with the id, state, priority and dependency columns aligned."""
     return [_segments_text(row) for row in _order_list_segments(tasks)]
 
 
@@ -2973,7 +2624,7 @@ def _provider_state(
     return f"not ready{reason}", "warn"
 
 
-_CLOCK_ROW = re.compile(r"^(?P<clock>[\d-]{2}:[\d-]{2}:[\d-]{2})  (?P<text>.*)$")
+_CLOCK_ROW = re.compile(r"^(?P<clock>[\d-]{2}:[\d-]{2}:[\d-]{2}|\w{2,4} \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2})  (?P<text>.*)$")
 
 
 def _activity_row_segments(row: str, role: str) -> list[Segment]:
@@ -2993,9 +2644,9 @@ def _activity_role(text: str) -> str:
     lowered = text.lower()
     if any(word in lowered for word in ("failed", "unknown", "out of handoffs", "unexpectedly", "rejected", "aborted")):
         return "error"
-    if lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)"):
+    if (lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)")) or lowered.startswith("provider stopped by bridge"):
         return "error"
-    if any(word in lowered for word in ("awaiting approval", "waiting for capacity", "paused", "blocked")):
+    if any(word in lowered for word in ("awaiting approval", "awaiting review", "waiting for capacity", "paused", "blocked")):
         return "warn"
     return "info"
 
@@ -3021,6 +2672,28 @@ def _provider_header_segments(name: str, model: str, state: str, role: str, flag
     return out
 
 
+def _finished_operation_text(data: dict[str, object]) -> str:
+    """`last operation exited 0 · 1m ago · awaiting review` when the newest operation is no longer running, else ``""``.
+
+    Reads the operation row that the Sessions view shows, so Health and Sessions agree.
+    """
+    if _known(_dict(data.get("station_context")).get("executing_operation")):
+        return ""
+    operations = _items(data.get("operations"))
+    last = operations[-1] if operations else {}
+    status = str(last.get("status") or "").upper()
+    if not status or status in ACTIVE_OPERATION_STATUSES:
+        return ""
+    exit_code = last.get("exit_code")
+    age = _relative_epoch(last.get("updated_at") or last.get("created_at"), _clock_epoch())
+    review = any(str(task.get("status") or "").upper() == "VERIFYING" for task in (*_items(data.get("tasks")), _dict(data.get("current_task"))))
+    return _SEP.join(part for part in (
+        f"last operation {status.lower()}" + ("" if exit_code is None else f" {_text(exit_code, 8)}"),
+        age or "",
+        "awaiting review" if review else "",
+    ) if part)
+
+
 def _recent_operation_segments(op: dict[str, object], age: str | None) -> list[Segment]:
     """`  recent: task 3 · succeeded · exit 0 · 2m ago`: plumbing in `dim`, a failure in `error`."""
     status = _text(op.get("status") or "-", 20).lower()
@@ -3029,7 +2702,7 @@ def _recent_operation_segments(op: dict[str, object], age: str | None) -> list[S
     return [
         (f"  recent: task {_text(op.get('task_ordinal') or op.get('task_id') or '-', 12)}{_SEP}", "dim"),
         (status, "error" + QUIET if failed else "dim"),
-        (_SEP, "dim"), (f"exit {exit_code}", "error" + QUIET if exit_code not in {"-", "0"} else "dim"),
+        (_SEP, "dim"), (bridge_format.exit_short(exit_code), "error" + QUIET if exit_code not in {"-", "0"} else "dim"),
         *([(f"{_SEP}{age}", "dim")] if age else []),
     ]
 
@@ -3136,7 +2809,9 @@ class _ConsoleState:
     expand_requested: bool = False
     usage_hscroll: int = 0
     usage_legend: bool = False
+    usage_all: bool = False
     saved_notice: bool = False  # show "saved as ID" in the status strip until the first key
+    outside_station: bool = False  # opened by `llm-bridge control` in the user's own terminal, so Ctrl-] keys do not apply
     usage_reader: Callable[[], dict[str, object]] | None = field(default=None, repr=False)
     content_width: int = 0  # columns available to view content; set by the last draw (0 = unknown)
     response_overlay: bool = False
@@ -3158,6 +2833,8 @@ class _ConsoleState:
     document_heading_selected: int = 0
     document_pending: bool = False
     document_task_id: str | None = None
+    document_kind: str = "prompt"  # what the pending read returns: prompt, output or diff
+    _confirm_overlay_hidden: bool = field(default=False, repr=False)  # the approval dialog sits behind a pager
     edit_document_requested: bool = False
     document_edit_pending: bool = False
     edit_initial_text: str = ""
@@ -3329,7 +3006,7 @@ class _ConsoleState:
             self.document_notice = ""
             task_id, revision, prompt, error = document_result
             self.document_pending = False
-            self.document_task_id = None if task_id == "objective" else task_id
+            self.document_task_id = None if task_id == "objective" or self.document_kind != "prompt" else task_id
             if prompt is None:
                 self.document_edit_pending = False
                 self.output.append(error or "Full source unavailable; edit cancelled. Retry the full read.")
@@ -3341,6 +3018,11 @@ class _ConsoleState:
                 if self.document_viewer is not None:
                     self.document_viewer.release()
                 title = f"{self.mission_id[:12]} · objective" if task_id == "objective" else f"{self.mission_id[:12]} · task {task_id} · r{revision} · prompt"
+                if self.document_kind != "prompt":
+                    title = f"{self.mission_id[:12]} · task {task_id} · {self.document_kind}"
+                    if self.confirm_command is not None and self.response_overlay:
+                        self.response_overlay = False  # the pager draws below the response overlay
+                        self._confirm_overlay_hidden = True
                 self.document_viewer = DocumentViewer(title, prompt)
         if snapshot_result is not None:
             data, error = snapshot_result
@@ -3409,7 +3091,7 @@ class _ConsoleState:
                 # Like Codex CLI and Claude Code, the command line stays empty after a
                 # failure; the failed command is the newest history entry (Up / Ctrl-P).
                 self.rejected_submission = self.submitted_draft
-                recall_hint = "↑ recalls the command"
+                recall_hint = _RECALL_HINT
             self.submitted_draft = None
             if result_text:
                 response_lines = result_text.splitlines() or [result_text]
@@ -3567,6 +3249,22 @@ class _ConsoleState:
         thread.start()
         return True
 
+    def _complete_command(self) -> None:
+        """Tab: a single match completes; several complete their common prefix, and Tab again lists them."""
+        candidates = _command_completions(self.command)
+        if not candidates:
+            return
+        common = candidates[0] if len(candidates) == 1 else os.path.commonprefix(candidates)
+        if len(common) > len(self.command) or (len(candidates) == 1 and common != self.command):
+            self.command = common
+            self.command_cursor = len(common)
+            return
+        if len(candidates) > 1:
+            shown = ", ".join(candidates[:12])
+            line = f"Matches: {shown}" + (f" and {len(candidates) - 12} more" if len(candidates) > 12 else "")
+            if not self.output or self.output[-1] != line:
+                self.output.append(line)
+
     def open_help(self, topic: str) -> None:
         """Show a help topic, or with `view:NAME` the short help of one view, in the document viewer."""
         from .bridge_help import topic_text, view_help
@@ -3576,13 +3274,18 @@ class _ConsoleState:
         self.close_document()
         self.document_task_id = None
         self.document_notice = ""
-        self.document_viewer = DocumentViewer(f"Bridge help · {topic[len('view:'):] if by_view else topic}", text)
+        self.document_viewer = DocumentViewer(f"Bridge help · {topic[len('view:'):] if by_view else topic}", text, rendered=True, plain=True)
 
     def _confirm_or_dispatch(self, command: str) -> bool:
+        typed = command
         command, problem = _expand_console_alias(command, self.snapshot)
         if problem is not None:
-            self.output.append(problem)
-            return False
+            # Like a command that fails after dispatch: the line is cleared (the caller does that when
+            # this returns True) and the refused command is the newest history entry for Up / Ctrl-P.
+            self.history.append(typed.strip())
+            self.history_index = None
+            self.output.append(f"{problem}{_SEP}{_RECALL_HINT}")
+            return True
         reason = _confirmation_reason(command)
         if reason:
             self.confirm_command = command
@@ -3591,7 +3294,15 @@ class _ConsoleState:
             lines = [f"{reason} · mission {_short_id(self.mission_id)}"]
             if approving is not None:
                 lines += _approval_summary(self.snapshot, approving)
-            self.output.extend([*lines, "Y approve · N or Esc cancel" if approving is not None else "Y confirm · N or Esc cancel"])
+            if approving is not None:
+                footer = "Y approve · N or Esc cancel · o output · d diff"
+            elif _is_reject_command(command):
+                footer = "Y Reject and retry (uses capacity) · H Reject and hold · N or Esc cancel"
+            elif reason.startswith("Cancel this mission"):
+                footer = "Y Cancel mission · N or Esc Keep mission"  # "cancel" must not be both the question and the way out
+            else:
+                footer = "Y confirm · N or Esc cancel"
+            self.output.extend([*lines, footer])
             self.response_overlay = True
             return True
         return self._dispatch(command)
@@ -3700,6 +3411,8 @@ class _ConsoleState:
             if key == "\x1b":
                 self.close_document()
                 return True
+            if viewer.plain and key in _FILE_VIEWER_KEYS:
+                return True  # a help page has no mode, wrap, export, copy, edit or heading controls
             if key in {"q", "KEY_ENTER", "\n", "\r"}:
                 self.close_document()
             elif key in {"KEY_UP", "k"}:
@@ -3764,6 +3477,13 @@ class _ConsoleState:
                     command, self.confirm_command = self.confirm_command, None
                     self.response_overlay = False
                     self._dispatch(command)
+                elif isinstance(key, str) and key.lower() == "h" and _is_reject_command(self.confirm_command):
+                    # Reject and hold: the same rejection, with the task paused in the same step (CLIUX-025).
+                    command, self.confirm_command = self.confirm_command + " --hold", None
+                    self.response_overlay = False
+                    self._dispatch(command)
+                elif isinstance(key, str) and key.lower() in {"o", "d"} and (ref := self._approval_task_ref()) is not None:
+                    self.request_task_evidence(ref[-1], "output" if key.lower() == "o" else "diff", ref=ref)
                 elif isinstance(key, str) and key.lower() == "n" or key in {"\x1b", "KEY_ESCAPE"}:
                     self.confirm_command = None
                     self.response_overlay = False
@@ -3807,17 +3527,13 @@ class _ConsoleState:
             self.choose_view((self.view_index + 1) % len(VIEWS))
             return True
         if key == "\t" and self.input_focused:
-            if not self.completion_candidates or self.command not in self.completion_candidates:
-                self.completion_prefix = self.command
-                self.completion_candidates = _command_completions(self.command)
-                self.completion_index = 0
-            if self.completion_candidates:
-                self.command = self.completion_candidates[self.completion_index % len(self.completion_candidates)]
-                self.command_cursor = len(self.command)
-                self.completion_index += 1
+            self._complete_command()
             return True
         if key == "KEY_BTAB" and not self.input_focused:
             self.choose_view((self.view_index - 1) % len(VIEWS))
+            return True
+        if key in {"KEY_UP", "KEY_DOWN"} and self.input_focused and not self.search_editing:
+            self._history(-1 if key == "KEY_UP" else 1)  # Up/Down walk the history while the command line has focus
             return True
         if key == "\x10":  # Ctrl-P recalls the previous command.
             if self.search_editing:
@@ -3850,16 +3566,25 @@ class _ConsoleState:
         if key == "l" and self.view == "Usage" and not self.input_focused and not self.command:
             self.usage_legend = not self.usage_legend
             return True
+        if key == "a" and self.view == "Usage" and not self.input_focused and not self.command and "all_text" in _dict(self.snapshot.get("usage")):
+            self.usage_all = not self.usage_all
+            return True
         if key == "v" and self.view == "Tasks" and not self.input_focused:
             task = self.selected_task()
             if task is not None:
                 self.request_task_document(str(task_number(task) or ""))
+            return True
+        if key in {"o", "d"} and self.view == "Tasks" and not self.input_focused:
+            task = self.selected_task()
+            if task is not None and task_number(task) is not None:
+                self.request_task_evidence(str(task_number(task)), "output" if key == "o" else "diff")
             return True
         if key == "o" and self.view == "Overview" and not self.input_focused:
             if not self.document_pending:
                 self._invalidate_document_read()
                 generation = self._document_generation
                 self.document_pending = True
+                self.document_kind = "prompt"
                 def read_objective() -> None:
                     try:
                         from .bridge import open_store
@@ -4172,6 +3897,7 @@ class _ConsoleState:
             pending_proposals=int(pending) if isinstance(pending, (int, float)) and not isinstance(pending, bool) else 0,
             selected_task=self.selected_task_anchor,
             holding=_review_hold_task(self.snapshot) is not None,
+            has_terminal=str(_dict(self.snapshot.get("station_mode")).get("configured_mode") or "").lower() != "headless",
         )
         query = self.palette_filter.casefold()
         return [action for action in actions if query in f"{action.label} {action.effect} {action.typed}".casefold()]
@@ -4220,6 +3946,9 @@ class _ConsoleState:
         self.document_search_editing = False
         self.document_export_editing = False
         self.document_heading_list = False
+        if self._confirm_overlay_hidden:
+            self._confirm_overlay_hidden = False
+            self.response_overlay = self.confirm_command is not None  # back to the approval dialog
 
     def _invalidate_document_read(self) -> None:
         with self._result_lock:
@@ -4236,6 +3965,7 @@ class _ConsoleState:
         self._invalidate_document_read()
         generation = self._document_generation
         self.document_pending = True
+        self.document_kind = "prompt"
         self.document_edit_pending = for_edit
 
         def read_document() -> None:
@@ -4255,6 +3985,44 @@ class _ConsoleState:
                     self._document_result = result
 
         threading.Thread(target=read_document, name="llm-bridge-document", daemon=True).start()
+
+    def _approval_task_ref(self) -> list[str] | None:
+        """CLI arguments naming the task the open approval dialog names, taken from the approval command itself.
+
+        The loaded task list is not consulted: it can be a different page, or be replaced by a
+        refresh, while the dialog is open, and `task output` / `task diff` resolve the task
+        themselves, exactly as the approval will.
+        """
+        target = _approval_task(self.confirm_command or "")
+        if target is None:
+            return None
+        kind, value = target
+        return ["--task-id" if kind == "id" else "--task", value]
+
+    def request_task_evidence(self, number: str, kind: str, *, ref: list[str] | None = None) -> None:
+        """Read `task output` or `task diff` of task ``number`` off the input thread and open it in the pager.
+
+        ``ref`` overrides the CLI arguments that name the task; without it they come from the loaded list.
+        """
+        if self.document_pending:
+            self.output.append("A full task read is already in progress.")
+            return
+        self._invalidate_document_read()
+        generation = self._document_generation
+        self.document_pending = True
+        self.document_kind = kind
+
+        def read_evidence() -> None:
+            try:
+                text = str(self.dispatch(self.mission_id, shlex.join(["task", kind, *(ref if ref is not None else _task_ref(self.snapshot, number))])))
+                result = (number, "", None, text) if text.startswith("error:") else (number, "", text or f"(task {number} has no {kind})\n", "")
+            except Exception as exc:
+                result = (number, "", None, f"Could not read task {kind}: {_text(exc, 160)}")  # type: ignore[assignment]  # None stands for a missing value in this row
+            with self._result_lock:
+                if generation == self._document_generation:
+                    self._document_result = result
+
+        threading.Thread(target=read_evidence, name="llm-bridge-task-evidence", daemon=True).start()
 
     def selected_station_name(self) -> str | None:
         stations = _items(self.snapshot.get("stations"))
@@ -4366,7 +4134,9 @@ class _ConsoleState:
         from .bridge_documents import render_ansi_segments
 
         usage = _dict(self.snapshot.get("usage"))
-        text = str(usage.get("text") or "Loading full llm-usage dashboard...")
+        limited = "all_text" in usage  # the default text is the mission's rotation; `a` shows every provider
+        everything = limited and self.usage_all
+        text = str(usage.get("all_text" if everything else "text") or "Loading full llm-usage dashboard...")
         styled = [[(localize_cells(part), role) for part, role in line] for line in render_ansi_segments(text)]
         lines = [_segments_text(line) for line in styled]
         parts = ["Usage", str(usage.get("status") or "refreshing")]
@@ -4374,10 +4144,14 @@ class _ConsoleState:
         parts.append(f"updated {_age(age)} ago" if age is not None else "first sample pending")
         if usage.get("error"):
             parts.append(f"last refresh failed: {_text(usage.get('error'), 60)}")
+        if limited:
+            parts.append("all providers (a: rotation)" if everything else "rotation (a: all)")
+        parts.append("live llm-usage read")  # the source, so a difference from the controller's observation is explicable
         status = [(_SEP.join(parts), _status_role(_SEP.join(parts)))]
+        differences = [[(localize_cells(line), "warn")] for line in _usage_disagreements(self.snapshot)]
         table_start = next((index for index, line in enumerate(lines) if _USAGE_HEADER.match(line)), None)
         if table_start is None:
-            return [status, *styled]
+            return [status, *differences, *styled]
         table = _fit_usage_segments(styled[table_start:], self.content_width)
         while table and not _segments_text(table[-1]).strip():
             table.pop()
@@ -4385,7 +4159,7 @@ class _ConsoleState:
             table[0] = [(_segments_text(table[0]), "heading")]
         if len(table) > 1 and _segments_text(table[1]).strip() and set(_segments_text(table[1]).strip()) <= {"─", "-", " "}:
             table[1] = [(_segments_text(table[1]), "dim")]
-        result = [status, *table]
+        result = [status, *differences, *table]
         legend = [line for line in styled[1:table_start] if _segments_text(line).strip()]
         if legend:
             result.extend([[], *(legend if self.usage_legend else [[("l shows the legend", "dim")]])])
@@ -4402,10 +4176,9 @@ class _ConsoleState:
         def row(label: str, value: str) -> str:
             return f"{label:<{_BRIDGE_LABEL}}{value}"
 
-        next_task = next(
-            (task for task in tasks if task.get("status") in {"READY", "QUEUED"} and task.get("id") != current_task.get("id")),
-            None,
-        )
+        if str(current_task.get("status") or "").upper() in {"READY", "QUEUED"}:
+            current_task = {}  # waiting to start: it is the Next task below, and nothing runs now
+        next_task = next((task for task in tasks if task.get("status") in {"READY", "QUEUED"}), None)
         order_counts = _count_phrase(_dict(data.get("task_counts")))
         proposals = _dict(data.get("proposal_counts"))
         proposal_total = sum(count for count in proposals.values() if isinstance(count, (int, float)))
@@ -4415,11 +4188,11 @@ class _ConsoleState:
         rows = [
             row("Controller", _controller_line(data)),
             row("Now", ("task " + _task_label(current_task) + (_SEP + _idle_phrase(data) if _idle_phrase(data) else "")) if current_task else "idle"),
-            row("Next", "task " + _task_label(next_task) if next_task else "nothing ready"),
+            row("Next", "task " + _task_label(next_task) if next_task else finished_next(str(_mission(data).get("status") or "").upper(), "console") or NEXT_NOTHING),
             row("Tasks", orders),
         ]
         policy = _dict(_dict(data.get("mission")).get("execution_policy"))
-        policy_text = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
+        policy_text = bridge_format.LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
         rows.append(row("Policy", policy_text))
         needs = _needs_you_rows(data)
         for index, text in enumerate(needs):
@@ -4460,16 +4233,21 @@ class _ConsoleState:
         return [
             f"Task {_text(task_number(task) if task_number(task) is not None else '?', 32)}: {_cut_text(task.get('title') or 'Untitled', 100)}",
             f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
-            f"Origin {_text(task.get('origin') or 'operator', 24)} | proposal {_text(task.get('proposal_status') or 'not a proposal', 32)} | proposed by {_text(task.get('proposed_by_operation') or 'unknown', 32)}",
+            " | ".join(part for part in (
+                f"Origin {_text(task.get('origin') or 'operator', 24)}",
+                f"proposal {_text(task['proposal_status'], 32)}" if _known(task.get("proposal_status")) else "",
+                f"proposed by {_text(task['proposed_by_operation'], 32)}" if _known(task.get("proposed_by_operation")) else "",
+            ) if part),
+            *([line] if (line := _last_run_line(self.snapshot, task)) else []),
             "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
             "Acceptance criteria:",
             *([f"  {index + 1}. {_cut_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),
             "Verification evidence:",
             *([f"  {index + 1}. {_evidence_text(item)}" for index, item in enumerate(evidence[:_MAX_DETAIL_ITEMS])] if isinstance(evidence, list) and evidence else ["  none recorded"]),
-            "Pending amendment: " + (_cut_text(json.dumps(pending, ensure_ascii=False, sort_keys=True), 400) if pending else "none"),
+            "Pending amendment: " + (_cut_text(bridge_format.amendment_text(pending), 400) if pending else "none"),
             "Amendment history:",
             *([
-                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20)}: {_cut_text(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True), 240)}"
+                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20).lower()}: {_cut_text(bridge_format.amendment_text(item.get('changes', {})), 240)}"
                 for item in amendments[:5] if isinstance(item, dict)
             ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
             "Prompt preview (v opens full prompt): " + _cut_text(task.get("prompt") or "", 800),
@@ -4579,7 +4357,7 @@ class _ConsoleState:
                 cell(item.get("model"), 28),
                 _state_text(cell(item.get("status"), 20)),
                 _short_id(item.get("native_session_id")),
-                cell(item.get("restoration_state"), 24),
+                restoration_word(item.get("restoration_state")),
             )
             for item in operations
         ]
@@ -4614,28 +4392,44 @@ class _ConsoleState:
             model_source = item.get("model_source") if item.get("model_source") == "observed" else ("configured" if _known(item.get("configured_model")) else "unknown")
             effort_source = item.get("effort_source") if item.get("effort_source") == "observed" else ("configured" if _known(item.get("configured_effort")) else "unknown")
             capability = _dict(item.get("capabilities"))
-            role = item.get("role") if item.get("role_source") == "observed" else "unknown"
+            role = item.get("role") if item.get("role_source") == "observed" else None
             activity_age = item.get("activity_age_seconds")
-            activity_age_text = f"{int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else "unknown"
+            activity_age_text = f"age {int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else ""
             lifecycle_age = item.get("lifecycle_age_seconds")
-            lifecycle_age_text = f"{int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else "unknown"
-            return [
-                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status'), 30)}",
-                f"role: {_text(role, 80)} ({_text(item.get('role_source') or 'unknown', 20)})",
-                f"mission: {_text(item.get('mission_name') or item.get('mission_id'), 100)}",
-                f"age: {_span(item.get('age_seconds'), 2) if item.get('age_seconds') is not None else 'unknown'}",
-                f"model: {_text(model, 100)} ({_text(model_source, 20)})",
-                f"reasoning effort: {_text(effort, 40)} ({_text(effort_source, 20)})",
-                f"activity: {_text(item.get('activity'), 180)}",
-                f"last observed: {_text(item.get('last_activity_at') or 'unknown', 80)}",
-                f"native status: {_text(item.get('native_status') or 'unknown', 40)}",
-                f"parent: {_text(item.get('parent_id') or 'none', 100)}",
-                f"freshness: {_text(item.get('freshness'), 40)} · identity: {_text(item.get('identity_source') or 'provider metadata', 60)}",
-                f"activity freshness: {_text(item.get('activity_freshness') or 'unknown', 24)} · age {activity_age_text}",
-                f"lifecycle freshness: {_text(item.get('lifecycle_freshness') or 'unknown', 24)} · age {lifecycle_age_text}",
-                f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}",
-                "Esc returns to the map.",
+            lifecycle_age_text = f"age {int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else ""
+            mission = item.get("mission_name") if _known(item.get("mission_name")) else item.get("mission_id")
+            # A field the provider did not report is left out of the list and named once on the last line.
+            fields: list[tuple[str, str]] = [
+                ("role", f"{_text(role, 80)} ({_text(item.get('role_source') or 'observed', 20)})" if _known(role) else ""),
+                ("mission", _text(mission, 100) if _known(mission) else ""),
+                ("age", _span(item.get("age_seconds"), 2) if _known(item.get("age_seconds")) else ""),
+                ("model", f"{_text(model, 100)} ({_text(model_source, 20)})" if _known(model) else ""),
+                ("reasoning effort", f"{_text(effort, 40)} ({_text(effort_source, 20)})" if _known(effort) else ""),
+                ("activity", _text(item.get("activity"), 180) if _known(item.get("activity")) else ""),
+                ("last observed", _text(item.get("last_activity_at"), 80) if _known(item.get("last_activity_at")) else ""),
+                ("native status", _text(item.get("native_status"), 40) if _known(item.get("native_status")) else ""),
+                ("activity freshness", _SEP.join(part for part in (_text(item["activity_freshness"], 24) if _known(item.get("activity_freshness")) else "", activity_age_text) if part)),
+                ("lifecycle freshness", _SEP.join(part for part in (_text(item["lifecycle_freshness"], 24) if _known(item.get("lifecycle_freshness")) else "", lifecycle_age_text) if part)),
             ]
+            shown = {label: value for label, value in fields if value}
+            missing = [label for label, value in fields if not value]
+            identity = f"identity: {_text(item.get('identity_source') or 'provider metadata', 60)}"
+            rows = [f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status_label') or item.get('status'), 30)}"]
+            for label in ("role", "mission", "age", "model", "reasoning effort", "activity", "last observed", "native status"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"parent: {_text(item.get('parent_id') or 'none', 100)}")
+            rows.append(f"freshness: {_text(item['freshness'], 40)} · {identity}" if _known(item.get("freshness")) else identity)
+            for label in ("activity freshness", "lifecycle freshness"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}")
+            if {"activity freshness", "lifecycle freshness"} <= set(missing):
+                missing = [label for label in missing if "freshness" not in label] + ["freshness"]
+            if missing:  # one statement, wrapped so a narrow terminal does not cut it
+                rows.extend(textwrap.wrap("Not reported by the provider: " + ", ".join(missing), 70, subsequent_indent="  "))
+            rows.append("Esc returns to the map.")
+            return rows
         rows = format_agent_map(agent_map)
         rows.append("↑↓ select · Enter inspect/switch · i inspect · /agents refresh")
         return rows
@@ -4643,6 +4437,7 @@ class _ConsoleState:
     def _system_rows(self) -> list[str]:
         data = self.snapshot
         out: list[str] = []
+        internals: list[str] = []  # implementation facts for diagnosing Bridge itself; shown on the last row
 
         def add(label: str, value: str) -> None:
             if value:
@@ -4667,10 +4462,11 @@ class _ConsoleState:
             if heartbeat:
                 age = _int_or_none(heartbeat.get("age_seconds"))
                 lock = heartbeat.get("owner_lock_held")
+                if str(lock).lower() in {"true", "false"}:
+                    internals.append("owner lock held" if str(lock).lower() == "true" else "owner lock not held")
                 add("Controller heartbeat", _SEP.join(part for part in (
                     _text(heartbeat["reported_state"], 20).lower() if _known(heartbeat.get("reported_state")) else "",
                     f"{_age(age)} ago" if age is not None else "",
-                    "owner lock held" if str(lock).lower() == "true" else "owner lock not held" if str(lock).lower() == "false" else "",
                     f"mission wants {_text(heartbeat['desired_mission_status'], 20)}" if _known(heartbeat.get("desired_mission_status")) else "",
                     f"liveness {_text(heartbeat['current_liveness'], 20)}" if _known(heartbeat.get("current_liveness")) else "",
                 ) if part) or "none recorded")
@@ -4681,9 +4477,10 @@ class _ConsoleState:
         if isinstance(execution, dict):
             elapsed = _int_or_none(execution.get("operation_elapsed_seconds"))
             verified = _int_or_none(execution.get("seconds_since_verified_progress"))
+            finished = _finished_operation_text(data)
             add("Execution", _SEP.join(part for part in (
                 f"iteration {_text(execution['iteration'], 8)}" if _known(execution.get("iteration")) else "",
-                f"operation running {_span(elapsed)}" if elapsed is not None else "",
+                finished or (f"operation running {_span(elapsed)}" if elapsed is not None else ""),
                 f"last verified progress {_age(verified)} ago" if verified is not None else "no verified progress yet",
             ) if part))
         elif _known(execution):
@@ -4701,12 +4498,11 @@ class _ConsoleState:
         elif _known(health):
             add("Health", _text(health, 220))
         persistence = _dict(data.get("persistence"))
-        if persistence:
-            add("Persistence", _SEP.join(part for part in (
-                f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
-                f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
-                _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
-            ) if part))
+        internals.extend(part for part in (
+            f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
+            f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
+            _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
+        ) if part)
         criteria = _dict(data.get("criteria"))
         if criteria and _int_or_none(criteria.get("total")):
             add("Criteria", f"{_int_or_none(criteria.get('verified')) or 0}/{_int_or_none(criteria.get('total'))} verified")
@@ -4751,6 +4547,7 @@ class _ConsoleState:
             add("Capacity", header or "no capacity observation")
             for line in summaries:
                 out.append(f"{'':<{_SYSTEM_LABEL}}{_with_square(line)}")
+        add("Internals", _SEP.join(internals))
         return out or ["System and capacity status is not available in this snapshot."]
 
     def _log_rows(self) -> list[str]:
@@ -4793,6 +4590,19 @@ class _ConsoleState:
             ])
         return rows
 
+    def action_note(self, avail: int) -> str:
+        """The selected action's full description, when its row is cut at ``avail`` columns; else ``""``."""
+        actions = self.palette_actions()
+        if not actions:
+            return ""
+        index = min(max(0, self.selected), len(actions) - 1)
+        row = self._palette_rows()[index]
+        if cell_width(row) <= avail:
+            return ""
+        action = actions[index]
+        unavailable = self.action_unavailable(action)
+        return f"{action.effect}{_SEP}unavailable: {unavailable}" if unavailable else action.effect
+
     def handle_mouse(self, y: int, x: int, height: int, width: int) -> None:
         if self.response_overlay:
             return
@@ -4808,7 +4618,8 @@ class _ConsoleState:
             self.choose_view(_nav_index_at(x, self.view_index, width, "  " if self.full else " "))
         elif self.view == "Actions" and y >= nav_y + 1:
             count = len(self.palette_actions())
-            start = _scroll_start(self.selected, max(1, count), max(1, height-6))
+            note_rows = 1 if self.action_note(max(1, width - 2)) else 0
+            start = _scroll_start(self.selected, max(1, count), max(1, height - 6 - note_rows))
             self.selected = max(0, min(count-1, start + y - nav_y - 1))
         elif self.full and y >= 3 and self.selectable:
             rows = self.rows()
@@ -4854,7 +4665,7 @@ def _percent_role(percent: float) -> str:
 
 _IDLE_WARN_SECONDS = 600
 _DURATION = r"\d+[dhms](?: \d+[dhms])*"
-_STATE_WORDS = "RUNNING|READY|QUEUED|VERIFYING|COMPLETED|FAILED|BLOCKED|CANCELLED|PAUSED|PAUSING|STOPPED|STOPPING|CREATED|ACTIVE"
+_STATE_WORDS = "NEEDS YOU|RUNNING|READY|QUEUED|VERIFYING|REVIEW|COMPLETED|FAILED|BLOCKED|CANCELLED|PAUSED|PAUSING|STOPPED|STOPPING|CREATED|ACTIVE"
 
 
 @functools.lru_cache(maxsize=4)
@@ -4951,7 +4762,7 @@ def _inline_segments(text: str, base: str = "info", *, context: str = "generic")
         elif kind == "limited":
             out.append((token, "capacity_empty"))
         else:  # state word, optionally behind its glyph
-            look = _state_look(token.split()[-1])
+            look = _state_look(MISSION_NEEDS_YOU_LABEL if token.endswith(MISSION_NEEDS_YOU_LABEL) else token.split()[-1])
             role = look[1] if look else base
             if context == "needs" and role in {"state_review", "state_failed"}:
                 role += QUIET
@@ -4996,7 +4807,7 @@ def _mission_status_role(status: str) -> str:
 
 
 def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """`LLM BRIDGE · ▌ name · ● STATE`: wordmark, mission chip and name, state glyph and word."""
+    """`LLM BRIDGE · ▌ name (ID) · ● STATE`: wordmark, mission chip, name and short ID, state glyph and word."""
     mission = _mission(state.snapshot)
     if state.snapshot:
         status = _text(mission.get("status", "unknown"), 20).upper()
@@ -5005,13 +4816,28 @@ def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
     context = _dict(state.snapshot.get("station_context"))
     if status == "PAUSED" and context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
         status = "PAUSING"
+    status = _mission_state_word(state.snapshot, status)
     shown = _state_text(status)
-    room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
-    name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room))
+    badge = ""
+    if state.outside_station:
+        badge = "outside station" if status in ENDED_MISSION_STATUSES else f"outside station{_SEP}/attach"
+    room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2 - (len(badge) + len(_SEP) if badge else 0)
+    if badge and room < 12:  # no space for the mission name next to the badge: the name wins
+        badge = ""
+        room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
+    # The short ID tells two missions with the same name apart without relying on the identity colour (CLIUX-038).
+    id_text = f" ({_short_id(state.mission_id)})"
+    if room - len(id_text) < 12:
+        id_text = ""
+    name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room - len(id_text)))
     chip_role = _mission_role_of(state.snapshot, state.mission_id)
+    # The identity bar carries colour only.  Its ASCII form is the same character as the ASCII
+    # separator (`| |`), so ASCII mode leaves it out of the header.
+    mark: list[Segment] = [] if ascii_mode() else [(glyph("chip"), chip_role)]
     return [
-        ("LLM BRIDGE", "brand"), (_SEP, "dim"), (glyph("chip"), chip_role), (" " + name, "info"), (_SEP, "dim"),
+        ("LLM BRIDGE", "brand"), (_SEP, "dim"), *mark, ((" " if mark else "") + name, "info"), *([(id_text, "dim")] if id_text else []), (_SEP, "dim"),
         (shown, _mission_status_role(status)),
+        *([(_SEP, "dim"), (badge, "warn")] if badge else []),
     ]
 
 
@@ -5080,6 +4906,37 @@ def _draw_command_line(window: curses.window, y: int, state: _ConsoleState, widt
         _put(window, y, used, _placeholder(state), width - used, role="dim", attr=curses.A_DIM)
 
 
+def _slash_popup_rows(state: _ConsoleState, width: int, room: int) -> list[list[Segment]]:
+    """The rows of the slash-command list (at most `room`), or none when no command name is being typed."""
+    matches = _slash_matches(state.command)
+    if matches is None or room < 2:
+        return []
+    if not matches:
+        return [_inline_segments(f"No command starts with {_clip(state.command, 24)}", "warn") + [(f"{_SEP}/help lists them", "dim")]]
+    rows: list[list[Segment]] = [[("Commands", "heading"), (f"{_SEP}Tab completes{_SEP}type to narrow", "dim")]]
+    shown = room - 1
+    if len(matches) > shown:
+        shown -= 1
+    name_width = min(26, max(cell_width(name) for name, _ in matches[:shown]))
+    for name, text in matches[:shown]:
+        pad = " " * (name_width - min(name_width, cell_width(name)) + 2)
+        rows.append([("  ", "info"), (name, "key"), (pad, "info"), (text, "muted")])
+    if len(matches) > shown:
+        rows.append([(f"  {len(matches) - shown} more{_SEP}keep typing to narrow the list", "dim")])
+    return rows
+
+
+def _draw_slash_popup(window: curses.window, state: _ConsoleState, prompt_y: int, width: int, top: int) -> None:
+    """Draw the slash-command list in the rows just above the command line."""
+    if not state.input_focused or state.palette_filter_editing or state.search_editing:
+        return
+    rows = _slash_popup_rows(state, width, min(9, prompt_y - top))
+    for offset, segments in enumerate(rows):
+        y = prompt_y - len(rows) + offset
+        _put(window, y, 0, " " * width, width, role="info")
+        _put_segments(window, y, 0, _clip_segments(segments, width), width)
+
+
 def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     """Keys that work in the current view, most useful first, plus the closing hint."""
     if state.palette_filter_editing:
@@ -5089,12 +4946,15 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     if state.search_editing:
         return ["type text to find in tasks", "Enter search", "Esc cancel", "Ctrl-U clear"], ""
     if state.input_focused:
+        matches = _slash_matches(state.command) if not state.full else None
+        if matches:  # a short pane has no room for the list: name the matches in the hint row
+            return [name for name, _ in matches[:6]], "Tab completes"
         return ["Enter run", "Tab complete", "Ctrl-P/Ctrl-N history", "Ctrl-U clear", "Esc back to view"], "/help commands"
     views = "Tab/F1-9 views"
     # The empty command line already says "type a command or /help".
     view = state.view
     if view == "Overview":
-        items = ["o objective", "Ctrl-E add task", views, "Ctrl-D exit", "Ctrl-K actions"]
+        items = ["o objective", "Ctrl-E add task", views, "Ctrl-D exit"]  # Ctrl-K is on the prompt line
         if _inside_station():
             items.insert(0, "Ctrl-] P provider")
             if not state.full:
@@ -5102,7 +4962,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     elif view == "Tasks" and state.task_detail:
         items = ["Esc back", "↑↓ scroll", "v view prompt", "Ctrl-R amend", "PgUp/PgDn page", views, "Ctrl-D exit"]
     elif view == "Tasks":
-        items = ["Enter inspect", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find", "↑↓ select", views, "Ctrl-D exit", "PgUp/PgDn page"]
+        items = ["Enter inspect", "↑↓ select", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find", views, "Ctrl-D exit", "PgUp/PgDn page"]
         if state.search_query:
             items.insert(0, "Esc clear filter")
     elif view == "Providers":
@@ -5110,7 +4970,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     elif view == "Activity":
         items = ["PgUp older", "PgDn newer", "Ctrl-T show all" if state.hide_plumbing else "Ctrl-T hide bookkeeping", "↑↓ scroll", views, "Ctrl-D exit"]
     elif view == "Actions":
-        items = ["Enter run action", "↑↓ select", "Ctrl-K filter", views, "Ctrl-D exit", "Ctrl-G command line"]
+        items = ["Enter run action", "↑↓ select", views, "Ctrl-D exit", "Ctrl-G command line"]  # Ctrl-K is on the prompt line
     elif view == "Usage":
         items = ["↑↓ scroll", "l legend", "Shift-←/→ pan", views, "Ctrl-D exit"]
     else:
@@ -5118,16 +4978,25 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     return items, "? help"
 
 
+_QUIT_HINT = "Ctrl-D exit"
+
+
 def _hint_chosen(state: _ConsoleState, width: int) -> list[str]:
-    """The hint items that fit `width` (lowest-value ones dropped first), closing hint last."""
+    """The hint items that fit `width` (lowest-value ones dropped first), closing hint last.
+
+    The key that leaves the console and the closing `? help` hint are never dropped.
+    """
     items, closing = _hint_items(state)
     chosen = list(items)
     while chosen:
         parts = [*chosen, closing] if closing else chosen
         if cell_width(localize(_SEP.join(parts))) <= width:
             return parts
-        chosen.pop()
-    return [_clip(closing or items[0], width)]
+        droppable = [index for index, item in enumerate(chosen) if item != _QUIT_HINT]
+        if not droppable:
+            break
+        chosen.pop(droppable[-1])
+    return [_clip(closing or items[0], width)]  # too narrow even for the quit key: `? help` explains it
 
 
 def _hint(state: _ConsoleState, width: int = 100) -> str:
@@ -5439,6 +5308,9 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
     preview_task = state.selected_task() if state.view == "Tasks" and not state.task_detail else None
     list_height = _orders_list_height(content_height, width, len(rows)) if preview_task is not None else None
     visible = list_height if list_height is not None else content_height
+    action_note = state.action_note(avail) if state.view == "Actions" and content_height > 2 else ""
+    if action_note:
+        visible = content_height - 1  # the last content row shows the selected action's full description
     if state.selectable:
         selected_row = state.detail_scroll if state.view == "Tasks" and state.task_detail else state.selected_row()
         start = _scroll_start(selected_row, len(display), visible)
@@ -5485,6 +5357,8 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         else:
             role = roles[index] if roles is not None and index < len(roles) else _row_role(state.view, value)
             _put(window, y, gutter, value, avail, role=role)
+    if action_note:
+        _put(window, content_top + content_height - 1, gutter, _clip(action_note, avail), avail, role="muted")
     if preview_task is not None and list_height is not None:
         separator_y = content_top + list_height
         _put_segments(window, separator_y, gutter, _order_separator_segments(preview_task, avail), avail)
@@ -5493,6 +5367,7 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
             _put(window, y, gutter, f"{label_text:<{_BRIDGE_LABEL}}", avail, role="muted")
             _put(window, y, gutter + _BRIDGE_LABEL, value, max(0, avail - _BRIDGE_LABEL), role=value_role)
     if height >= 2:
+        _draw_slash_popup(window, state, height - 2, width, 3)
         _draw_status_lines(window, state, height - 2, height - 1, width)
         _place_cursor(window, state, height - 2, width)
     window.noutrefresh()
@@ -5541,7 +5416,7 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
         return
     _put(window, 0, 0, "Command response", width, role="heading")
     if height >= 2:
-        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-9/Tab switch view", width, role="dim")
+        _put(window, 1, 0, _SEP.join(("Arrows/PgUp/PgDn scroll", "Esc/Enter close", "F1-9/Tab switch view")), width, role="dim")
     rows = _response_rows(state, width)
     content_top = 2
     footer_rows = 1 if height >= 4 else 0
@@ -5580,7 +5455,7 @@ def _draw_document(window: curses.window, state: _ConsoleState) -> None:
     mode = "rendered" if viewer.rendered else "source"
     rich_rows = viewer.rich_lines(width) if viewer.rendered else ()
     degraded = " · plain source" if viewer.rendered and rich_rows and rich_rows[0][0][0].startswith("[plain source") else ""
-    _put(window, 0, 0, f"{viewer.title} · read-only · {mode}{degraded}", width, role="heading")
+    _put(window, 0, 0, viewer.title if viewer.plain else f"{viewer.title} · read-only · {mode}{degraded}", width, role="heading")
     content_height = max(1, height - 2)
     if state.document_heading_list:
         headings = viewer.headings()
@@ -5615,10 +5490,12 @@ def _draw_document(window: curses.window, state: _ConsoleState) -> None:
         bridge_redraw.note_wall(0.15)  # a render or layout is running; repaint when it lands
     footer = (f"q close | {viewer.top + 1}/{max(1, viewer.layout_rows)} {viewer.source_size}B "
               f"{viewer.search_count} matches | / find m mode w wrap s export")
+    if viewer.plain:
+        footer = _SEP.join(["↑↓ scroll", "/ find", "Esc close", *([viewer.footer_extra] if viewer.footer_extra else [])])
     if state.document_heading_list:
         footer = "Headings · Up/Down select · Enter go · Esc close"
     elif state.document_notice:
-        footer = "q close | " + state.document_notice
+        footer = ("Esc close | " if viewer.plain else "q close | ") + state.document_notice
     if state.document_export_editing:
         footer = "Export original source to new path: " + state.document_entry
         if state.document_notice:
@@ -5721,6 +5598,46 @@ def _edit_task_prompt(
         state.output.append(f"Task editor failed: {_text(exc, 180)}")
 
 
+TASK_DRAFT_PREFIX = "composer-recovery-task-"
+TASK_PLACEHOLDER = 'First line = title. Describe the change. Optional: "Acceptance:" followed by "- criterion" lines.'
+_RESTORE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def retained_composer_draft(now: float | None = None) -> tuple[Path, str] | None:
+    """The newest non-empty composer draft kept in the last 24 hours, with its text.
+
+    Esc in the composer keeps the draft in the private drafts directory;
+    a saved or discarded draft is deleted, so what remains is what was kept.
+    """
+    from .bridge_store import default_state_dir
+
+    draft_dir = default_state_dir() / "drafts"
+    current = time.time() if now is None else now
+    newest: tuple[float, Path] | None = None
+    try:
+        names = list(draft_dir.glob(TASK_DRAFT_PREFIX + "*.md"))
+    except OSError:
+        return None
+    for path in names:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size == 0 or info.st_size > 1_048_576:
+            continue
+        if current - info.st_mtime > _RESTORE_MAX_AGE_SECONDS:
+            continue
+        if newest is None or info.st_mtime > newest[0]:
+            newest = (info.st_mtime, path)
+    if newest is None:
+        return None
+    try:
+        text = newest[1].read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return (newest[1], text) if text.strip() else None
+
+
 def _compose_task_prompt(
     window: curses.window,
     state: _ConsoleState,
@@ -5739,18 +5656,30 @@ def _compose_task_prompt(
         if str(task.get("status", "")).upper() in {"COMPLETED", "FAILED", "CANCELLED"}:
             state.output.append(f"Cannot amend task {task_id}: it is {str(task.get('status')).lower()}. Choose an editable task.")
             return
+    restored: Path | None = None
+    if task_id is None and not initial_text:
+        kept = retained_composer_draft()
+        if kept is not None:
+            restored, initial_text = kept
+    options: dict[str, object] = {}
+    if task_id is None:
+        options["placeholder"] = TASK_PLACEHOLDER
+        options["draft_prefix"] = TASK_DRAFT_PREFIX
+    if restored is not None:
+        options["restored_from"] = restored
     try:
         source = compose_document(
             initial_text,
             title=f"Amend task {task_id} prompt" if task_id else "Add task prompt",
             window=window,
+            **options,  # type: ignore[arg-type]  # only the keyword names above are ever set
         )
     finally:
         window.clear()
         window.refresh()
     if source is None:
-        if LAST_RECOVERY_DRAFT is not None:
-            state.output.append(f"Task source retained for recovery: {LAST_RECOVERY_DRAFT}")
+        if LAST_RECOVERY_DRAFT is not None and LAST_RECOVERY_DRAFT.is_file() and LAST_RECOVERY_DRAFT.stat().st_size:
+            state.output.append("Draft kept · Ctrl-E reopens it" if task_id is None else "Task unchanged; your edit is kept in the private drafts folder")
         return
     from .bridge_store import default_state_dir
 
@@ -5819,10 +5748,11 @@ def _terminal_outcome(source_mission: str, action: TerminalAction) -> str:
     return f"Switched to mission {_short_id(action.mission_id, 4)}."
 
 
-def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Overview") -> int:
+def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Overview", outside_station: bool = False) -> int:
     # Ignore stale exported dimensions from a detached tmux station.
     curses.use_env(False)
     state = _ConsoleState(mission_id, dispatch, snapshot, full)
+    state.outside_station = outside_station
     global JUST_SAVED_MISSION
     if JUST_SAVED_MISSION == mission_id:
         state.saved_notice, JUST_SAVED_MISSION = True, None
@@ -6210,6 +6140,6 @@ def run_console(mission_id: str, dispatch: Dispatch, snapshot: Snapshot) -> int:
 def run_control(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, initial_view: str = "Overview") -> int:
     """Run the full-screen terminal control UI."""
     try:
-        return _run(mission_id, dispatch, snapshot, full=True, initial_view=initial_view)
+        return _run(mission_id, dispatch, snapshot, full=True, initial_view=initial_view, outside_station=True)
     except bridge_hangup.TerminalGone:
         return bridge_hangup.abandon_terminal()

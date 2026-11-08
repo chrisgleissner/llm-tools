@@ -7,7 +7,8 @@
 # First run:  docker compose run --rm coordinator init
 # Then:       docker compose up -d
 # Admin:      docker compose exec coordinator bridge-coordinator info
-#             docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
+# Locked out: sudo ./install-cli.sh once, then from any SSH session:
+#               llm-bridge-coordinator reset-password   (add --temporary to force a change at the next sign-in)
 # Flash storage (SD cards, eMMC): add compose.low-write.yaml, see
 #   docs/distributed/install.md (Low-write host).
 # See docs/distributed/install.md (Container deployment).

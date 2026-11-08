@@ -28,6 +28,9 @@ FROZEN = (
 def state(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(directory))
+    config = tmp_path / "llm-tools.toml"
+    config.write_text(FROZEN, encoding="utf-8")  # mission create checks route names against the current config
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
     return directory
 
 
@@ -173,7 +176,9 @@ def test_task_reject_receipt_text_and_json(tmp_path, state, capsys) -> None:
         first = _verifying_task(store, mid)
         second = _verifying_task(store, mid, "other work")
     assert main(["task", "reject", "--mission", mid, "--task", str(first), "--reason", "tests missing"]) == 0
-    assert capsys.readouterr().out.strip() == f'Sent back · task {first} "Write the thing" · QUEUED · reason recorded'
+    assert capsys.readouterr().out.strip() == (
+        f'Sent back · task {first} "Write the thing" · QUEUED · it runs again when the mission starts (uses capacity)'
+        f' · to hold it instead: llm-bridge task pause --mission {mid[:8]} --task {first}')
 
     assert main(["task", "reject", "--mission", mid, "--task", str(second), "--reason", "bad", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -192,7 +197,7 @@ def test_task_reject_requires_a_reason_and_the_right_state(tmp_path, state, caps
     assert exit_info.value.code == 2
     assert "--reason" in capsys.readouterr().err
 
-    assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "nope"]) == 2
+    assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "nope"]) == 4
     assert "not awaiting verification" in capsys.readouterr().err
     assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "x" * 2001]) == 2
     assert "at most 2000" in capsys.readouterr().err
@@ -208,7 +213,7 @@ def test_console_reject_alias_with_explicit_and_implicit_task(tmp_path, state, c
         second = _verifying_task(store, mid, "second")
 
     ambiguous = dispatch_console_command(mid, "/reject needs more tests")
-    assert ambiguous == f"error: reject needs a task number · tasks awaiting approval: {first}, {second}"
+    assert ambiguous == f"error: reject needs a task number · tasks awaiting review: {first}, {second}"
 
     explicit = json.loads(dispatch_console_command(mid, f"/reject {first} -vv output was missing"))
     assert explicit["status"] == "APPLIED" and explicit["result"]["status"] == "QUEUED"
@@ -220,7 +225,7 @@ def test_console_reject_alias_with_explicit_and_implicit_task(tmp_path, state, c
 
     assert dispatch_console_command(mid, "reject") == "error: usage: reject [TASK-NUMBER] REASON"
     assert dispatch_console_command(mid, f"reject {first}") == "error: usage: reject [TASK-NUMBER] REASON"
-    assert dispatch_console_command(mid, "reject because") == "error: reject needs a task number · no task awaits approval"
+    assert dispatch_console_command(mid, "reject because") == "error: reject needs a task number · no task awaits review"
     assert dispatch_console_command(mid, f"reject {first} again").startswith("error: ")
 
 
@@ -235,7 +240,7 @@ def test_tui_reject_alias_expands_and_asks_for_confirmation() -> None:
     explicit, _ = bridge_tui._expand_console_alias("reject 9 do it again", snapshot)
     assert shlex.split(explicit)[:4] == ["task", "reject", "--task", "9"]
     assert bridge_tui._expand_console_alias("reject", snapshot)[1] == "error: usage: reject [TASK-NUMBER] REASON"
-    assert "no task awaits approval" in bridge_tui._expand_console_alias("reject why", {"tasks": []})[1]
+    assert "no task awaits review" in bridge_tui._expand_console_alias("reject why", {"tasks": []})[1]
     literal, literal_problem = bridge_tui._expand_console_alias("reject 'unterminated", snapshot)
     assert literal_problem is None and shlex.split(literal)[-1] == "--reason='unterminated"  # prose is taken literally
     assert "reject" in bridge_tui._CONSOLE_ALIASES
@@ -384,7 +389,7 @@ def test_rotation_console_command_and_help(tmp_path, state, capsys) -> None:
 
     with pytest.raises(SystemExit):
         main(["rotation", "--help"])
-    assert "applies from the next provider selection" in capsys.readouterr().out
+    assert "applies from the next provider selection" in " ".join(capsys.readouterr().out.split())
     with pytest.raises(SystemExit):
         main(["start", "--help"])
     help_text = " ".join(capsys.readouterr().out.split())
@@ -438,7 +443,7 @@ def test_start_override_is_refused_while_a_controller_owns_the_mission(tmp_path,
     monkeypatch.setattr(bridge, "start_mission", lambda *args, **kwargs: started.append(args) or 0)
     monkeypatch.setattr(bridge, "controller_running", lambda _mission: True)
 
-    assert main(["start", "--mission", mid, "--routes", "codex"]) == 2
+    assert main(["start", "--mission", mid, "--routes", "codex"]) == 4
     assert f"llm-bridge rotation --mission {mid[:8]} --set LIST" in capsys.readouterr().err
     assert started == []
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -584,7 +589,9 @@ def test_reject_reruns_the_task_with_the_reason_and_a_changed_rotation(tmp_path,
         assert out.splitlines()[0] == "Rotation changed: codex → claude (saved for this mission)"
         assert "Applies from the next provider selection" in out.splitlines()[1]
         out = _call(env, "task", "reject", "--mission", mid, "--task", task, "--reason", "The parser ignores comments")
-        assert out.strip() == 'Sent back · task 1 "Write the parser" · QUEUED · reason recorded'
+        assert out.strip() == (
+            'Sent back · task 1 "Write the parser" will run again now (uses capacity)'
+            f' · to hold it instead: llm-bridge task pause --mission {mid[:8]} --task 1')
 
         _wait(lambda: len(received()) == 2 and task_status() == "VERIFYING")
         second = received()[1]

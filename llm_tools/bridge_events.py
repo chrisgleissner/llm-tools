@@ -97,3 +97,38 @@ def recent_hidden_kinds() -> frozenset[str]:
 
 def plumbing_kinds() -> frozenset[str]:
     return frozenset(kind for kind, spec in EVENTS.items() if spec.plumbing)
+
+
+# Retention classes (see ``bridge_retention`` and the "Data retention" section of the operations guide).
+#
+# ``AUDIT_SUMMARY_KINDS`` is the permanent record of a mission: it is never deleted by retention.
+# ``AUDIT_RECORD_KINDS`` is what the operator or the controller decided or did (task edits, operation
+# outcomes, handoffs, steering requests, suspend decisions): it is kept while a mission is not finished and
+# for ``finished_missions_days`` after it finishes. Every other kind is ``diagnostic`` bookkeeping that
+# only explains how the controller got there; ``events_days`` deletes it from finished missions.
+# A kind that is not in ``EventKind`` (an old database may hold one) is treated as an audit record.
+AUDIT_SUMMARY_KINDS = frozenset(str(kind) for kind in (
+    K.MISSION_CREATED, K.MISSION_STATUS, K.MISSION_REOPENED, K.TASK_VERIFIED, K.VERIFICATION_FAILED,
+    K.EVENTS_PRUNED, K.OPERATION_LOG_PRUNED, K.CONTROLLER_FAILED, K.CONTROLLER_EXITED_UNEXPECTEDLY,
+))
+AUDIT_RECORD_KINDS = frozenset(str(kind) for kind in (
+    K.TASK_ADDED, K.TASK_AMENDED, K.TASK_AMENDMENT_APPLIED, K.TASK_DECLINED_RELEASED, K.TASK_INTERRUPTED_RELEASED,
+    K.TASK_EVIDENCE_RECORDED, K.TASK_LAUNCH_REFUSED, K.TASK_NOTICE_DEFERRED, K.TASK_NOTICE_DELIVERED, K.TASK_PRIORITY, K.TASK_PROPOSAL_ACCEPTED, K.TASK_PROPOSAL_REJECTED,
+    K.TASK_PROPOSED, K.TASK_AWAITING_ANSWER, K.TASK_REJECTED, K.TASK_REORDERED, K.TASK_STATUS,
+    K.COMMAND_FAILED, K.COMMAND_REJECTED, K.DEPENDENCY_ADDED, K.MISSION_AUTO_CONTINUE, K.MISSION_POLICY_CHANGED,
+    K.MISSION_SUSPEND_WHEN_RATE_LIMITED, K.MISSION_WAITING_FOR_OPERATOR, K.MANAGED_PROCESS_EXITED,
+    K.OPERATION_ABORTED_BEFORE_LAUNCH, K.OPERATION_EXITED, K.OPERATION_UNCERTAIN, K.PROVIDER_DECLINED,
+    K.PROVIDER_HANDOFF, K.PROVIDER_HANDOFF_EXHAUSTED, K.PROVIDER_HANDOFF_SELECTED, K.PROVIDER_ORPHANED,
+    K.PROVIDER_SWITCHED, K.PROVIDER_USAGE_LIMIT, K.REVIEW_HOLD, K.REVIEW_HOLD_RELEASED, K.ROTATION_APPLIED,
+    K.ROTATION_CHANGED, K.ROTATION_REJECTED, K.STATION_HANDOFF, K.STEERING_HANDOFF_REQUESTED,
+    K.STEERING_PAUSE_REQUESTED, K.STEERING_STOP_TASK_REQUESTED, K.STEERING_VERIFY_REQUESTED, K.SUSPEND_INTENT,
+    K.SUSPEND_OUTCOME, K.SUSPEND_REFUSED, K.SUSPEND_WORK_RESUMED, K.SUSPEND_DECISION,
+))
+DIAGNOSTIC_KINDS = frozenset(str(kind) for kind in K) - AUDIT_SUMMARY_KINDS - AUDIT_RECORD_KINDS
+
+
+def retention_class(kind: str) -> str:
+    """``"summary"``, ``"audit"`` or ``"diagnostic"``: how long retention keeps events of ``kind``."""
+    if kind in AUDIT_SUMMARY_KINDS:
+        return "summary"
+    return "diagnostic" if kind in DIAGNOSTIC_KINDS else "audit"

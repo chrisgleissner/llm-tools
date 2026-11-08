@@ -12,6 +12,7 @@ from typing import Any
 
 from . import common
 from . import config as toolconfig
+from . import routes
 from . import scheduler
 
 
@@ -813,11 +814,7 @@ def save_state(
 ) -> None:
     if cfg.dry_run:
         return
-    cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        cfg.state_file.parent.chmod(0o700)
-    except OSError:
-        pass
+    common.ensure_private_cache_dir(cfg.state_file.parent)
     obj = {
         "providers_spec": cfg.providers_spec,
         "providers": cfg.providers,
@@ -830,11 +827,7 @@ def save_state(
     }
     if completed_counts is not None:
         obj["completed_counts"] = {key: int(max(0, completed_counts.get(key, 0))) for key in rotation_keys(cfg)}
-    cfg.state_file.write_text(json.dumps(obj, separators=(",", ":")) + "\n", encoding="utf-8")
-    try:
-        cfg.state_file.chmod(0o600)
-    except OSError:
-        pass
+    common.write_private_text(cfg.state_file, json.dumps(obj, separators=(",", ":")) + "\n")
 
 
 def rotation_order_indices(length: int, current_index: int) -> list[int]:
@@ -1321,6 +1314,8 @@ def select_provider(
             model=policy.model if policy else None,
             allow_fallback=policy.allow_fallback if policy else True,
         )
+        # A usage-limit notice seen on a native provider screen is recorded as a local block.
+        snapshot, decision = routes.apply_local_block_to_provider_decision(provider, snapshot, decision)
         decisions.append(decision)
         common.log_event(logs, "usage_snapshot", {"provider": provider, "capacity_provider": capacity_provider, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
@@ -1521,7 +1516,7 @@ def scheduler_config_for(
         log_dir=logs.run_dir,
         # Each iteration gets its own subdir so per-iteration provider logs
         # (attempt output, status, events) are preserved instead of overwritten.
-        run_dir=logs.run_dir / f"iter-{iteration:03d}-{selected_provider}",
+        run_dir=common.RunPath(logs.run_dir, f"iter-{iteration:03d}-{selected_provider}"),
         dry_run=cfg.dry_run,
         wake=cfg.wake,
         # Ralph owns cross-provider suspend (see suspend_machine_until); it never
@@ -1571,8 +1566,8 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
         # launching, leave the reason where the operation log is read, and skip
         # the retry schedule: the same command cannot succeed later.
         attempt_out = child_logs.run_dir / "attempt-1.out"
-        attempt_out.write_text(violation + "\n", encoding="utf-8")
-        (child_logs.run_dir / "attempt-1.status").write_text(str(common.LAUNCH_REFUSED_STATUS), encoding="utf-8")
+        common.write_private_text(attempt_out, violation + "\n")
+        common.write_private_text(child_logs.run_dir / "attempt-1.status", str(common.LAUNCH_REFUSED_STATUS))
         common.log_text(child_logs, f"launch refused: {violation}")
         common.log_event(child_logs, "launch_refused", {"reason": violation, "argv_bytes": sum(len(os.fsencode(a)) for a in argv)})
         common.log_event(child_logs, "final", {"status": "launch-refused"})
@@ -1928,19 +1923,21 @@ def guard_against_auto_suspend(cfg: RalphConfig, logs: common.RunLogs) -> common
 
 
 def report_prior_suspend_failures(logs: common.RunLogs) -> None:
-    """Surface any earlier suspend cycle that recorded a start but never a resume
-    -- the durable fingerprint of a wake that wedged the machine on a prior boot."""
-    incomplete = common.incomplete_suspend_cycles(common.suspend_ledger_path())
-    if not incomplete:
-        return
-    common.log_event(logs, "prior_suspend_failures", {"count": len(incomplete), "cycles": incomplete[-5:]})
-    newest = max((int(c.get("started_epoch", 0)) for c in incomplete), default=0)
-    status_line(
-        f"warning: {len(incomplete)} earlier suspend cycle(s) never recorded a resume "
-        f"(latest {common.format_local_epoch(newest)}); a wake may have wedged the machine before. "
-        "Consider --watchdog, or longer reset windows so the machine suspends less often.",
-        level="warn",
-    )
+    """Surface a suspend cycle after which the machine never resumed -- a start in
+    the ledger followed by a different boot ID, the fingerprint of a wake that
+    wedged the machine. A start with no resume record from this boot only means the
+    waiting process ended after a normal resume; that is closed in the ledger
+    without a warning (``common.reconcile_suspend_ledger``)."""
+    ledger = common.suspend_ledger_path()
+    report = common.reconcile_suspend_ledger(ledger)
+    if report.recovered:
+        common.log_event(logs, "suspend_cycles_recovered", {"count": len(report.recovered), "cycles": [str(c.get("cycle_id")) for c in report.recovered[-5:]]})
+    if report.wedged or report.unverified:
+        common.log_event(logs, "prior_suspend_failures", {
+            "count": len(report.wedged), "cycles": report.wedged[-5:], "unverified": len(report.unverified),
+        })
+    for level, text in common.suspend_ledger_messages(report, ledger):
+        status_line(text, level=level)
 
 
 def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> int:

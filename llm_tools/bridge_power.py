@@ -20,8 +20,7 @@ _ACTIVE_OPERATIONS = ("INTENT", "PREPARED", "RUNNING")
 
 def _root(env: dict[str, str] | None = None) -> Path:
     root = common.cache_root(env) / "llm-bridge" / "capacity-wakes"
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
+    common.ensure_private_cache_dir(root, env)
     return root
 
 
@@ -109,8 +108,7 @@ def _read_requests(root: Path, now: int) -> dict[str, dict[str, Any]]:
 def _write_json_atomically(root: Path, name: str, payload: dict[str, Any]) -> None:
     temp = root / f"{name}.tmp"
     path = root / name
-    with temp.open("w", encoding="utf-8") as stream:
-        os.chmod(temp, 0o600)
+    with common.open_private_text(temp, "w") as stream:
         json.dump(payload, stream, separators=(",", ":"))
         stream.write("\n")
         stream.flush()

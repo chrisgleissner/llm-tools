@@ -145,7 +145,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
 
     # 3. The form defaults to the provider that is installed and signed in, not to codex.
     terminal.keys("n")
-    form = terminal.wait_for("Objective:", "[1] claude", "Tab moves on to Start")
+    form = terminal.wait_for("Objective:", "[1] claude", "F5 start now")
     assert "[1] codex" not in form
     terminal.type("Create a file named hello.txt containing the word hello, then stop.")
     terminal.keys("Tab", "Tab", "Tab", "Tab", "Tab")  # Providers, Folder, Mode, Save, Start
@@ -156,18 +156,18 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     from llm_tools.terminal import tmux_version
     version = tmux_version() or (99, 0)
     if version >= (3, 5):
-        terminal.wait_for("is waiting for your review. Ctrl-] then B, then /approve or /reject.", "Provider exited (status 0)")
+        terminal.wait_for("ready for review · Ctrl-] B then /approve", "Provider exited (status 0)")
     else:
         # tmux < 3.5 does not expose pane_dead_status, so the station footer
         # may omit its exit hint entirely. The Bridge pane still shows the
         # review state and the always-visible route to its approval controls.
-        terminal.wait_for("VERIFYING", "Bridge: Ctrl-] then B")
+        terminal.wait_for("REVIEW", "Bridge: Ctrl-] then B")
     assert (repo / "hello.txt").read_text() == "hello\n"
 
     # 5. Bridge controls point at /approve; the confirmation shows what is approved.
     terminal.keys("C-]")
     terminal.keys("B")
-    terminal.wait_for("type /approve 1", "VERIFYING")
+    terminal.wait_for("type /approve 1", "NEEDS YOU")
     terminal.type("/approve")
     terminal.keys("Enter")
     terminal.wait_for("Y approve", "Approve verification and mark task 1 complete?")
@@ -189,14 +189,14 @@ def test_doctor_next_steps_cover_the_unready_machines(tmp_path: Path) -> None:
     env = {"HOME": str(tmp_path)}
 
     no_tmux = bridge_doctor.next_steps(tmux_available=False, providers=[claude_ready], folder=tmp_path, env=env)
-    assert "Install tmux" in no_tmux[0] and "--headless" in no_tmux[0]
+    assert "Install tmux" in no_tmux[0] and "--mode headless" in no_tmux[0]
     assert any(step.startswith("Ready.") for step in no_tmux)
 
     signed_out = bridge_doctor.next_steps(tmux_available=True, providers=[codex_signed_out, missing], folder=tmp_path, env=env)
     assert signed_out == ["Sign in to a provider first: codex · run: codex login"]
 
     nothing = bridge_doctor.next_steps(tmux_available=True, providers=[missing], folder=tmp_path, env=env)
-    assert nothing == ["Install and sign in to a provider CLI (Claude Code or Codex), then run llm-bridge doctor again."]
+    assert nothing == ["Install and sign in to one provider CLI (install one of: codex, claude, copilot, kilo, opencode, minimax), then run llm-bridge doctor again."]
 
     (tmp_path / ".claude.json").write_text(json.dumps({"projects": {str(tmp_path): {"hasTrustDialogAccepted": True}}}))
     trusted = bridge_doctor.next_steps(tmux_available=True, providers=[claude_ready], folder=tmp_path / "child", env=env)

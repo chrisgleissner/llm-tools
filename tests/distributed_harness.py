@@ -12,7 +12,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -31,6 +31,8 @@ class System:
     mission_id: str
     state: Path
     tmp: Path
+    stop_worker: Callable[[], None] = lambda: None  # disconnect the worker and stop its thread; the coordinator keeps running
+    start_worker: Callable[[], None] = lambda: None  # start a worker thread again with the same enrolment and store
 
 
 def create_mission(tmp_path: Path, capsys) -> str:
@@ -69,10 +71,11 @@ def restart(coordinator: Coordinator) -> None:
 
 @contextmanager
 def running_system(tmp_path: Path, monkeypatch, capsys, *, allow_control: bool, worker_name: str = "ws", prepare=None,
-                   data_dir: Path | None = None) -> Iterator[System]:
+                   data_dir: Path | None = None, connector: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None) -> Iterator[System]:
     """Mission + coordinator + enrolled worker thread, torn down on exit. ``prepare(state, mission_id)`` runs before the worker starts.
 
-    ``data_dir`` places the coordinator's data directory elsewhere than ``tmp_path`` (storage-write tests need a block device)."""
+    ``data_dir`` places the coordinator's data directory elsewhere than ``tmp_path`` (storage-write tests need a block device).
+    ``connector`` wraps the worker's WebSocket connector (for example to count bytes by message type)."""
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
     mission_id = create_mission(tmp_path, capsys)
@@ -81,14 +84,27 @@ def running_system(tmp_path: Path, monkeypatch, capsys, *, allow_control: bool, 
     coordinator = Coordinator(data_dir or tmp_path / "coordinator")
     token = coordinator.run("worker", "add", worker_name)
     worker.enroll(worker_name, f"wss://localhost:{coordinator.port}", token, ca_pem=(coordinator.data / "ca.pem").read_text(), allow_control=allow_control)
-    stop = threading.Event()
-    session = worker.default_session("test")
-    thread = threading.Thread(target=worker.run, args=(session, worker.websocket_connector()), kwargs={"stop": stop, "idle": 0.05}, daemon=True)
-    thread.start()
+    running: dict[str, Any] = {}
+
+    def start_worker() -> None:
+        stop = threading.Event()
+        session = worker.default_session("test")
+        connect = worker.websocket_connector()
+        thread = threading.Thread(target=worker.run, args=(session, connector(connect) if connector else connect), kwargs={"stop": stop, "idle": 0.05},
+                                  daemon=True)
+        thread.start()
+        running.update(stop=stop, thread=thread)
+
+    def stop_worker() -> None:
+        if running:
+            running["stop"].set()
+            running["thread"].join(scaled(15))
+            running.clear()
+
+    start_worker()
     try:
         wait_for(lambda: _online(coordinator), timeout=scaled(15), interval=0.05, message="worker never came online")
-        yield System(coordinator, mission_id, state, tmp_path)
+        yield System(coordinator, mission_id, state, tmp_path, stop_worker, start_worker)
     finally:
-        stop.set()
-        thread.join(scaled(15))
+        stop_worker()
         coordinator.stop()

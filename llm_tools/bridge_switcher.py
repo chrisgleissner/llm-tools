@@ -11,9 +11,9 @@ from __future__ import annotations
 import curses
 import locale
 import os
-import socket
-import stat
+import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from . import bridge_hangup, bridge_redraw
 from .bridge_format import printable
 from .bridge_glyphs import FINISHED_STATES, GLYPHS, provider_role, state_look, state_text
+from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL
 from .bridge_input import cell_slice, cell_width
+from .bridge_missions import default_station_probe, socket_listening  # noqa: F401  (re-exported; defined where mission list can use them without curses)
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
 from .bridge_store import BridgeStore, controller_running, store_path
 from .bridge_theme import mission_role
@@ -37,8 +39,7 @@ _TERMINAL_STATUSES = FINISHED_MISSION_STATUSES
 _TASK_RANK = {"RUNNING": 0, "VERIFYING": 1, "READY": 2}
 _CONTROLLED_STATUSES = CONTROLLED_MISSION_STATUSES
 _STATION_CLOSABLE_STATES = STATION_CLOSING_MISSION_STATUSES
-STALE_MARKER = "stale"
-STALE_CELLS = len(STALE_MARKER) + 1
+STALE_CELLS = len(MISSION_INTERRUPTED_LABEL) - 9  # INTERRUPTED is longer than the other status words
 
 
 # ---------------------------------------------------------------- text helpers
@@ -70,8 +71,13 @@ def _ascii(text: str) -> str:
     return text.encode("ascii", "replace").decode("ascii")
 
 
+def ellipsis_mark(unicode: bool) -> str:
+    """The cut marker: ``…``, or ``...`` in ASCII (``~`` would read as the home folder)."""
+    return "…" if unicode else "..."
+
+
 def clip(text: object, width: int, *, unicode: bool = True) -> str:
-    """Clip to ``width`` cells with an ellipsis (``~`` when ASCII-only)."""
+    """Clip to ``width`` cells and mark the cut with an ellipsis (``...`` when ASCII-only)."""
     value = _flat(text)
     if not unicode:
         value = _ascii(value)
@@ -79,8 +85,9 @@ def clip(text: object, width: int, *, unicode: bool = True) -> str:
         return ""
     if cell_width(value) <= width:
         return value
-    mark = "…" if unicode else "~"
-    return cell_slice(value, 0, width - 1) + mark if width > 1 else mark
+    mark = ellipsis_mark(unicode)
+    room = width - len(mark)
+    return cell_slice(value, 0, room) + mark if room > 0 else cell_slice(mark, 0, width)
 
 
 def pad(text: str, width: int) -> str:
@@ -103,11 +110,11 @@ def middle_clip(text: str, width: int, *, unicode: bool = True) -> str:
     value = text if unicode else _ascii(text)
     if cell_width(value) <= width:
         return value
-    mark = "…" if unicode else "~"
-    if width <= 1:
-        return mark[:width]
-    head = (width - 1) * 2 // 5
-    tail_room = width - 1 - head
+    mark = ellipsis_mark(unicode)
+    if width <= len(mark):
+        return cell_slice(mark, 0, width)
+    head = (width - len(mark)) * 2 // 5
+    tail_room = width - len(mark) - head
     kept: list[str] = []
     used = 0
     for char in reversed(value):
@@ -117,6 +124,28 @@ def middle_clip(text: str, width: int, *, unicode: bool = True) -> str:
         kept.append(char)
         used += amount
     return cell_slice(value, 0, head) + mark + "".join(reversed(kept))
+
+
+def left_clip(path: str, width: int, *, unicode: bool = True) -> str:
+    """Cut a folder from the left, as ``…/llm-tools/repo2``; the last path segment stays whole when it fits."""
+    value = path if unicode else _ascii(path)
+    if cell_width(value) <= width:
+        return value
+    mark = ellipsis_mark(unicode)
+    segments = [part for part in value.split("/") if part]
+    kept: list[str] = []
+    used = len(mark)
+    for part in reversed(segments):
+        if used + 1 + cell_width(part) > width:
+            break
+        kept.append(part)
+        used += 1 + cell_width(part)
+    if kept:
+        return mark + "".join("/" + part for part in reversed(kept))
+    # Not even the last segment fits: show the end of the folder name.
+    last = segments[-1] if segments else value
+    room = width - len(mark)
+    return mark + cell_slice(last, max(0, cell_width(last) - room), room) if room > 0 else cell_slice(mark, 0, width)
 
 
 def mission_label(name: object, cwd: object, limit: int = LABEL_CELLS) -> str:
@@ -152,6 +181,8 @@ class MissionEntry:
     rotation: str = ""
     colour: object = None  # the pinned identity colour (1-8), else the ID's hash decides
     review_ordinal: int | None = None  # number of the lowest-numbered task awaiting the operator's review
+    tasks_done: int = 0
+    tasks_total: int = 0
 
     @property
     def config(self) -> dict[str, object]:
@@ -193,8 +224,9 @@ class MissionEntry:
 
     @property
     def display_status(self) -> str:
-        """The state word shown for the mission: ``REVIEW`` while a task awaits the operator."""
-        return "REVIEW" if self.in_review else self.status
+        """The state word shown for the mission: ``NEEDS YOU`` while a task awaits the operator,
+        ``INTERRUPTED`` when its controller stopped unexpectedly."""
+        return MISSION_NEEDS_YOU_LABEL if self.in_review else MISSION_INTERRUPTED_LABEL if self.stale else self.status
 
     @property
     def short_id(self) -> str:
@@ -213,7 +245,7 @@ class MissionEntry:
 
     def _build_search_text(self) -> str:
         parts = [self.mission_id, self.name, self.status, self.cwd, short_home(self.cwd), self.provider, self.task_title,
-                 f"task {self.task_number}" if self.task_id is not None else "", "live" if self.live else "", "review" if self.in_review else "", "stale" if self.stale else "",
+                 f"task {self.task_number}" if self.task_id is not None else "", "live" if self.live else "", "review" if self.in_review else "", "stale interrupted" if self.stale else "",
                  "station idle" if self.station_idle else ""]
         return " ".join(parts).lower()
 
@@ -234,6 +266,7 @@ class MissionEntry:
             "station_idle": self.station_idle,
             "stale": self.stale,
             "review_task": self.review_ordinal if self.in_review else None,
+            "tasks": {"done": self.tasks_done, "total": self.tasks_total},
             "controller_running": self.controller,
             "rotation": self.rotation,
             "colour": mission_role(self.mission_id, self.config),
@@ -264,39 +297,6 @@ def _rotation(config: dict[str, Any]) -> str:
     return ",".join(names)
 
 
-def socket_listening(path: str | Path, timeout: float = 0.2) -> bool:
-    """Whether a server accepts connections on the Unix socket ``path``; a dead socket file refuses."""
-    try:
-        if not stat.S_ISSOCK(os.lstat(path).st_mode):
-            return False
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    except OSError:
-        return False
-    try:
-        probe.settimeout(timeout)
-        probe.connect(str(path))
-    except OSError:  # refused, gone, or not answering in time
-        return False
-    finally:
-        probe.close()
-    return True
-
-
-def default_station_probe(mission_id: str) -> bool:
-    """Whether a tmux server is listening on this mission's station socket.
-
-    This is for display (the mission lists), so it only connects to the socket
-    in-process instead of starting a tmux client per mission. Actions that act
-    on a station (close, attach, switch) check ownership themselves.
-    """
-    try:
-        from .bridge_runtime import mission_socket_path
-
-        return socket_listening(mission_socket_path(mission_id))
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
 def default_controller_probe(mission_id: str) -> bool:
     return bool(controller_running(mission_id, on_error=False))
 
@@ -323,6 +323,12 @@ def collect_entries(
         owner = str(row["mission_id"])
         if owner not in current or key < current[owner][0]:
             current[owner] = (key, dict(row))
+    task_counts: dict[str, tuple[int, int]] = {}
+    for row in store.db.execute(
+        "SELECT mission_id, SUM(n) AS total, SUM(CASE WHEN key='COMPLETED' THEN n ELSE 0 END) AS done "
+        "FROM mission_task_counts WHERE scope='status' GROUP BY mission_id"
+    ):
+        task_counts[str(row["mission_id"])] = (int(row["done"] or 0), int(row["total"] or 0))
     review: dict[str, int] = {}
     for row in store.db.execute(
         "SELECT mission_id,MIN(ordinal) AS ordinal FROM tasks WHERE status IN ('RUNNING','VERIFYING','READY') AND status='VERIFYING' "
@@ -350,6 +356,8 @@ def collect_entries(
             rotation=_rotation(config),
             colour=config.get("colour"),
             review_ordinal=review.get(mission_id),
+            tasks_done=task_counts.get(mission_id, (0, 0))[0],
+            tasks_total=task_counts.get(mission_id, (0, 0))[1],
         ))
     return order_entries(entries)
 
@@ -468,6 +476,7 @@ class MissionPicker:
     notice: str = ""  # outcome of the last station close, shown until the next key
     state_cells: int = field(default=11, repr=False)
     notice_ok: bool = False
+    untruncated: bool = False  # piped output: every column gets its full width, nothing is cut
 
     def visible(self) -> list[MissionEntry]:
         terms = self.query.lower().split()
@@ -577,10 +586,11 @@ class MissionPicker:
         repos = [cell_width(short_home(e.cwd, self.home)) for e in rows] or [4]
         provs = [len(e.provider) for e in rows] or [4]
         tasks = [len(self._task_text(e)) for e in rows] or [4]
-        desired = [min(max(names + [4]), 40), min(max(repos + [6]), 40), min(max(tasks + [4]), 40)]
+        cap = 10**6 if self.untruncated else 40
+        desired = [min(max(names + [4]), cap), min(max(repos + [6]), cap), min(max(tasks + [4]), cap)]
         gaps = 2 * (4 if show_provider else 3)
-        prov_width = min(max(provs + [8]), 10) + 2 if show_provider else 0  # + provider square and space
-        available = width - self.FIXED_CELLS - (self.state_cells - 11) - gaps - prov_width
+        prov_width = min(max(provs + [8]), 10 if not self.untruncated else cap) + 2 if show_provider else 0  # + provider square and space
+        available = (10**7 if self.untruncated else width) - self.FIXED_CELLS - (self.state_cells - 11) - gaps - prov_width
         widths = fit_columns(desired, available, 8)
         if show_provider:
             widths.append(prov_width)
@@ -607,14 +617,12 @@ class MissionPicker:
         state_role = "state_review" if entry.in_review else "warn" if entry.stale else look[1] if look else "info"
         text_role = "muted" if finished else "info"
         mark, mark_role = (here, "accent") if entry.mission_id == self.current else (live, "state_running") if entry.live else (" ", "info")
-        folder = clip(middle_clip(short_home(entry.cwd, self.home), widths[1], unicode=self.unicode), widths[1], unicode=self.unicode)
+        folder = left_clip(short_home(entry.cwd, self.home), widths[1], unicode=self.unicode)
         row: list[tuple[str, str]] = [
             (arrow if cursor else " ", "accent"), (mark, mark_role), (self._g("chip"), mission_role(entry.mission_id, entry.config)), (" ", "info"),
             (pad(entry.short_id, 8), "muted"), ("  ", "info"),
-            (pad(clip(state_text(entry.display_status, unicode=self.unicode), 11, unicode=self.unicode), 11), state_role),
+            (pad(clip(state_text(entry.display_status, unicode=self.unicode), self.state_cells, unicode=self.unicode), self.state_cells), state_role),
         ]
-        if self.state_cells > 11:
-            row.append((pad(" " + STALE_MARKER if entry.stale else "", self.state_cells - 11), "warn"))
         row += [
             ("  ", "info"),
             (pad(clip(entry.name or "-", widths[0], unicode=self.unicode), widths[0]), text_role), ("  ", "info"),
@@ -681,7 +689,7 @@ class MissionPicker:
         for _ in range(list_height - list_rows):
             out.append(([("", "info")], "normal"))
         entry = self.selected_entry()  # type: ignore[assignment]  # may be None; the next lines test it
-        folder = middle_clip(short_home(entry.cwd, self.home), max(10, width // 2), unicode=self.unicode) if entry is not None else ""
+        folder = left_clip(short_home(entry.cwd, self.home), max(10, width // 2), unicode=self.unicode) if entry is not None else ""
         if self.confirming is not None:
             detail = [(f"Close the idle station of {self.confirming.name or self.confirming.short_id}? Y close{sep}N keep", "warn")]
         elif self.notice:
@@ -690,7 +698,7 @@ class MissionPicker:
             detail = [(f"task {entry.review_ordinal} awaits your review{sep}Enter to open", "state_review"), (f"{sep}{folder}", "muted")]
         elif entry is not None:
             state = ("station idle" if entry.station_idle else "station running" if entry.station
-                     else "controller running" if entry.controller else "controller not running" if entry.stale else "not running")
+                     else "controller running" if entry.controller else f"controller stopped unexpectedly{sep}llm-bridge start --mission {entry.short_id}" if entry.stale else "not running")
             role = "state_running" if entry.live else "warn" if entry.stale and not entry.finished else "muted"
             rotation = (entry.rotation or "-").replace(",", " -> " if not self.unicode else " → ")
             detail = [(f"{folder}{sep}{rotation}{sep}", "muted"), (state, role)]
@@ -715,7 +723,7 @@ class MissionPicker:
         out: list[tuple[str, str]] = []
         used = 0
         total = sum(cell_width(text if self.unicode else _ascii(text)) for text, _ in segments)
-        room = width if total <= width or not mark else max(0, width - 1)
+        room = width if total <= width or not mark else max(0, width - len(ellipsis_mark(self.unicode)))
         for text, role in segments:
             text = _flat_keep(text) if self.unicode else _ascii(_flat_keep(text))
             piece = cell_slice(text, 0, max(0, room - used))
@@ -724,7 +732,7 @@ class MissionPicker:
             if used >= room:
                 break
         if mark and total > width:
-            out.append(("…" if self.unicode else "~", out[-1][1] if out else "info"))
+            out.append((ellipsis_mark(self.unicode), out[-1][1] if out else "info"))
         return out
 
     def lines(self, height: int, width: int) -> list[tuple[str, str]]:
@@ -938,18 +946,35 @@ def run_pick_cli(
     return run_control(chosen.mission_id, dispatch_console_command, console_snapshot)
 
 
-def format_missions(entries: list[MissionEntry], *, width: int = 100) -> str:
-    """Human listing for ``llm-bridge missions``."""
+def format_missions(entries: list[MissionEntry], *, total: int | None = None, now: float | None = None) -> str:
+    """Human listing for ``llm-bridge missions`` and ``llm-bridge mission list``.
+
+    ``total`` is the number of missions that exist when ``entries`` is only the first page of them.
+    """
+    from .bridge_format import age, home_relative, table
+
     if not entries:
+        if total:
+            return f"showing 0 of {total} missions · --limit N shows more"
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
-    picker = MissionPicker(entries, unicode=unicode_ok(), home=None)
-    sep = picker._glyphs()[3]
-    header = f"{len(entries)} mission{'s' if len(entries) != 1 else ''}{sep}{sum(1 for e in entries if e.live)} live"
-    return header + "\n" + picker.plain_text(width)
+    live = sum(1 for e in entries if e.live)
+    count = total if total is not None else len(entries)
+    header = f"{count} mission{'s' if count != 1 else ''} · {live} live"
+    rows = [
+        [e.short_id, MISSION_INTERRUPTED_LABEL if e.stale else e.status,
+         f"review task {e.review_ordinal}" if e.in_review else "",
+         f"{e.tasks_done}/{e.tasks_total}" if e.tasks_total else "-",
+         e.name, home_relative(e.cwd), age(e.updated_at, now)]
+        for e in entries
+    ]
+    text = header + "\n" + table(["ID", "STATE", "NEEDS YOU", "TASKS", "NAME", "FOLDER", "UPDATED"], rows)
+    if total is not None and total > len(entries):
+        text += f"\nshowing {len(entries)} of {total} missions · --limit N shows more"
+    return text
 
 
-def missions_json(entries: list[MissionEntry]) -> dict[str, Any]:
-    return {"schema_version": 1, "missions": [entry.as_json() for entry in entries]}
+def missions_json(entries: list[MissionEntry], total: int | None = None) -> dict[str, Any]:
+    return {"schema_version": 1, "total": len(entries) if total is None else total, "missions": [entry.as_json() for entry in entries]}
 
 
 __all__ = [

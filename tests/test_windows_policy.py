@@ -6,6 +6,7 @@ import json
 import pytest
 
 from llm_tools import bridge, bridge_remote  # noqa: F401  (imported before sys.platform is patched; ssl branches on it)
+from tests.conftest import without_help_reference
 
 
 @pytest.fixture()
@@ -25,7 +26,7 @@ def test_local_commands_are_refused_without_a_traceback(windows: None, arguments
     assert bridge.main(arguments) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    lines = captured.err.strip().splitlines()
+    lines = without_help_reference(captured.err).strip().splitlines()
     assert len(lines) == 1 and lines[0].startswith("llm-bridge: ") and "not supported on Windows" in lines[0]
     assert "llm-bridge --target NAME COMMAND" in lines[0] and "Traceback" not in captured.err
 
@@ -37,6 +38,7 @@ def test_json_refusal_is_an_error_envelope(windows: None, capsys: pytest.Capture
     assert captured.err == ""
     assert envelope["schema_version"] == 1 and envelope["outcome"] == "failed"
     assert envelope["error"]["code"] == "unsupported-platform"
+    assert envelope["error"]["help"].endswith("/troubleshooting.md#unsupported-platform")
     assert envelope["error"]["details"] == {"platform": "windows", "command": "status"}
 
 
@@ -61,3 +63,24 @@ def test_other_platforms_are_never_refused(monkeypatch: pytest.MonkeyPatch) -> N
     for platform in ("linux", "darwin"):
         monkeypatch.setattr(bridge.sys, "platform", platform)
         assert bridge.unsupported_on_windows(["status"]) is None
+
+
+def test_the_windows_modules_import_without_curses() -> None:
+    """Windows has no curses; every module the remote client and the test harness load must import without it."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    program = (
+        "import sys, importlib\n"
+        "sys.modules['curses'] = None\n"
+        "sys.modules['_curses'] = None\n"
+        "for name in ('bridge', 'bridge_remote', 'bridge_runtime', 'terminal', 'bridge_commands', 'bridge_protocol', 'bridge_ws', 'bridge_input'):\n"
+        "    importlib.import_module('llm_tools.' + name)\n"
+        "if sys.platform != 'win32':\n"
+        "    from llm_tools import bridge_missions\n"
+        "    bridge_missions.station_live('probe')  # mission list orders by liveness; it must not load the console\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run([sys.executable, "-c", program], cwd=root, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr

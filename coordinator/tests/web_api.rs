@@ -846,6 +846,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "203.0.113.7",
         )
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-resource-test");
 
     let (status, command) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=25&offset=5").await;
     assert_eq!(status, 202, "{command}");
@@ -861,6 +862,16 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let (status, status_command) = api.get("/api/v1/missions/mission-1?worker=build-1").await;
     assert_eq!(status, 202, "{status_command}");
     assert_eq!(status_command["operation"], "mission.status");
+    // The size controls of the bounded reads pass through; nothing else does.
+    let (status, sized) = api
+        .get("/api/v1/missions/mission-1?worker=build-1&task_limit=2&prompt_chars=80&event_limit=3")
+        .await;
+    assert_eq!(status, 202, "{sized}");
+    assert_eq!(sized["request"]["params"], json!({"task_limit":2,"prompt_chars":80,"event_limit":3}));
+    let (status, clipped) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=10&prompt_chars=0").await;
+    assert_eq!(status, 202, "{clipped}");
+    assert_eq!(clipped["request"]["params"], json!({"limit":10,"offset":0,"prompt_chars":0}));
+    assert_eq!(api.get("/api/v1/missions/mission-1?worker=build-1&limit=5").await.0, 400);
     env.stop().await;
 }
 
@@ -963,6 +974,7 @@ async fn cli_parity_resource_adapters_queue_the_expected_typed_operations() {
         .db
         .worker_hello("build-1", "worker-id-parity", &hello, &json!(capabilities), "203.0.113.8")
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-parity");
     let routes = [
         (
             Method::GET,
@@ -1161,7 +1173,7 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "etag-worker", 0).await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "etag-worker", 0).await;
     let read_api = Api {
         c: api.c.clone(),
         base: api.base.clone(),
@@ -1223,7 +1235,7 @@ async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "cursor-worker", 0).await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "cursor-worker", 0).await;
 
     let filters = "worker=w1;mission=m1;resource=tasks;limit=1";
     let cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/tasks", filters, 3);

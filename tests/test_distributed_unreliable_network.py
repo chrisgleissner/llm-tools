@@ -289,7 +289,8 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     tokens = link.coordinator.mutation_tokens(34)
 
     def submit(index: int) -> int:
-        request = CommandRequest("mission.list", target="ws", request_id=f"queue-{index}")
+        # A write: the coordinator queues writes for an offline worker but refuses reads (DOG-021).
+        request = CommandRequest("task.add", mission_id=link.mission_id, target="ws", request_id=f"queue-{index}", params={"prompt": f"queued {index}"})
         return link.submit(request, token=tokens[index % len(tokens)], source_ip="127.0.0.1")[0]
 
     with ThreadPoolExecutor(16) as pool:
@@ -303,7 +304,7 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     assert link.session.outbox.maxsize == OUTBOX_BOUND and link.session.outbox.qsize() <= OUTBOX_BOUND
     queue_full_token = link.coordinator.run("token", "create", "queue-over", "--scope", "admin")
     status, body = link.submit(
-        CommandRequest("mission.list", target="ws", request_id="queue-over"),
+        CommandRequest("task.add", mission_id=link.mission_id, target="ws", request_id="queue-over", params={"prompt": "over the limit"}),
         token=queue_full_token, source_ip="127.0.0.1",
     )
     assert status == 429 and body["error"]["code"] == "queue-full"

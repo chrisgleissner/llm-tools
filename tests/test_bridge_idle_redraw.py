@@ -484,7 +484,7 @@ def test_station_probe_connects_in_process_and_never_starts_tmux(tmp_path, monke
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(path))
     server.listen(1)
-    import llm_tools.bridge_runtime as runtime
+    import llm_tools.bridge_sockets as runtime
     import subprocess
 
     monkeypatch.setattr(runtime, "mission_socket_path", lambda mission_id: path)

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 import shlex
+import warnings
 import sys
 import threading
 import time
@@ -16,6 +19,13 @@ from tests.conftest import wait_for
 
 
 def _codex_command(tmp_path: Path, body: str) -> tuple[Path, str]:
+    # A compile-time warning in the fake provider goes to its stderr. Text such as
+    # 'Did you mean "!="?' then looks like a question to the scheduler's prompt watchdog,
+    # which aborts the run as an interactive prompt when the output stalls (it did under
+    # coverage). Refuse such a fake here instead of letting the test hang.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        compile(body, "fake-codex", "exec")
     binary = tmp_path / "bin" / "codex"
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
@@ -203,3 +213,8 @@ print(json.dumps({'type': 'error', 'message': 'ERROR: You’ve reached your usag
         assert store.db.execute(
             "SELECT COUNT(*) FROM operations WHERE task_id=?", (task_id,),
         ).fetchone()[0] == 1
+
+
+def test_fake_provider_with_a_compile_warning_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(SyntaxError):
+        _codex_command(tmp_path, "if 'text' is not None:\n    pass\n")

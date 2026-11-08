@@ -5,7 +5,7 @@
   "cursor": null,
   "cursor_visible": false,
   "rows": [
-    "LLM BRIDGE · ▌ Release 2.0 hardening · ● RUNNING",
+    "LLM BRIDGE · ▌ Release 2.0 hardening (9a3c51e0) · ◆ NEEDS YOU",
     "■ codex · task 4 running 20m · 5h 62% left · week 31% left",
     "Overview  Tasks  [Providers]  Activity  Sessions  Health  Actions  Usage  Agents",
     "  Viewing codex · last launched codex · operation 5eed0005 RUNNING",
@@ -19,7 +19,7 @@
     "  ■ claude  default model  state unknown",
     "    5h 8% left, resets 25m",
     "    weekly 55% left, resets 5d 0h",
-    "    recent: task 6 · exited · exit 75 · 20m ago",
+    "    recent: task 6 · exited · stopped by Bridge · 20m ago",
     "    recent: task 2 · exited · exit 1 · 22m ago",
     "",
     "",
@@ -31,7 +31,7 @@
     "Enter mark viewed · ↑↓ select · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
-    [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "● RUNNING", "state_running"]],
+    [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " (9a3c51e0) · ", "dim"], [50, "◆ NEEDS YOU", "state_review"]],
     [[0, "■", "provider_codex"], [1, " codex · task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m · 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left · week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
     [[0, "Overview  Tasks  ", "muted"], [17, "[Providers]", "accent"], [28, "  Activity  Sessions  Health  Actions  Usage  Agents", "muted"]],
     [[2, "Viewing codex · last launched codex · operation 5eed0005 ", "muted"], [59, "RUNNING", "state_running"]],
@@ -45,7 +45,7 @@
     [[2, "■", "provider_claude"], [3, " claude", "info"], [10, "  default model", "muted"], [25, "  ", "info"], [27, "state unknown", "muted"]],
     [[2, "  5h ", "info"], [7, "8%", "capacity_low"], [9, " left, ", "info"], [16, "resets 25m", "muted"]],
     [[2, "  weekly ", "info"], [11, "55%", "capacity_ok"], [14, " left, ", "info"], [21, "resets 5d 0h", "muted"]],
-    [[2, "  recent: task 6 · ", "dim"], [21, "exited", "error.quiet"], [27, " · ", "dim"], [30, "exit 75", "error.quiet"], [37, " · 20m ago", "dim"]],
+    [[2, "  recent: task 6 · ", "dim"], [21, "exited", "error.quiet"], [27, " · ", "dim"], [30, "stopped by Bridge", "error.quiet"], [47, " · 20m ago", "dim"]],
     [[2, "  recent: task 2 · ", "dim"], [21, "exited", "error.quiet"], [27, " · ", "dim"], [30, "exit 1", "error.quiet"], [36, " · 22m ago", "dim"]],
     [],
     [],

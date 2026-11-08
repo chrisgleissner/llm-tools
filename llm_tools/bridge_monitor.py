@@ -9,11 +9,12 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any, cast
 
-from .bridge_format import countdown, needs_attention
+from .bridge_format import countdown, needs_attention, plain_capacity_reason
 from .bridge_store import BridgeStore
 from .bridge_events import recent_hidden_kinds
 from .bridge_projection import ProjectionParams, Snapshot
 from .bridge_states import ACTIVE_OPERATION_STATUSES
+from .bridge_vocab import mission_mode
 
 
 def _decode_event(row: Any) -> dict[str, Any]:
@@ -242,7 +243,7 @@ def _configured_stations(config: dict[str, Any]) -> dict[str, Any]:
         "routes": routes,
         "models": models,
         "efforts": efforts,
-        "configured_mode": "native" if config.get("native_tui") else ("headless" if config.get("headless") else "background"),
+        "configured_mode": mission_mode(config),
     }
 
 
@@ -252,11 +253,16 @@ def _number(value: Any) -> float | None:
 
 def waiting_entry(decision: dict[str, Any]) -> dict[str, Any]:
     """The blocking window, or reason, of one provider that is not usable."""
+    from .capacity import is_undetermined_reason  # deferred: store-reading commands stay light
+
     windows = [w for w in decision.get("windows", []) if isinstance(w, dict)] if isinstance(decision.get("windows"), list) else []
     measured = [w for w in windows if _number(w.get("remaining_percent")) is not None]
     blocking = min(measured, key=lambda w: float(w["remaining_percent"]), default=None)
-    reset = _number(decision.get("wait_until"))
-    if reset is None and blocking is not None:
+    # A provider with no usable capacity data has no reset time: its ``wait_until``
+    # is only the next time the scheduler looks again, not a quota renewal.
+    undetermined = bool(decision.get("reason")) and is_undetermined_reason(str(decision["reason"]))
+    reset = None if undetermined else _number(decision.get("wait_until"))
+    if reset is None and blocking is not None and not undetermined:
         reset = _number(blocking.get("reset_epoch"))
     return {
         "name": str(decision.get("route") or decision.get("provider") or "?"),
@@ -276,7 +282,7 @@ def waiting_entry_text(entry: dict[str, Any], now: float) -> str:
         if entry.get("remaining_percent") is not None:
             text += f" {entry['remaining_percent']:g}%"
     elif entry.get("reason"):
-        text += f" {entry['reason']}"
+        text += f" {plain_capacity_reason(entry['reason'])}"
     if entry.get("reset_epoch") is not None:
         text += f" · resets in {countdown(entry['reset_epoch'] - now)}"
     return text
@@ -289,18 +295,26 @@ def waiting_from_wait(data: dict[str, Any], now: float, since: str | None = None
     resets = [entry["reset_epoch"] for entry in entries if entry["reset_epoch"] is not None]
     target = _number(data.get("target_epoch"))
     until = int(target) if target is not None else (min(resets) if resets else None)
+    # With no reset time to wait for, the wait ends when the scheduler gives up on
+    # the missing data and launches anyway; ``launch_epoch`` is that fixed deadline.
+    launch = until if until is not None and not data.get("all_rate_limited") and entries and not resets else None
     return {
         "reason": "capacity" if data.get("all_rate_limited") else "unavailable",
         "providers": [entry["name"] for entry in entries],
         "entries": entries,
         "until_epoch": until,
+        "launch_epoch": launch,
         "detail": "; ".join(waiting_entry_text(entry, now) for entry in entries),
         "since": since,
     }
 
 
-def waiting_message(waiting: dict[str, Any], now: float) -> str:
-    """The sentence shown in an empty provider pane while the mission waits."""
+def waiting_message(waiting: dict[str, Any], now: float, *, console: bool = False) -> str:
+    """The sentence shown in an empty provider pane while the mission waits.
+
+    With ``console=True`` it is the Overview's wording: the options are slash commands, because the
+    console is the Ctrl-] then B screen that the provider-pane sentence points to.
+    """
     parts = []
     for entry in waiting.get("entries", []):
         name = entry.get("name") or entry.get("provider") or "?"
@@ -309,12 +323,18 @@ def waiting_message(waiting: dict[str, Any], now: float) -> str:
             quota = f"{entry['window']} quota " if entry.get("window") else ""
             parts.append(f"{name} {quota}resets in {countdown(reset - now)}")
         else:
-            parts.append(f"{name} {entry.get('reason') or 'is unavailable'}")
+            parts.append(f"{name} {plain_capacity_reason(entry.get('reason')) if entry.get('reason') else 'is unavailable'}")
     until = _number(waiting.get("until_epoch"))
-    if not parts and until is not None:
+    launch = _number(waiting.get("launch_epoch"))
+    if launch is not None:
+        parts.append(f"launches anyway in {countdown(launch - now)}")
+    elif not parts and until is not None:
         parts.append(f"next provider ready in {countdown(until - now)}")
     subject = "capacity" if waiting.get("reason") == "capacity" else "a usable provider"
-    return f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}. Ctrl-] then B for options."
+    text = f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}"
+    if console:
+        return f"{text} · /rotation to add a provider · /stop to stop waiting"
+    return f"{text}. Ctrl-] then B for options."
 
 
 def _attach_task_ordinals(store: BridgeStore, records: list[dict[str, Any]]) -> None:
@@ -356,6 +376,11 @@ def project_snapshot(
     # reviewed task before it starts the next one: {"reason": "review",
     # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
     snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
+    # ``awaiting_answer`` is the question the current task's latest provider run stopped on
+    # ({"question", "provider", "task_id", "operation_id"}); ``None`` when no such task is blocked.
+    current = snapshot.get("current_task")
+    asked = store.pending_question(mission_id, int(current["id"])) if isinstance(current, dict) and current.get("status") == "BLOCKED" else None
+    snapshot["awaiting_answer"] = asked
     mission = snapshot.get("mission") or {}
     current_task = snapshot.get("current_task")
     context = snapshot.get("station_context") or {}
@@ -493,6 +518,11 @@ def _project_snapshot(
                 (latest_op["task_id"],),
             ).fetchone()
         active_task = store._task_dict(current_row) if current_row else None
+    interrupted_task: int | None = None
+    if active_task is not None and active_task["status"] == "BLOCKED" and latest_op is not None and latest_op["status"] == "UNCERTAIN":
+        uncertain = _latest_event(store, mission_id, "operation-uncertain")
+        if uncertain is not None and uncertain.get("operation_id") == latest_op["id"] and uncertain["data"].get("cause") == "stop-force":
+            interrupted_task = int(active_task["id"])
     selected = (latest_selection or {}).get("data", {})
     capacity_event = max((event for event in (latest_selection, latest_wait) if event), key=lambda event: int(event["id"]), default=None)
     wait_is_current = bool(
@@ -505,7 +535,7 @@ def _project_snapshot(
     selected_target = selected_decision.get("wait_until") if isinstance(selected_decision, dict) else None
     selection_is_usable = isinstance(selected_decision, dict) and selected_decision.get("usable") is True
     readiness_target = wait_target if wait_is_current else (None if selection_is_usable else selected_target)
-    next_eligible = int(readiness_target) if isinstance(readiness_target, (int, float)) and int(readiness_target) > int(time.time()) else None
+    next_eligible = int(readiness_target) if isinstance(readiness_target, (int, float)) and int(readiness_target) > int(time.time()) and mission["status"] == "RUNNING" else None
     now = time.time()
     capacity_data = (capacity_event or {}).get("data", {})
     source_as_of = (
@@ -663,6 +693,7 @@ def _project_snapshot(
             "status": mission["status"],
             "failure_reason": failure_data.get("reason") if isinstance(failure_data, dict) else None,
             "failed_at": (latest_failure or {}).get("created_at"),
+            "interrupted_task_id": interrupted_task,
             "controller": controller_data.get("status", "unknown") if controller_verified else "unknown",
             "controller_event_at": (latest_controller or {}).get("created_at") if controller_verified else None,
             "controller_source": "verified persisted ownership event" if controller_verified else "unavailable",

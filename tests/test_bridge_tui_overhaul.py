@@ -93,14 +93,18 @@ def test_typing_a_view_name_switches_view_without_dispatching(word: str, view: s
     assert not state.command_pending and state.expand_requested
 
 
-def test_orders_and_tasks_commands_still_reach_the_dispatcher() -> None:
+def test_orders_and_tasks_words_open_the_tasks_view_and_task_list_still_reaches_the_dispatcher() -> None:
     sent: list[str] = []
     state = make_state()
     state.dispatch = lambda _mission, command: sent.append(command) or "ok"
     for word in ("orders", "tasks"):
+        state.choose_view(0)
         state._dispatch(word)
-        settle(state)
-    assert sent == ["orders", "tasks"] and state.view == "Overview"
+        assert state.view == "Tasks"
+    assert sent == []
+    state._dispatch("task list")
+    settle(state)
+    assert sent == ["task list"]
 
 
 def test_view_commands_are_completed_and_control_view_action_selects_normalized_view() -> None:
@@ -164,15 +168,15 @@ def test_strip_without_a_known_owner_or_elapsed_time() -> None:
 
 
 @pytest.mark.parametrize("status,tasks,expected,role", [
-    ("CREATED", [{"id": 1, "status": "READY"}], "not started · next: task 1 · type /start", "dim"),
+    ("CREATED", [{"id": 1, "status": "READY"}], "not started · task 1 ready · type /start", "dim"),
     ("CREATED", [], "not started · no task waiting · Ctrl-E adds one", "dim"),
-    ("STOPPED", [{"id": 2, "status": "QUEUED"}], "stopped · next: task 2 · type /start", "dim"),
-    ("PAUSED", [{"id": 3, "status": "READY"}], "paused · next: task 3 · type /resume", "warn"),
+    ("STOPPED", [{"id": 2, "status": "QUEUED"}], "stopped · task 2 ready · type /start", "dim"),
+    ("PAUSED", [{"id": 3, "status": "READY"}], "paused · task 3 ready · type /resume", "warn"),
     ("STOPPING", [], "stopping after the current step", "warn"),
-    ("RUNNING", [{"id": 7, "status": "READY"}], "idle · next: task 7", "dim"),
+    ("RUNNING", [{"id": 7, "status": "READY"}], "idle · task 7 ready", "dim"),
     ("RUNNING", [], "idle · no task waiting · Ctrl-E adds one", "dim"),
-    ("RUNNING", [{"id": 4, "status": "VERIFYING"}], "task 4 awaits approval · type /approve 4", "warn"),
-    ("RUNNING", [{"id": 4, "status": "VERIFYING"}, {"id": 5, "status": "VERIFYING"}], "task 4 awaits approval (+1 more) · type /approve 4", "warn"),
+    ("RUNNING", [{"id": 4, "status": "VERIFYING"}], "task 4 awaits your review · type /approve 4", "warn"),
+    ("RUNNING", [{"id": 4, "status": "VERIFYING"}, {"id": 5, "status": "VERIFYING"}], "task 4 awaits your review (+1 more) · type /approve 4", "warn"),
     ("COMPLETED", [{"id": 1, "status": "COMPLETED"}, {"id": 2, "status": "COMPLETED"}], "mission completed · 2/2 tasks completed", "ok"),
     ("CANCELLED", [{"id": 1, "status": "CANCELLED"}], "mission cancelled · 0/1 tasks completed", "error"),
     ("FAILED", [], "mission failed", "error"),
@@ -236,7 +240,7 @@ def test_objective_stays_available_through_o() -> None:
     (event("task-added", {"title": "Do it"}, task_id=7), "Task 7 added · Do it", False),
     (event("task-ready", {"from": "QUEUED", "to": "READY"}, task_id=6), "Task 6 ready", False),
     (event("task-status", {"from": "READY", "to": "RUNNING"}, task_id=6), "Task 6 running", True),
-    (event("task-status", {"from": "RUNNING", "to": "VERIFYING"}, task_id=6), "Task 6 awaiting approval", False),
+    (event("task-status", {"from": "RUNNING", "to": "VERIFYING"}, task_id=6), "Task 6 awaiting review", False),
     (event("task-status", {"from": "VERIFYING", "to": "COMPLETED"}, task_id=6), "Task 6 completed", False),
     (event("task-status", {"from": "READY", "to": "QUEUED", "reason": "dependency-added"}, task_id=6), "Task 6 waiting on a new dependency", False),
     (event("operation-running", {"route_id": "codex", "model": "gpt-5", "process_pid": 1}, task_id=6), "Started codex (gpt-5) on task 6", False),
@@ -262,7 +266,7 @@ def test_objective_stays_available_through_o() -> None:
     (event("command-queued", {"command": "pause"}), "Command queued: pause", True),
     (event("command-applied", {"command": "pause"}), "Command applied: pause", True),
     (event("command-rejected", {"command": "task.verify"}), "Command rejected: task.verify", False),
-    (event("native-session-restoration", {"provider": "codex", "restoration_state": "RESTORED_NATIVE"}), "Session restored native · codex", True),
+    (event("native-session-restoration", {"provider": "codex", "restoration_state": "RESTORED_NATIVE"}), "Session resumed · codex", True),
     (event("station-handoff", {"from": "codex", "to": "claude", "reason": "limit"}), "Switched provider codex → claude (limit)", False),
     (event("provider-handoff", {"exit_code": 1, "failure_count": 1, "max_failures": 2}, task_id=6), "Task 6 handed off after exit 1 (failure 1/2)", False),
     (event("provider-handoff-selected", {"station": "claude"}), "Handing off to claude", False),
@@ -292,7 +296,7 @@ def test_activity_role_marks_problems_and_waits() -> None:
     assert bridge_tui._activity_role("Provider exited (1) on task 6") == "error"
     assert bridge_tui._activity_role("Provider exited (0) on task 6") == "info"
     assert bridge_tui._activity_role("Task 6 verification failed") == "error"
-    assert bridge_tui._activity_role("Task 6 awaiting approval") == "warn"
+    assert bridge_tui._activity_role("Task 6 awaiting review") == "warn"
     assert bridge_tui._activity_role("Task 6 completed") == "info"
 
 
@@ -564,9 +568,9 @@ def labels(status: str, **kwargs) -> list[str]:
 
 def test_actions_are_ordered_for_the_mission_state() -> None:
     assert labels("CREATED") == ["Start", "Add task", "Amend task", "Proposals", "Status", "Cancel mission", "Help"]
-    assert labels("RUNNING") == ["Attach", "Pause", "Suspend until credits recover", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Detach", "Cancel mission", "Help"]
+    assert labels("RUNNING") == ["Attach", "Pause", "Suspend until credits recover", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Leave", "Cancel mission", "Help"]
     assert labels("PAUSED")[:4] == ["Resume", "Suspend until credits recover", "Attach", "Add task"]
-    assert labels("STOPPED")[:4] == ["Start", "Resume", "Suspend until credits recover", "Add task"]
+    assert labels("STOPPED")[:3] == ["Resume", "Suspend until credits recover", "Add task"]
     assert labels("STOPPING")[0] == "Stop"
     for terminal in ("COMPLETED", "CANCELLED", "FAILED"):
         assert labels(terminal) == ["Status", "Help"]  # read-only
@@ -614,10 +618,10 @@ def test_actions_view_follows_state_and_runs_the_selected_command() -> None:
     state, sent = actions_state("RUNNING", tasks=[{"id": 4, "ordinal": 4, "title": "t", "status": "VERIFYING"}])
     assert state.rows()[0].startswith("Approve task 4") and "/approve 4" in state.rows()[0]
     state.handle_key("\n")
-    assert state.confirm_command == "task verify --task 4 --approve"  # approval asks first
+    assert state.confirm_command == "task approve --task 4"  # approval asks first
     state.handle_key("y")
     settle(state)
-    assert sent == ["task verify --task 4 --approve"]
+    assert sent == ["task approve --task 4"]
 
 
 def test_pending_proposals_float_to_the_top_of_actions() -> None:
@@ -810,7 +814,7 @@ def failing_state(response: str):
 def test_failed_command_clears_the_line_and_is_recalled_with_up() -> None:
     state = failing_state("error: controller exited with status 2")
     assert state.command == "" and not state.input_focused
-    assert state.output[-1] == "error: controller exited with status 2 · ↑ recalls the command"
+    assert state.output[-1] == "error: controller exited with status 2 · Ctrl-P recalls the command"
     assert list(state.history) == ["/start"]
     state.handle_key("\x10")
     assert state.command == "/start" and state.input_focused
@@ -831,12 +835,12 @@ def test_up_arrow_key_name_also_recalls_via_ctrl_p_binding() -> None:
 
 def test_rejected_and_unknown_outcomes_get_the_recall_hint_but_success_does_not() -> None:
     rejected = failing_state('{"status": "REJECTED", "result": {"error": "task is not ready"}}')
-    assert rejected.output[-1] == "Rejected: task is not ready · ↑ recalls the command" and rejected.command == ""
+    assert rejected.output[-1] == "Rejected: task is not ready · Ctrl-P recalls the command" and rejected.command == ""
     unknown = make_state()
     unknown.dispatch = lambda *_: (_ for _ in ()).throw(RuntimeError("write failed"))
     unknown._dispatch("pause")
     settle(unknown)
-    assert "Outcome unknown: write failed · ↑ recalls the command" in unknown.output
+    assert "Outcome unknown: write failed · Ctrl-P recalls the command" in unknown.output
     assert unknown.command == "" and "Command not confirmed" in unknown.output[-1]
     ok = failing_state('{"status": "APPLIED", "result": {}}')
     assert "recalls" not in ok.output[-1] and ok.command == ""
@@ -844,7 +848,7 @@ def test_rejected_and_unknown_outcomes_get_the_recall_hint_but_success_does_not(
 
 def test_multiline_failures_append_the_hint_as_a_last_line() -> None:
     state = failing_state("error: first line\nsecond line")
-    assert list(state.output) == ["error: first line", "second line", "↑ recalls the command"]
+    assert list(state.output) == ["error: first line", "second line", "Ctrl-P recalls the command"]
     assert state.response_overlay and state.command == ""
 
 
@@ -907,7 +911,7 @@ def test_real_control_view_renders_new_tabs_status_strip_and_actions(tmp_path, e
             assert name in lines[2], lines[2]
         for old in ("Orders", "Stations", "Systems", "Palette", "Bridge]"):
             assert old not in lines[2]
-        assert lines[1].startswith("not started · next: task 1 · type /start")  # status strip, not the objective
+        assert lines[1].startswith("not started · task 1 ready · type /start")  # status strip, not the objective
         assert "Audit the thing" not in lines[1]
         backend.send_keys(handle, pane="provider", keys="\x1bOQ")  # F2
         wait_for(lambda: "[Tasks]" in screen()[2] and any("Follow-up work" in line for line in screen()))

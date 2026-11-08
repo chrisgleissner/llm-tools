@@ -99,7 +99,7 @@ def test_dispatch_errors_and_reentrant_command_are_reported_without_duplicate_wo
     assert any("Outcome unknown: durable write failed" in line for line in state.output)
     # The line stays empty like Codex CLI / Claude Code; the failed command is the newest history entry.
     assert state.command == "" and list(state.history)[-1] == "priority 1 5"
-    assert any("Outcome unknown: durable write failed · ↑ recalls the command" in line for line in state.output)
+    assert any("Outcome unknown: durable write failed · Ctrl-P recalls the command" in line for line in state.output)
     state.handle_key("\x10")
     assert state.command == "priority 1 5"
 
@@ -221,7 +221,7 @@ def test_usage_and_lifecycle_empty_branches_render_without_claims() -> None:
         "lifecycle": {"status": "RUNNING", "heartbeat": {}},
     })
     state.choose_view(7)
-    assert state.rows() == ["Usage · ready · updated 0s ago", "one", "two"]
+    assert state.rows() == ["Usage · ready · updated 0s ago · live llm-usage read", "one", "two"]
     state.choose_view(bridge_tui.VIEWS.index("Health"))
     rows = state.rows()
     assert rows == ["Lifecycle             RUNNING"]

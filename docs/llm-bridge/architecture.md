@@ -152,8 +152,9 @@ Do not launch ralph-robin then parse its formatted stdout to discover state.
 Explicit criteria: command argv with timeout/cwd/private logs, artifact checks,
 or operator approval. No shell unless explicitly selected. Evidence is tied to
 task revision. Exit zero merely triggers VERIFYING; no criteria means awaiting
-operator verification, never implicit completion. task verify --approve records
-operator evidence. Show criteria counts, not invented completion percentages.
+operator verification, never implicit completion. task approve records
+operator evidence (task verify --approve is a deprecated spelling). The stored status is
+VERIFYING; screens show it as REVIEW. Show criteria counts, not invented completion percentages.
 
 Persist typed new-task/amend/replace/review/verify/pause-after-iteration/
 stop-after-task/handoff commands; apply at safe boundaries. Handoff includes
@@ -194,8 +195,8 @@ llm-bridge task list|show --mission ID [--task ID] [--all|--limit N --offset N] 
 llm-bridge task amend --mission ID --task ID --file amendment.md
 llm-bridge task priority|reorder|dependencies --mission ID --task ID ...
 llm-bridge task pause|resume|cancel|retry|verify --mission ID --task ID
-llm-bridge task verify --mission ID --task ID --approve
-llm-bridge events --mission ID [--after ID] [--limit N] [--json]
+llm-bridge task approve --mission ID --task ID
+llm-bridge events --mission ID [--after ID] [--since AGE] [--limit N] [--follow] [--verbose] [--json]
 llm-bridge doctor [--mission ID] [--json]
 ```
 

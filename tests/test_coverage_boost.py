@@ -191,13 +191,13 @@ def test_progress_guard_detects_prompts_and_stalls() -> None:
     assert guard.overdue() is None
 
     # Idle timeout fires when no progress for longer than idle_timeout.
-    guard.last_progress = time.time() - (guard.idle_timeout + 5)
+    guard.last_progress = time.monotonic() - (guard.idle_timeout + 5)
     assert "no output progress" in (guard.overdue() or "")
 
     # Question timeout fires when a question went unanswered.
     fresh = scheduler.ProgressGuard()
-    fresh.last_progress = time.time()
-    fresh.question_seen_at = time.time() - (fresh.question_idle_timeout + 5)
+    fresh.last_progress = time.monotonic()
+    fresh.question_seen_at = time.monotonic() - (fresh.question_idle_timeout + 5)
     assert "required a response" in (fresh.overdue() or "")
 
 

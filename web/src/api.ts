@@ -19,10 +19,13 @@ export interface MissionInfo {
   folder: string;
   updated_at: string | null;
   needs_you?: { kind: string; message: string; command?: string } | null;
+  /** Replicated with each mission summary (protocol.md, "Mission summaries"); absent when the worker predates it. */
   task_counts?: Record<string, number>;
   current_task?: { ordinal?: number; title?: string } | null;
-  station?: string;
-  model?: string;
+  station?: string | null;
+  model?: string | null;
+  needs_kind?: string | null;
+  needs_tasks?: number;
 }
 
 export interface MissionEntry {
@@ -78,6 +81,7 @@ export class ApiError extends Error {
 
 let csrfToken = "";
 let unauthorizedHandler: () => void = () => {};
+let passwordChangeHandler: () => void = () => {};
 /** Fires the registered 401 handler (used when the live stream notices the session is gone). */
 export const onUnauthorizedNow = (): void => unauthorizedHandler();
 
@@ -86,6 +90,10 @@ export function setCsrf(token: string): void {
 }
 export function onUnauthorized(fn: () => void): void {
   unauthorizedHandler = fn;
+}
+/** Registers what happens when any call is answered with 403 `password-change-required`. */
+export function onPasswordChangeRequired(fn: () => void): void {
+  passwordChangeHandler = fn;
 }
 
 async function request<T>(method: string, path: string, body?: unknown, quiet401 = false, extraHeaders: Record<string, string> = {}): Promise<T> {
@@ -109,6 +117,7 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
   if (!res.ok) {
     const e = (json as { error?: { code?: string; message?: string } } | null)?.error;
     const ra = Number(res.headers.get("retry-after"));
+    if (res.status === 403 && e?.code === "password-change-required") passwordChangeHandler();
     throw new ApiError(res.status, e?.code ?? "http", e?.message ?? `Request failed (${res.status}).`, Number.isFinite(ra) && ra > 0 ? ra : null);
   }
   return json as T;
@@ -154,6 +163,10 @@ export interface AuthState {
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
   username?: string | null;
+  /** True while a temporary password set on the host has not been replaced (signed-in sessions only). */
+  password_change_required?: boolean;
+  /** Set after the host reset the password, until it is changed or a week has passed (signed-in sessions only). */
+  password_reset_notice?: { at: number; message: string };
   session?: { remember: boolean; expires_at: number; idle_timeout_secs: number };
 }
 
@@ -251,7 +264,8 @@ function resourceResult(row: CommandRow): Record<string, unknown> {
 }
 
 export async function missionTasks(target: string, missionId: string, limit = 500, offset = 0): Promise<{ tasks: Array<Record<string, unknown>>; total: number; offset: number }> {
-  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), wait_ms: "10000" });
+  // The console lists tasks by title and never shows a prompt, so none travels over the worker link.
+  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), prompt_chars: "0", wait_ms: "10000" });
   const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks?${q}`);
   return resourceResult(row) as { tasks: Array<Record<string, unknown>>; total: number; offset: number };
 }

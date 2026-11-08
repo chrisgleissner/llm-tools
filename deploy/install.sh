@@ -78,6 +78,13 @@ fi
 
 run install -d -m 0755 "$bin_dir"
 run install -m 0755 "$binary" "$bin_dir/bridge-coordinator"
+# Host-level administration wrapper (same name as for a container install); it calls the binary
+# with sudo, as `llm-bridge-coordinator reset-password`.
+if [ -f "$here/../container/llm-bridge-coordinator" ]; then
+    run install -m 0755 "$here/../container/llm-bridge-coordinator" "$bin_dir/llm-bridge-coordinator"
+else
+    note "container/llm-bridge-coordinator not found next to deploy/: the wrapper is not installed (use sudo bridge-coordinator admin reset-password)"
+fi
 if [ -n "$webdir" ]; then
     run install -d -m 0755 "$web_target"
     run cp -R "$webdir"/. "$web_target"/

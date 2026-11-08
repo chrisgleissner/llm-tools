@@ -461,6 +461,17 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
+        // After `admin reset-password --temporary` a sign-in only leads to the password change.
+        if matches!(principal, Principal::Session { .. })
+            && !matches!(parts.uri.path(), "/api/v1/auth/password" | "/api/v1/auth/logout")
+            && st.db.password_change_required()?
+        {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                crate::admin_reset::CHANGE_REQUIRED_CODE,
+                "the password was reset by an administrator on the host; change it with POST /api/v1/auth/password first",
+            ));
+        }
         if let Principal::Token {
             name,
             scopes: granted,
@@ -686,6 +697,10 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
             body["csrf_token"] = json!(csrf);
             body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
             body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
+            body["password_change_required"] = json!(st.db.password_change_required()?);
+            if let Some(at) = st.db.password_reset_notice()? {
+                body["password_reset_notice"] = json!({"at": at, "message": crate::admin_reset::RESET_NOTICE});
+            }
         }
         Ok(Principal::Token {
             name,
@@ -1851,8 +1866,8 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     } = request;
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
     let (operation, allowed, position_key, default_limit): (&str, &[&str], Option<&str>, u64) = match resource {
-        "mission" => ("mission.status", &[], None, 0),
-        "tasks" => ("task.list", &["limit", "cursor", "offset"], Some("offset"), 50),
+        "mission" => ("mission.status", &["task_limit", "prompt_chars", "event_limit"], None, 0),
+        "tasks" => ("task.list", &["limit", "cursor", "offset", "prompt_chars"], Some("offset"), 50),
         "events" => ("mission.events", &["limit", "cursor", "after"], Some("after"), 50),
         "operations" => ("session.list", &["limit", "cursor", "offset"], Some("offset"), 100),
         _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission resource")),
@@ -2716,6 +2731,16 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
             format!("worker {target:?} did not advertise operation {operation:?}"),
         )
     })?;
+    // A read is only useful while its client waits for the answer, so it is not queued for a worker
+    // that is offline: it would be replayed, with its large result, long after nobody wants it
+    // (DOG-021). Writes are queued as before. An already journaled read keeps its stored answer.
+    if !mutating && !st.hub.online(target) && st.db.command_get(request_id)?.is_none() {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "worker-offline",
+            format!("worker {target:?} is offline; read-only commands are not queued, so try again when it is back"),
+        ));
+    }
     let request_value = Value::Object(request.clone());
     let row = match st.db.command_insert(target, operation, mutating, &request_value)? {
         InsertOutcome::Conflict => {
@@ -2742,7 +2767,7 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
                 );
                 st.db.audit(&p.actor(), "command.submit", &detail, &ip);
             }
-            st.hub.publish(json!({"type": "command", "command": row.notification_json()}));
+            st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
             let mut payload = request.clone();
             payload.insert("target".into(), json!("local"));
             payload.entry("params").or_insert_with(|| json!({}));
@@ -3198,6 +3223,8 @@ async fn diagnostics(State(st): State<St>, _a: Authed) -> ApiResult {
     d["uptime_seconds"] = json!(st.started.elapsed().as_secs());
     d["rss_kib"] = json!(rss_kib());
     d["connected_workers"] = json!(st.hub.connected());
+    // Messages and bytes since start by direction (worker_in, worker_out, browser_out) and message type.
+    d["link_bytes"] = st.hub.link_bytes();
     d["sqlite_version"] = json!(rusqlite::version());
     Ok(json_ok(StatusCode::OK, d))
 }
@@ -3214,6 +3241,7 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
     }
     let rx = st.hub.stream.subscribe();
     let shutdown = st.shutdown.clone();
+    let hub = st.hub.clone();
     let keepalive = (
         Duration::from_secs(st.cfg.ws_ping_interval_secs),
         Duration::from_secs(st.cfg.ws_idle_timeout_secs),
@@ -3221,13 +3249,19 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |s| stream_session(s, rx, shutdown, keepalive))
+        .on_upgrade(move |s| stream_session(s, rx, shutdown, keepalive, hub))
         .into_response())
 }
 
 /// Pushes updates to a browser. The server pings every `ping` and closes the socket once nothing
 /// (no pong, no message) was received for `idle` (NET-010).
-async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<str>>, mut shutdown: watch::Receiver<bool>, (ping, idle): (Duration, Duration)) {
+async fn stream_session(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<Arc<str>>,
+    mut shutdown: watch::Receiver<bool>,
+    (ping, idle): (Duration, Duration),
+    hub: Arc<crate::hub::Hub>,
+) {
     let mut tick = tokio::time::interval(ping);
     tick.tick().await;
     let mut last_heard = Instant::now();
@@ -3235,7 +3269,10 @@ async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<s
     loop {
         tokio::select! {
             m = rx.recv() => match m {
-                Ok(text) => if socket.send(WsMessage::Text(text.to_string().into())).await.is_err() { return },
+                Ok(text) => {
+                    hub.count_message("browser_out", &text);
+                    if socket.send(WsMessage::Text(text.to_string().into())).await.is_err() { return }
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => { let _ = socket.send(close(1013, "client too slow")).await; return }
                 Err(_) => return,
             },

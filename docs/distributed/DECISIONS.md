@@ -233,7 +233,128 @@ deployment state or exceed the runner budget. A local pinned run selected 23 rea
 passed 4,201 generated cases across coverage, fuzzing and stateful phases in 30 seconds, and left
 the coordinator healthy. Revisit the scan scope if authored mutation coverage changes.
 
-## D16 Canonical passkey origin (PK-002)
+## D16 Memory gate of the soak and the controller leak (PRD-007)
+
+PRD-007 forbids unbounded growth. The first 30-minute soak showed the mission controllers growing by what looked like
+20 to 56 KB per completed task, and a first response raised the controller bound to 6 MiB per hour. That was
+rejected: a bound that large (144 MiB per day) hides a leak. The decision rests on measurements, listed in
+`soak-and-chaos.md` (Memory over time) with plots in `soak-and-chaos/`.
+
+- **One leak, removed.** CPython 3.12 makes interned strings immortal and `pathlib` interns every path
+  component. The controller parsed five new names per provider run (iteration directory, two verifier files,
+  two pids), 5.00 new interned strings per task, 0.33 KiB per task on the traced heap. `common.RunPath` (a
+  `PosixPath` whose parser does not intern; the plain class on other Python versions or if the internals
+  differ) and `fileio.read_proc_text` remove them: 0.00 strings per task over 300 tasks, 0.02 KiB per task on
+  the traced heap over 455 tasks. `tests/test_bridge_controller_memory.py` fails before the change (90 new
+  strings after 18 runs) and passes after (at most 4).
+- **No other accumulation.** The remaining growth of a controller is heap fragmentation (`malloc_trim(0)`
+  returns 1.5 to 3.4 MiB) and a bounded SQLite page cache (1.63 to 2.38 MiB); live glibc heap rose 0.13 MiB in 35
+  minutes. It flattens: 50 controllers rose for about 20 minutes, a single controller moved by 0.32 MiB per
+  hour for 74 minutes after that (0.51 after the fix, same spread).
+- **Gate.** The soak ignores a warm-up of 1200 s (at most two thirds of the run) instead of 25% of the run,
+  judges controllers per process on the median of each controller's own post-warm-up slope (bound 1.5 MiB per
+  hour, measured 0.88 to 1.12), and fails any single controller or worker above 56 MiB and the coordinator
+  above 96 MiB (measured peaks 40.9 to 42.8, 34.1 and 34.3 MiB). The coordinator's growth is allowed 256 bytes
+  per new row (measured 81 to 96). The 6 MiB per hour bound is reverted.
+- **Not decided here.** The plateau is shown for 75 minutes after warm-up. The 4.5-hour nightly and the 24-hour
+  runs are the evidence for longer, and the ceilings fail them if it does not hold. Python 3.13 or later should
+  not need `RunPath`; this was not run. A periodic `malloc_trim` was rejected for now: it is glibc-specific and
+  recovers about 1.5 to 3 MiB.
+
+## D17 Web initial JavaScript budget (WEB-010, PRD-020, PRD-036)
+
+The initial JavaScript caps in `web/budget.json` rose from 90000 raw / 31000 gzip to 91000 / 31750
+bytes. Bytes are the app entry plus the static chunks it imports, measured the way
+`e2e/budget.spec.ts` measures them (gzip level 9), by building each state in a clean tree. The
+starting point is the tree after PR #31 was merged, because that merge had already grown the first
+load from 88811 / 30944 (the follow-up branch before the merge) to 88984 / 31005, which is over the
+old gzip cap by 5 bytes.
+
+| State | Initial JS raw | gzip | Change raw | Change gzip |
+|---|---:|---:|---:|---:|
+| Merged main plus release readiness, before the PRD-036 web half | 88984 | 31005 | | |
+| + `api.ts`: 403 `password-change-required` handler, auth/state fields | 89053 | 31042 | +69 | +37 |
+| + `login.ts`: reset hint and link on the sign-in page | 89440 | 31215 | +387 | +173 |
+| + `account.ts`: `passwordForm` takes a page title and intro paragraphs | 89594 | 31291 | +154 | +76 |
+| + `main.ts` and `reset.ts` (forced screen and notice, static import) | 90997 | 31720 | +1403 | +429 |
+| Total | | | +2013 | +715 |
+
+The forced-change screen and the notice (`reset.ts`) are imported statically. Loading `reset.ts` with a
+dynamic import was built and rejected. Measured on the follow-up branch before the merge, it gave
+90055 / 32267 in 4 files against 90910 / 31692 in 2 files for the static import: 855 fewer raw bytes
+but 575 more gzip bytes. The hint, the form change and the 403 handler have to be in the first load
+either way, and `reset.ts` imports `passwordForm` from code that the account page also uses. esbuild
+therefore moved shared code into two extra small static chunks, and each chunk is compressed on its
+own (+1028 gzip bytes for +620 raw bytes). Gzip size is what crosses the network, and the lazy variant
+also costs two more requests on the first load.
+
+The messages of the forced screen and the hint were shortened by about 100 bytes so that the first
+load fits the raw cap of 91000, which is the ceiling the operator accepted. It now leaves 3 raw and 30
+gzip bytes of headroom, so the next change to the first load has to raise the caps or remove code. The
+total initial figure (JavaScript plus CSS) is 121034 raw / 39254 gzip against caps of 124000 / 40000
+and is unchanged in `budget.json`.
+
+The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
+byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
+
+Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
+The initial caps stay at 91000 raw / 31750 gzip (JavaScript) and 40000 gzip (JavaScript plus CSS).
+Same measurement method as above:
+
+| State | Initial JS raw | gzip | Initial total gzip | Lazy raw | gzip |
+|---|---:|---:|---:|---:|---:|
+| Merge base | 88506 | 30848 | 38382 | | |
+| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 | 365652 | 96411 |
+| This branch before the merge (already above its 91000 / 31750 caps) | 92390 | 32176 | 39710 | 352470 | 91000 |
+| Merge, `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 | | |
+| Merge, `passwordForm` in `views/password-form.ts` | 92638 | 33163 | 40747 | 363929 | 95857 |
+| Merge, plus workers, sessions and usage views loaded on demand | 84299 | 30855 | 38439 | 373424 | 100498 |
+
+What moved:
+- `passwordForm` lives in `views/password-form.ts`. The forced password-change screen (`reset.ts`) is part
+  of the first load and imported it from `account.ts`, which pulled the whole lazy account page (API token
+  restrictions, passkey list and re-enrolment, about 8 KB) into the first load: +9.5 KB raw.
+- The router loads the workers, sessions, usage and account views with `import()` (`lazyView` in
+  `main.ts`). While a chunk loads the main area shows the existing `status-skeleton` block with
+  `aria-busy`; a route change during the load discards the result. The overview, missions list, mission
+  detail and diagnostics views stay in the first load. The mission detail view alone is 3.9 KB gzip
+  of the first load, but moving it, or the missions list, costs more lazy bytes than moving the three
+  smaller views and would delay the pages used most.
+
+Why the lazy caps rose (`jsRaw` 366000 to 374000, `jsGzip` 97000 to 101000): the merged code was
+already larger than the two old budgets together (initial 31750 plus lazy 97000 is 128750 gzip bytes;
+the merged build was 129020 before any split). Any code taken out of the first load therefore
+counts against the lazy caps. Code that leaves the first-load bundle also compresses worse as separate
+chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
+The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
+
+## D19 Worker memory: no leak, per-process gate (PRD-007)
+
+The soaks showed `llm-bridge worker run` processes growing by 2.5 and then 1.9 MiB per hour after warm-up (about 48 MiB per day). The
+investigation followed D16. Measurements are in `soak-and-chaos.md` (Worker memory), plots in `soak-and-chaos/worker-*.svg`.
+
+- **No accumulating object.** `tracemalloc` with 25 frames inside a real worker moved from 7917 to 7964 KiB in 40 minutes (a deferred import
+  on the first status command, not a per-command allocation); live objects, Python allocated blocks and SQLite memory in use did not trend; the
+  controller pattern (CPython 3.12 interned path components) does not occur in the worker. A longer reading is the same: in a 3-hour
+  single-worker run the bytes in use in the glibc heap rose by 0.2 MiB, all within the first 50 minutes.
+- **What was measured as growth.** Free space inside the glibc heap (0.9 MiB at minute 1, 2.8 MiB from minute 55, then flat) and the steps down
+  when the top of the heap is freed (up to 2.6 MiB). The 30- and 45-minute runs sampled the rising part. After minute 20 the resident size of the
+  3-hour run moved by -0.06 to +0.22 MiB per hour depending on the start of the window.
+- **No code change in the worker.** Holding one read-only SQLite connection instead of opening one every 0.5 s was tried and reverted: the
+  heap grew by the same amount. A periodic `malloc_trim` was not added for the reason given in D16; at minute 24 it returned 1.0 MiB and the free
+  space was back 200 s later.
+- **Gate.** The workers are judged per process like the controllers (median over the processes of each one's slope after `--warmup-seconds`).
+  The bound is 512 KiB per hour per worker (12 MiB per day, 2.3 times the largest post-warm-up slope measured), replacing 3 MiB per hour summed
+  over the fleet. The floor (1024 KiB rise per process) and the ceiling (56 MiB, measured peak 34.2 MiB) are unchanged. In the 30-minute run the
+  10-minute window measured a median of 2.81 MiB per hour (settling) with a rise of 474 KiB, so that run passes on the floor; the slope can only
+  fail in runs where the window is two hours or longer (the 4.5-hour nightly run and the 24-hour run).
+- **Tests.** `tests/test_bridge_worker_memory.py` (interned strings and live objects after 240 commands and event polls; it fails with a
+  per-command `Path` or dictionary entry added) guards the property that there is no per-command growth. It cannot fail on the current
+  code because there is nothing to fix. `test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per_hour` fails with the
+  previous bound and the summed check.
+- **Not decided here.** Whether a 24-hour worker stays inside 0.5 MiB per hour is unmeasured; the longest run is 3 hours.
+
+## D20 Canonical passkey origin (PK-002)
 
 Bind the administrator's passkeys to one HTTPS DNS origin. The first successful
 registration binds the origin and credential in one SQLite transaction; an operator may
@@ -249,7 +370,7 @@ In the code: `coordinator/src/passkeys.rs::canonical_origin`, `coordinator/src/c
 `coordinator/src/db.rs::passkey_put_at_origin`, and `coordinator/src/server.rs`; regressions
 are covered by `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs`.
 
-## D17 Require discoverable passkeys (PK-003, PK-004)
+## D21 Require discoverable passkeys (PK-003, PK-004)
 
 The maintained `webauthn-rs` 0.6.2 no-attestation registration method hardcodes
 `require_resident_key(false)`. Its separate resident-key API requires attestation roots and
@@ -267,7 +388,7 @@ tests assert required resident keys, conditional mediation and an empty allow li
 checks the fixed user handle, registered credential ID and user-verification flag; valid
 cryptographic vectors for that path remain required under PK-011.
 
-## D18 Configurable API token lifetime ceiling (SEC2-009)
+## D22 Configurable API token lifetime ceiling (SEC2-009)
 
 Keep the existing 90-day default and allow a deployment to lower or raise the explicit
 expiry ceiling through `max_token_lifetime_days`, bounded to 1–3650 days. Preserve
@@ -279,7 +400,7 @@ In the code: `coordinator/src/config.rs` defines and validates the setting;
 `coordinator/src/config.rs::tests::api_token_lifetime_default_is_ten_years_and_config_is_bounded`
 and `coordinator/tests/web_api.rs::token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry`.
 
-## D19 Identifiable API token strings (SEC2-009)
+## D23 Identifiable API token strings (SEC2-009)
 
 New API tokens use `lbr_pat_<id>_<secret>`. The random 16-character lowercase-hex ID makes
 the credential recognizable to scanners; the independently generated 32-byte secret is
@@ -293,7 +414,7 @@ In the code: token minting is in `coordinator/src/http.rs::create_token`, and th
 schema is in `coordinator/src/openapi.rs::TokenCreated`; the format regression is in
 `coordinator/tests/web_api.rs::token_management_lists_metadata_and_shows_secret_only_at_creation`.
 
-## D20 Certificate provisioning boundary (SEC2-019)
+## D24 Certificate provisioning boundary (SEC2-019)
 
 Keep certificate source selection behind `CertificateProvider`, with implementations for the
 internal coordinator CA and operator-supplied certificate files. File reload keeps the last
@@ -304,7 +425,7 @@ In the code: `coordinator/src/certs.rs` owns the trait and both current provider
 `coordinator/src/server.rs` selects a provider from the validated config. Existing file-reload
 and TLS tests cover the provider implementations.
 
-## D21 Stable principal ownership and sender binding extension points (SEC2-019)
+## D25 Stable principal ownership and sender binding extension points (SEC2-019)
 
 Use a durable `principals` table with stable IDs (`admin` and `system` today) and role metadata.
 Sessions, API tokens and audit rows point to the principal ID rather than deriving ownership from
@@ -316,7 +437,7 @@ In the code: schema migration 17 adds the principal registry and ownership field
 `coordinator/src/db.rs`; `coordinator/tests/principals.rs` verifies new records, and
 `coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` verifies legacy rows.
 
-## D22 Allow the bundled webpki trust data license (SEC2-015)
+## D26 Allow the bundled webpki trust data license (SEC2-015)
 
 Allow `CDLA-Permissive-2.0` in the Rust license audit because `reqwest` reaches `webpki-roots`,
 which bundles root-certificate data. The official license permits use, modification and sharing;
@@ -325,4 +446,13 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
+
+## D27 Release decisions delegated to the lead (PRD-007, PRD-037, DOG-025)
+
+The operator delegated the remaining open questions: "All other questions answer them like a principal engineer and product owner would". The lead decided:
+
+- PRD-007 soak duration: PR CI keeps the 5-minute soak (job `soak-chaos`), `.github/workflows/soak-nightly.yml` runs 30 minutes, and the 24-hour run is a pre-release step. A 30-minute soak on every PR would add about 25 minutes to each CI run without finding defects the nightly run misses; the nightly run and the pre-release run cover slow growth.
+- Lazy web JavaScript cap: the raise from 97,000 to 101,000 bytes gzip recorded in D17 is accepted. Its cause (the lazily loaded workers, sessions, usage and account views) was measured. Initial caps stay unchanged.
+- PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
+- DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
 

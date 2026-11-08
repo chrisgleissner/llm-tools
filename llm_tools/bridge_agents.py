@@ -323,7 +323,7 @@ def build_agent_map(
         return {"schema_version": 1, "observed_at": observed_at, "freshness": "partial", "capabilities": {}, "agents": [], "errors": {}, "total": 0}
     query = (
         "SELECT o.id,o.mission_id,o.task_id,o.station,o.route_id,o.model,o.status,o.exit_code,o.native_session_id,o.process_pid,o.process_start,o.restoration_state,o.created_at,o.updated_at,"
-        "t.ordinal,t.title,m.name AS mission_name,m.cwd,m.config_json "
+        "t.ordinal,t.title,t.status AS task_status,m.name AS mission_name,m.cwd,m.config_json "
         "FROM operations o JOIN missions m ON m.id=o.mission_id LEFT JOIN tasks t ON t.id=o.task_id "
         "WHERE (? IS NULL OR o.mission_id=?) AND (o.status IN ('INTENT','PREPARED','RUNNING') OR ("
         "NOT EXISTS (SELECT 1 FROM operations a WHERE a.mission_id=o.mission_id AND a.status IN ('INTENT','PREPARED','RUNNING')) "
@@ -395,6 +395,8 @@ def build_agent_map(
             "age_seconds": _duration(operation["created_at"], finished_at, observed_at) if is_active or status_raw == "EXITED" else None,
             "status": status_raw.lower() if is_active else ("completed" if status_raw == "EXITED" and operation["exit_code"] == 0 else ("failed" if status_raw == "EXITED" else "unknown")),
             "activity": f"task {operation['ordinal']}: {_string(operation['title'], 'provider operation', 120)} · {status_raw.lower()}",
+            # A provider exit is not the task's result: say so when the task now waits for the operator.
+            **({"status_label": "exited 0 · awaiting review"} if status_raw == "EXITED" and operation["exit_code"] == 0 and operation["task_status"] == "VERIFYING" else {}),
             "model": "unknown",
             "model_source": "unknown",
             "configured_model": configured_model,
@@ -537,7 +539,7 @@ def format_agent_map(data: Mapping[str, Any], *, now: float | None = None) -> li
         age_text = "?" if age is None else _short_age(int(age))
         model = item.get("model") if item.get("model_source") == "observed" else f"cfg:{item.get('configured_model', 'unknown')}"
         effort = item.get("reasoning_effort") if item.get("effort_source") == "observed" else f"cfg:{item.get('configured_effort', 'unknown')}"
-        line = f"{'  ' * depth}{_string(item.get('name'), 'agent', 30)} · {item.get('provider', 'unknown')} · {age_text} · {item.get('status', 'unknown')} · {model}/{effort} · {_string(item.get('activity'), 'activity unavailable', 70)}"
+        line = f"{'  ' * depth}{_string(item.get('name'), 'agent', 30)} · {item.get('provider', 'unknown')} · {age_text} · {item.get('status_label') or item.get('status', 'unknown')} · {model}/{effort} · {_string(item.get('activity'), 'activity unavailable', 70)}"
         lines.append(line[:240])
     return lines
 

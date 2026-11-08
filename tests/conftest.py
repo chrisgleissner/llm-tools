@@ -16,9 +16,19 @@ from typing import Any
 
 import pytest
 
-from tests import process_hygiene
+from tests import process_hygiene, state_guard
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def without_help_reference(text: str) -> str:
+    """``text`` without the final ``see: URL#CODE`` line that every llm-bridge error exit ends with.
+
+    Fails when that line is missing, so tests that compare the message also check the reference.
+    """
+    lines = text.rstrip("\n").split("\n")
+    assert lines[-1].startswith("see: https://") and "/troubleshooting.md#" in lines[-1], text
+    return "\n".join(lines[:-1]) + ("\n" if text.endswith("\n") else "")
 LOCAL_COMMANDS = {"./llm-usage", "./llm-scheduler", "./ralph-robin"}
 try:
     import coverage as _coverage
@@ -144,6 +154,8 @@ def _utf8_launcher_glyphs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     from llm_tools import bridge_glyphs
 
     monkeypatch.setattr(bridge_glyphs, "_locale_codeset", lambda: "UTF-8")
+    monkeypatch.setattr(bridge_glyphs, "_user_locale_is_c", lambda: False)  # the test host's LANG must not pick the glyph set
+    monkeypatch.delenv("LLM_BRIDGE_ASCII", raising=False)
     bridge_glyphs.ascii_mode.cache_clear()
     yield
     bridge_glyphs.ascii_mode.cache_clear()
@@ -162,6 +174,8 @@ def _no_live_provider_launch(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: 
     isolated_home.mkdir()
     monkeypatch.setenv("HOME", str(isolated_home))
     monkeypatch.setenv("USERPROFILE", str(isolated_home))  # Path.home() on Windows
+    monkeypatch.setenv("LLM_BRIDGE_NO_SIGNIN_CHECK", "1")  # mission create/start do not warn about sign-in; tests of the warning unset this
+    monkeypatch.setenv("LLM_BRIDGE_NO_CAPACITY_CHECK", "1")  # the new-mission form reads no provider usage in the background; tests of that unset this
     for name in ("codex", "claude", "copilot", "kilo", "mmx", "opencode"):
         path = guard / name
         path.write_text("#!/bin/sh\necho 'Unexpected live provider launch blocked by test harness' >&2\nexit 123\n")
@@ -290,14 +304,23 @@ PROCFS_ONLY_MODULES = frozenset({
     "test_bridge_force_stop", "test_bridge_process_scans", "test_bridge_runtime", "test_bridge_verifier",
     "test_bridge_verifier_guard", "test_bridge_review_hold", "test_bridge_steering", "test_bridge_sessions",
     "test_bridge_end_to_end", "test_bridge_completed_stop", "test_bridge_first_run_start", "test_bridge_native_e2e",
-    "test_process_hygiene", "test_distributed_offline",
+    "test_process_hygiene", "test_distributed_offline", "test_distributed_soak_harness", "test_distributed_chaos",
 })
 # Single tests in otherwise portable modules that read a process start token or /proc/self/cmdline.
 PROCFS_ONLY_TESTS = frozenset({
+    "tests/test_bridge_status_honesty.py::test_stop_force_with_no_provider_process_succeeds_and_says_so",
+    "tests/test_bridge_status_honesty.py::test_start_after_stop_force_runs_the_interrupted_task_again",
     "tests/test_bridge_refresh.py::test_refresh_worker_records_heartbeat_then_delays_quota_refresh",
     "tests/test_bridge_review_regressions.py::test_complete_stop_terminates_owned_descendant_in_a_new_session",
     "tests/test_bridge_review_regressions.py::test_owned_group_termination_kills_descendant_after_leader_exits",
     "tests/test_bridge_security_prompt_delivery.py::test_headless_run_delivers_the_prompt_on_stdin",
+    "tests/test_bridge_internals_fixes.py::test_controller_exception_stops_the_provider_process_group",
+    "tests/test_bridge_internals_fixes.py::test_provider_that_cannot_be_stopped_is_recorded_as_orphaned",
+    "tests/test_bridge_internals_fixes.py::test_force_stop_finds_the_controller_through_the_lock_when_the_ready_file_is_gone",
+    "tests/test_bridge_internals_review.py::test_int003_controller_start_retries_a_failed_provider_termination",
+    "tests/test_bridge_internals_review.py::test_int003_second_force_stop_retries_a_failed_provider_termination",
+    "tests/test_bridge_internals_review.py::test_int018_cancel_ends_the_running_provider_process",
+    "tests/test_bridge_native_usage_limit.py::test_the_provider_process_tree_is_stopped_before_the_pane_is_reused",
 })
 
 
@@ -424,6 +447,8 @@ _REAL_RUNTIME_ENV = os.environ.get("XDG_RUNTIME_DIR", "")
 _SESSION_RUNTIME_DIRS: set[str] = set()
 _SESSION_START = time.time()
 _BASELINE: dict[str, object] = {}
+# The operator's real Bridge databases, resolved from the environment before any test isolation.
+_REAL_STATE_DATABASES = state_guard.real_state_databases(os.environ)
 _ESCAPED_SOCKETS: dict[str, str] = {}  # socket path -> test id that asked for it
 
 
@@ -496,6 +521,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
             _quiet_run([_RM, "-rf", "--", directory])
     _BASELINE["entries"] = _list_entries(_real_bridge_dirs())
     _BASELINE["controllers"] = _controller_pids()
+    _BASELINE["real_missions"] = state_guard.snapshot(_REAL_STATE_DATABASES)
 
 
 def _quiet_run(argv: list[str]) -> None:
@@ -541,9 +567,9 @@ def _kill_tmux_servers_in(directory: Path) -> None:
 @pytest.fixture(autouse=True)
 def _record_socket_escapes(request: pytest.FixtureRequest, _private_runtime_dir: Path):
     """Remember any in-process Bridge socket path that resolves outside the test's runtime dir."""
-    from llm_tools import bridge_runtime
+    from llm_tools import bridge_runtime, bridge_sockets
 
-    original = bridge_runtime.mission_socket_path
+    original = bridge_sockets.mission_socket_path
     sandbox = str(_private_runtime_dir)
 
     def recording(mission_id: str, *, env: dict[str, str] | None = None) -> Path:
@@ -552,12 +578,16 @@ def _record_socket_escapes(request: pytest.FixtureRequest, _private_runtime_dir:
             _ESCAPED_SOCKETS.setdefault(str(path), request.node.nodeid)
         return path
 
+    # ``bridge_runtime`` re-exports the function and calls it through its own name; ``mission list`` reaches it
+    # through ``bridge_sockets``. Record both paths.
+    bridge_sockets.mission_socket_path = recording  # type: ignore[assignment]
     bridge_runtime.mission_socket_path = recording  # type: ignore[assignment]
     try:
         yield
     finally:
-        if bridge_runtime.mission_socket_path is recording:
-            bridge_runtime.mission_socket_path = original  # type: ignore[assignment]
+        for module in (bridge_sockets, bridge_runtime):
+            if module.mission_socket_path is recording:
+                module.mission_socket_path = original  # type: ignore[assignment]
 
 
 @pytest.fixture(autouse=True)
@@ -783,6 +813,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if leaked:
         problems.append("Bridge _controller processes started by this session are still alive: "
                         + ", ".join(map(str, leaked)))
+    real_missions: dict[Path, set[str]] = _BASELINE.get("real_missions", {})  # type: ignore[assignment]
+    written = state_guard.leaked_missions(real_missions, [tempfile.gettempdir(), basetemp, *sorted(_SESSION_RUNTIME_DIRS)])
+    if written:
+        problems.append("missions were created in the operator's real Bridge state from temporary folders:\n  "
+                        + "\n  ".join(written))
     # Under pytest-xdist every worker is its own session: it checks only what it created (its own
     # temp dirs and sockets) and hands the result to the controller, which sets the exit status
     # because a worker's exit status does not fail the run.

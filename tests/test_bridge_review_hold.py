@@ -134,11 +134,11 @@ def test_continue_releases_once_and_the_reviewed_task_keeps_waiting(tmp_path: Pa
 
         assert decision["action"] == "run" and decision["task_id"] == second
         assert seen["result"]["released"] == [1]
-        assert "task 1 stays awaiting approval" in seen["result"]["detail"]
+        assert "task 1 stays in REVIEW" in seen["result"]["detail"]
         assert store.get_task(first)["status"] == "VERIFYING"
         released = _kinds(store, mission_id, "review-hold-released")[0]
         assert released["data"]["how"] == "continue"
-        assert "task 1 still awaits approval" in released["data"]["summary"]
+        assert "task 1 still awaits your review" in released["data"]["summary"]
         # The release was for task 1 only: task 2 reaching review holds again, naming task 2.
         _run_to_verifying(store, hooks, second, tmp_path)
         again = store.review_hold(mission_id)
@@ -249,7 +249,7 @@ def test_hold_message_is_shown_in_the_provider_pane(tmp_path: Path, monkeypatch)
         sleeper.actions += [lambda: None, lambda: store.verify_task(first, approved=True)]
         hooks.before_iteration()
 
-        assert shown == ["Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."]  # once, not per poll
+        assert shown == ["Task 1 ready for review · Ctrl-] B then /approve"]  # once, not per poll
 
 
 def test_hold_message_failure_does_not_stop_the_hold(tmp_path: Path, monkeypatch) -> None:
@@ -373,7 +373,7 @@ def test_continue_command_cli_and_console(tmp_path, state, capsys) -> None:
     assert "Needs you   task 1 awaits your review · /approve 1 or /reject 1 reason · /continue to start the next task now" in status
     assert json.loads(_cli(capsys, "status", "--mission", mission, "--json"))["hold"]["task_ordinal"] == 1
 
-    assert _cli(capsys, "continue", "--mission", mission).strip() == "Continuing · task 1 stays awaiting approval while the next task starts"
+    assert _cli(capsys, "continue", "--mission", mission).strip() == "Continuing · task 1 stays in REVIEW while the next task starts"
     assert json.loads(_cli(capsys, "status", "--mission", mission, "--json"))["hold"] is None
     assert "Nothing to continue" in _cli(capsys, "continue", "--mission", mission)
     again = json.loads(_cli(capsys, "continue", "--mission", mission, "--json"))
@@ -396,7 +396,7 @@ def test_format_status_hides_hold_without_one() -> None:
 
 
 @pytest.mark.parametrize(("config", "expected"), [
-    (NATIVE, "Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."),
+    (NATIVE, "Task 1 ready for review · Ctrl-] B then /approve"),
     ({**NATIVE, "auto_continue": True}, ""),
     ({**NATIVE, "verifier": {"argv": ["true"], "timeout_seconds": 3}}, ""),
 ])

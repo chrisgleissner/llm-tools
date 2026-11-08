@@ -21,6 +21,23 @@ async fn tls_connect(env: &Env) -> Tls {
         .unwrap()
 }
 
+/// Send `GET /healthz` and return the response head (status line and headers).
+async fn healthz_head(s: &mut Tls) -> String {
+    let port = s.get_ref().0.peer_addr().unwrap().port();
+    s.write_all(format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !out.windows(4).any(|w| w == b"\r\n\r\n") {
+        match tokio::time::timeout(Duration::from_secs(10), s.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => out.extend_from_slice(&buf[..n]),
+            other => panic!("no complete response head, got {other:?} after {:?}", String::from_utf8_lossy(&out)),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Read until the peer closes or `limit` passes; returns what arrived.
 async fn read_to_close(s: &mut Tls, limit: Duration) -> (String, bool) {
     let mut out = Vec::new();
@@ -349,16 +366,25 @@ async fn worker_reserve_admits_workers_when_general_slots_are_full() {
     let env = boot_with(|t| set("worker_reserve_connections", "2")(set("max_connections", "8")(set("max_connections_per_ip", "100")(t)))).await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    // Hold every general slot with completed TLS connections, so the accept loop has
-    // definitely assigned them before the reserve probes below.
-    let _fill = futures_util::future::join_all((0..6).map(|_| tls_connect(&env))).await;
+    // Take every general slot. The test client's own keep-alive connections already occupy an
+    // unknown number of general slots (one or two, depending on whether the previous request's
+    // connection had returned to the pool when the next request started), so a fixed number of
+    // filler sockets cannot be right. Hold TLS connections that each completed a /healthz request
+    // until one is answered 503 by the reserve gate: the server only places a connection in the
+    // reserve when no general slot was free when it was accepted.
+    let mut held = Vec::new();
+    let refusal = loop {
+        assert!(held.len() < 6, "more connections admitted than the 6 general slots");
+        let mut s = tls_connect(&env).await;
+        let head = healthz_head(&mut s).await;
+        if head.starts_with("HTTP/1.1 200") {
+            held.push(s);
+        } else {
+            break head;
+        }
+    };
     // A browser-style request lands in the reserve and is refused.
-    let mut s = tls_connect(&env).await;
-    s.write_all(format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", env.addr.port()).as_bytes())
-        .await
-        .unwrap();
-    let (text, _) = read_to_close(&mut s, Duration::from_secs(3)).await;
-    assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+    assert!(refusal.starts_with("HTTP/1.1 503"), "{refusal}");
     // A worker with a valid token still gets in.
     let (mut fw, welcome) = Fw::connect(&env, &token, "wid-1", 0).await;
     assert_eq!(welcome["type"], "welcome");

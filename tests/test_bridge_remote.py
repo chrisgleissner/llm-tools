@@ -114,13 +114,18 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["worker", "audit"], "worker.audit", {"limit": 50}),
         (["gc"], "worker.gc", {}),
         (["status", "--mission", "m1"], "mission.status", {}),
-        (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
+        (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100, "hide_bookkeeping": True}),
         (["stop", "--mission", "m1"], "mission.stop", {"force": False}),
         (["stop", "--mission", "m1", "--force"], "mission.stop", {"force": True}),
-        (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": None, "providers": "codex", "routes": None}),
+        (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": False, "providers": "codex", "routes": None}),
         (["suspend-until-credits", "--mission", "m1"], "mission.suspend_until_credits", {}),
         (["restore", "--input", "/tmp/backup.db"], "worker.restore", {"input": "/tmp/backup.db"}),
         (["resume", "--mission", "m1"], "mission.resume", {}),
+        (["events", "--mission", "m1"], "mission.events", {"limit": 100, "newest": True, "hide_bookkeeping": True}),
+        (["events", "--mission", "m1", "--after", "7", "--since", "10m", "--verbose"], "mission.events", {"limit": 100, "after": 7, "since_seconds": 600}),
+        (["start", "--mission", "m1", "--mode", "native"], "mission.start", {"headless": False, "native_tui": True, "providers": None, "routes": None}),
+        (["task", "reject", "--mission", "m1", "--task", "2", "--reason", "no", "--hold"], "task.reject", {"task_number": 2, "reason": "no", "hold": True}),
+        (["task", "amend", "--mission", "m1", "--task", "2", "--prompt", "again", "--requeue"], "task.amend", {"task_number": 2, "prompt": "again", "requeue": True}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
         (["task", "list", "--mission", "m1", "--all"], "task.list", {"limit": 200, "offset": 0, "all": True}),
         (["task", "show", "--mission", "m1", "--task-id", "4"], "task.show", {"task_id": 4}),
@@ -147,6 +152,28 @@ def test_create_maps_trust_folder_and_names_unsupported_local_options():
     request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--trust-folder", "--include-config", "--verifier-arg", "true"), "ws")
     assert request.params["trust_folder"] is True
     assert request.params["unsupported_options"] == ["--include-config", "--verifier-arg"]
+
+
+def test_create_maps_the_run_mode_and_refuses_the_local_only_verifier_forms():
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--mode", "native"), "ws")
+    assert (request.params["native_tui"], request.params["headless"]) == (True, False)
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--verifier", "pytest -q"), "ws")
+    assert request.params["unsupported_options"] == ["--verifier"]
+
+
+@pytest.mark.parametrize("argv", [["pause", "--mission", "m1", "--after-task"], ["stop", "--mission", "m1", "--after-task", "2"]])
+def test_after_task_is_refused_remotely_instead_of_acting_now(argv):
+    with pytest.raises(ValueError, match="--after-task is not available remotely"):
+        remote.request_for(args(*argv), "ws")
+
+
+def test_events_filters_use_the_typed_command_route_and_the_task_list_has_no_cursor():
+    routes = {("GET", "/api/v1/missions/m1/tasks"): (200, {"state": "done", "result": {"outcome": "ok", "result": {"tasks": [], "total": 0, "offset": 0, "next_cursor": None}}})}
+    api = client(routes)
+    events, _ = remote.request_for(args("events", "--mission", "m1"), "ws")
+    assert api.submit_resource("ws", events) is None
+    tasks, _ = remote.request_for(args("task", "list", "--mission", "m1"), "ws")
+    assert api.submit_resource("ws", tasks) == {"outcome": "ok", "result": {"tasks": [], "total": 0, "offset": 0}}
 
 
 def test_create_suspend_and_restore_use_resource_endpoints():
@@ -279,7 +306,7 @@ def test_run_cli_outcomes(capsys):
     assert remote.run_cli("ws", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (202, pending)})) == remote.EXIT_UNAVAILABLE
     assert "stays queued" in capsys.readouterr().err
     uncertain = {"state": "done", "result": {"outcome": "uncertain", "error": {"message": "disk"}}}
-    assert remote.run_cli("ws", args("cancel", "--mission", "m"), client=client({("POST", "/api/v1/missions/m/cancel"): (200, uncertain)})) == 2
+    assert remote.run_cli("ws", args("cancel", "--mission", "m", "--yes"), client=client({("POST", "/api/v1/missions/m/cancel"): (200, uncertain)})) == 2
     assert "uncertain" in capsys.readouterr().err
     refused = {"error": {"code": "unknown-target", "message": "no worker"}}
     assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (404, refused)})) == 2
@@ -385,3 +412,76 @@ def test_redirects_are_refused_so_the_token_is_never_resent(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- cancel confirmation: `--yes` and the prompt behave the same locally and with --target ------------------
+
+def _status_answer(status: str, name: str = "Parser") -> tuple[int, dict]:
+    return 200, {"state": "done", "result": {"outcome": "ok", "result": {"mission": {"status": status, "name": name}}}}
+
+
+CANCEL_DONE = (200, {"state": "done", "result": {"outcome": "ok", "result": {"status": "APPLIED"}}})
+
+
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _remote_cancel(monkeypatch, routes, *argv):
+    api = client(routes)
+    monkeypatch.setattr(remote, "load", lambda env=None: remote.RemoteConfig("https://c:8443", TOKEN))
+    monkeypatch.setattr(remote, "Client", lambda config, **kwargs: api)
+    return main(["--target", "ws", "cancel", *argv]), api
+
+
+def _forbid_prompt(monkeypatch):
+    def refuse(*_args):
+        raise AssertionError("the command asked for confirmation")
+
+    monkeypatch.setattr("builtins.input", refuse)
+
+
+def test_remote_cancel_with_yes_completes_without_a_prompt_or_a_status_query(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1", "--yes")
+    assert code == 0
+    assert [call[0] for call in api.opener.calls] == [("POST", "/api/v1/missions/m1/cancel")]
+    assert "--yes" not in json.dumps([call[1] for call in api.opener.calls])  # the flag is never a request field
+
+
+def test_remote_cancel_without_yes_and_without_a_terminal_asks_for_yes_like_the_local_command(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("RUNNING"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 2
+    assert "Pass --yes" in capsys.readouterr().err
+    assert ("POST", "/api/v1/missions/m1/cancel") not in [call[0] for call in api.opener.calls]  # nothing was cancelled
+
+
+def test_remote_cancel_of_a_finished_mission_needs_no_confirmation_like_the_local_command(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("COMPLETED"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 0
+    assert ("POST", "/api/v1/missions/m1/cancel") in [call[0] for call in api.opener.calls]
+
+
+@pytest.mark.parametrize(("answer", "code", "cancelled"), [("y\n", 0, True), ("\n", 2, False)])
+def test_remote_cancel_on_a_terminal_asks_with_the_mission_name(monkeypatch, answer, code, cancelled):
+    errors = _Terminal()
+    monkeypatch.setattr("sys.stdin", _Terminal(answer))
+    monkeypatch.setattr("sys.stderr", errors)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("RUNNING", "Parser"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    result, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert result == code
+    assert 'Parser' in errors.getvalue() and "cannot be undone" in errors.getvalue()
+    assert (("POST", "/api/v1/missions/m1/cancel") in [call[0] for call in api.opener.calls]) is cancelled
+
+
+def test_remote_cancel_asks_when_the_worker_cannot_say_whether_the_mission_is_finished(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): (202, {"state": "pending", "result": None})}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 2 and "Pass --yes" in capsys.readouterr().err

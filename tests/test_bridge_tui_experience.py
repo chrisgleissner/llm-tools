@@ -95,7 +95,7 @@ def test_put_sanitizes_controls_without_collapsing_spaces() -> None:
 
 def test_header_uses_dot_separators_and_semantic_status_color() -> None:
     state = make_state(full_snapshot())
-    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo · ● RUNNING"
+    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo (M1) · ◆ NEEDS YOU"
     assert bridge_tui._mission_status_role("RUNNING") == "state_running"
     assert bridge_tui._mission_status_role("PAUSED") == "state_paused"
     assert bridge_tui._mission_status_role("FAILED") == "state_failed"
@@ -105,8 +105,8 @@ def test_header_uses_dot_separators_and_semantic_status_color() -> None:
     assert bridge_tui._header(state, 100).endswith("· ‖ PAUSING")  # provider still running
     screen = Screen(34, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ‖ PAUSING")
-    assert [w[2] for w in screen.writes[:6]] == ["LLM BRIDGE", " · ", "▌", " Fix the typo", " · ", "‖ PAUSING"]
+    assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo (M1) · ‖ PAUSING")
+    assert [w[2] for w in screen.writes[:7]] == ["LLM BRIDGE", " · ", "▌", " Fix the typo", " (M1)", " · ", "‖ PAUSING"]
 
 
 def test_header_states_before_first_snapshot_and_for_long_names() -> None:
@@ -122,13 +122,13 @@ def test_header_states_before_first_snapshot_and_for_long_names() -> None:
 # --- footer hints ------------------------------------------------------------------
 
 @pytest.mark.parametrize("view,expected", [
-    ("Overview", ["o objective", "Ctrl-E add task", "Ctrl-K actions", "Ctrl-D exit"]),
+    ("Overview", ["o objective", "Ctrl-E add task", "Ctrl-D exit"]),
     ("Tasks", ["Enter inspect", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find"]),
     ("Providers", ["Enter mark viewed", "↑↓ select"]),
     ("Health", ["↑↓ scroll"]),
     ("Activity", ["PgUp older", "PgDn newer", "Ctrl-T hide bookkeeping"]),
     ("Sessions", ["↑↓ scroll"]),
-    ("Actions", ["Enter run action", "Ctrl-K filter"]),
+    ("Actions", ["Enter run action", "Ctrl-D exit"]),
     ("Usage", ["Shift-←/→ pan"]),
 ])
 def test_each_view_lists_its_own_keys_and_ends_with_help(view: str, expected: list[str]) -> None:
@@ -192,8 +192,8 @@ def test_bridge_overview_rows_are_labelled_and_plain() -> None:
     assert rows[2] == "Next        task 3  ○ QUEUED  third"
     assert rows[3] == "Tasks       1 running · 1 verifying · 1 queued · 1 blocked · 2 proposals"
     needs = [row for row in rows if row.startswith("Needs you") or row.startswith(" " * 12 + "task") or "proposals to" in row]
-    assert needs[0] == "Needs you   task 1 awaits your approval — type /approve 1 (or F7 Actions)"
-    assert any("2 agent task proposals to review" in row for row in rows)
+    assert needs[0] == "Needs you   task 1 awaits your review · type /approve 1 (or F7 Actions)"
+    assert any("2 agent task proposals to review · type /proposals" in row for row in rows)
     assert any("task 4 BLOCKED — inspect in Tasks" in row for row in rows)
     assert "Criteria    0/4 verified" in rows
     assert rows[-1].startswith("Capacity    ■ codex / gpt-5 (active) · 5h 100% left, resets 4h 59m")
@@ -205,11 +205,11 @@ def test_bridge_overview_rows_are_labelled_and_plain() -> None:
 def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
     rows = make_state({"mission": {"status": "CREATED"}}).rows()
     assert rows == [
-        "Controller  not started — type start",
+        "Controller  not started — type /start",
         "Now         idle",
         "Next        nothing ready",
         "Tasks       none yet — Ctrl-E adds a task",
-        "Policy      legacy (unchanged)",
+        "Policy      defaults (teams and token spend not set)",
     ]
     queued = make_state({"mission": {"status": "RUNNING"}, "pending_commands": [{}, {}, {}]}).rows()
     assert "Queue       3 commands waiting for the controller" in queued
@@ -218,7 +218,7 @@ def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
 @pytest.mark.parametrize("snapshot,expected", [
     ({}, "status not loaded yet"),
     ({"mission": {"status": "COMPLETED"}}, "mission completed — controller finished"),
-    ({"mission": {"status": "STOPPED"}}, "stopped — type start or resume"),
+    ({"mission": {"status": "STOPPED"}}, "stopped — type /start or /resume"),
     ({"mission": {"status": "STOPPING"}}, "stopping after the current step"),
     ({"mission": {"status": "RUNNING"}}, "no heartbeat recorded yet"),
     ({"mission": {"status": "RUNNING"}, "lifecycle": {"heartbeat": {"reported_state": "ACTIVE", "age_seconds": 400}}},
@@ -292,7 +292,7 @@ def event(kind: str, data: dict[str, object] | None = None, *, task_id: object =
     (event("operation-running", {"route_id": "codex", "model": "gpt-5", "process_pid": 77, "pane_id": ""}, task_id=2, operation_id="abcdef0123456789"),
      "op abcdef01 running · task 2 · codex gpt-5 · pid 77"),
     (event("operation-exited", {"exit_code": 0, "task_status": "VERIFYING", "logs_path": None}, task_id=2, operation_id="abcdef0123456789"),
-     "op abcdef01 exited 0 · task 2 · task now VERIFYING"),
+     "op abcdef01 exited 0 · task 2 · task now REVIEW"),
     (event("provider-selection", {"route": "kilo", "provider": "kilo", "selected_model": "m", "rotation_reason": "preferred"}), "selected kilo · m · preferred"),
     (event("capacity-refresh", {"provider": "codex"}), "capacity refreshed codex"),
     (event("command-queued", {"command": "task.add", "command_id": "c"}), "command queued: task.add"),
@@ -377,14 +377,14 @@ def test_systems_view_is_sectioned_relative_and_never_a_repr() -> None:
     snapshot["capacity"]["selection"]["all_rate_limited"] = True  # type: ignore[index]
     rows = make_state(snapshot, view="Health").rows()
     text = "\n".join(rows)
-    for label in ("Mode", "Lifecycle", "Controller heartbeat", "Execution", "Health", "Persistence", "Criteria", "Suspend", "Capacity", "Last progress"):
+    for label in ("Mode", "Lifecycle", "Controller heartbeat", "Execution", "Health", "Internals", "Criteria", "Suspend", "Capacity", "Last progress"):
         assert any(row.startswith(label + " ") for row in rows), label
     assert "Mode                  configured native · actual headless" in rows
     assert "Lifecycle             RUNNING · controller healthy (verified" in text
     assert "Execution             iteration 2 · operation running 1m · last verified progress" not in text
     assert "Execution             iteration 2 · operation running 1m · no verified progress yet" in rows
     assert "2 consecutive failed operations (limit 4) · 2 operations without repository change" in text
-    assert "Persistence           sqlite schema 6 · wal journal · /state/bridge.sqlite3" in rows
+    assert "Internals             owner lock held · sqlite schema 6 · wal journal · /state/bridge.sqlite3" in rows
     assert "Suspend               suspend_until_renewal · until 2h · all rate limited" in rows
     assert "waiting in 10m · rate-limited" in text and "all routes rate-limited" in text
     assert "{" not in text and "None" not in text and "epoch" not in text and "=" not in text
@@ -396,7 +396,7 @@ def test_systems_wraps_long_values_under_the_section_label() -> None:
     screen = Screen(30, 60)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
     body = [line for line in screen.lines[3:12] if line.strip()]
-    assert body[0].lstrip().startswith("Persistence")
+    assert body[0].lstrip().startswith("Internals")
     assert len(body) > 2
     assert all(line.startswith(" " * 24) for line in body[1:])  # gutter + label column
     assert all(cell_width(line) <= 60 for line in screen.lines)
@@ -512,7 +512,7 @@ def test_sessions_view_is_an_aligned_table_with_short_ids() -> None:
     header = state.column_header()
     rows = state.rows()
     assert header == "op        task  provider       model  status     native session  restoration"
-    assert rows[0] == "01234567  1     codex          gpt    EXITED     abc             RESTORED_NATIVE"
+    assert rows[0] == "01234567  1     codex          gpt    EXITED     abc             resumed"
     assert rows[1] == "fedcba98  22    claude-sonnet  -      ● RUNNING  -               -"
     screen = Screen(30, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
@@ -543,10 +543,10 @@ def test_actions_rows_teach_the_slash_command_and_align() -> None:
 
 def test_usage_header_has_no_none_age_and_rows_are_clipped_not_wrapped() -> None:
     state = make_state({"usage": {"status": "refreshing", "age_seconds": None, "text": "Provider  " + "X" * 200}}, view="Usage")
-    assert state.rows()[0] == "Usage · refreshing · first sample pending"
+    assert state.rows()[0] == "Usage · refreshing · first sample pending · live llm-usage read"
     assert "None" not in state.rows()[0]
     state.snapshot["usage"] = {"status": "unavailable", "age_seconds": 125, "error": "RuntimeError", "text": "row"}  # type: ignore[index]
-    assert state.rows()[0] == "Usage · unavailable · updated 2m ago · last refresh failed: RuntimeError"
+    assert state.rows()[0] == "Usage · unavailable · updated 2m ago · last refresh failed: RuntimeError · live llm-usage read"
     state.snapshot["usage"] = {"status": "ready", "age_seconds": 3, "text": "Provider  " + "X" * 200 + "END"}  # type: ignore[index]
     screen = Screen(20, 80)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
@@ -646,7 +646,7 @@ def test_all_views_fit_without_overflow_or_collapsed_spacing(width: int, full: b
         screen = Screen(height, width)
         (bridge_tui._draw_full if full else bridge_tui._draw_compact)(screen, state)  # type: ignore[arg-type]
         assert all(cell_width(line) <= width for line in screen.lines), view
-        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ● RUNNING"), view
+        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo (M1) · ◆ NEEDS YOU"), view
         assert "LLM BRIDGE Fix" not in screen.lines[0]
         assert screen.lines[2].lstrip().startswith(("1 Bridge", "< ", "[1 Bridge]")) or "[" in screen.lines[2]
         assert screen.lines[height - 1].rstrip().endswith("? help"), (view, screen.lines[height - 1])
@@ -659,7 +659,7 @@ def test_no_color_rendering_keeps_every_cue_in_text(monkeypatch) -> None:
     state = make_state(full_snapshot())
     screen = Screen(34, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert "RUNNING" in screen.lines[0] and "Needs you" in "\n".join(screen.lines)
+    assert "NEEDS YOU" in screen.lines[0] and "Needs you" in "\n".join(screen.lines)
     attributes = (bridge_tui.curses.A_DIM | bridge_tui.curses.A_BOLD | bridge_tui.curses.A_REVERSE
                   | bridge_tui.curses.A_UNDERLINE)
     assert all(attr & ~attributes == 0 for _y, _x, _text, attr in screen.writes)  # attributes only, never color pairs
@@ -682,8 +682,8 @@ def orders_snapshot() -> dict[str, object]:
 def test_order_list_rows_align_id_state_and_priority() -> None:
     tasks = bridge_tui._items(orders_snapshot()["tasks"])
     assert bridge_tui._order_list_rows(tasks) == [
-        "2   ○ QUEUED     P5   after 1  Rewrite the quick start",
-        "10  ◆ VERIFYING  P12           Troubleshooting",
+        "2   ○ QUEUED  prio 5   after 1  Rewrite the quick start",
+        "10  ◆ REVIEW  prio 12           Troubleshooting",
     ]
     assert bridge_tui._order_list_rows([{"id": 1, "status": "queued", "title": "No priority"}]) == ["1  ○ QUEUED  No priority"]
 
@@ -723,16 +723,16 @@ def test_orders_view_shows_selected_task_preview_below_the_list() -> None:
     state = make_state(orders_snapshot(), view="Tasks")
     screen = Screen(30, 110)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[3].startswith("> 2   ○ QUEUED     P5   after 1  Rewrite the quick start")
-    assert screen.lines[4].startswith("  10  ◆ VERIFYING  P12           Troubleshooting")
+    assert screen.lines[3].startswith("> 2   ○ QUEUED  prio 5   after 1  Rewrite the quick start")
+    assert screen.lines[4].startswith("  10  ◆ REVIEW  prio 12           Troubleshooting")
     assert screen.lines[5].startswith("  ── task 2 · ○ QUEUED · priority 5 ──")
     assert any(line.strip().startswith("Acceptance  1. installs in five minutes") for line in screen.lines)
     assert any(line.strip().startswith("Prompt      Quick start") for line in screen.lines)
     state.handle_key("KEY_DOWN")  # the preview follows the selection
     screen = Screen(30, 110)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[4].startswith("> 10  ◆ VERIFYING")
-    assert screen.lines[5].startswith("  ── task 10 · ◆ VERIFYING · priority 12 ──")
+    assert screen.lines[4].startswith("> 10  ◆ REVIEW")
+    assert screen.lines[5].startswith("  ── task 10 · ◆ REVIEW · priority 12 ──")
     assert any("Prompt      Add a section." in line for line in screen.lines)
     assert not any("Quick start" in line for line in screen.lines)
     # Clicks on the separator and preview rows do not move the selection; list rows still select.

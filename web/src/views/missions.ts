@@ -1,7 +1,7 @@
 import * as api from "../api";
 import { debounce, emptyState, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
 import { icon } from "../icons";
-import { currentWorkSummary } from "../current-work";
+import { currentWorkSummary, digestSummary } from "../current-work";
 import { isStale, store, subscribe } from "../store";
 
 const PAGE = 25;
@@ -86,13 +86,28 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     renderBody();
     renderControls();
   }
-  function loadCurrentWork(r: Reply, requestSeq: number): void {
+  async function loadCurrentWork(r: Reply, requestSeq: number): Promise<void> {
     const active = r.missions.filter((m) => m.mission.status.toUpperCase() === "RUNNING" && !m.stale).slice(0, 12);
-    if (disposed || requestSeq !== seq) return;
-    for (const mission of active) {
-      nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(mission.mission as unknown as Record<string, unknown>));
-    }
-    renderBody();
+    let next = 0;
+    const lane = async (): Promise<void> => {
+      while (next < active.length && !disposed && requestSeq === seq) {
+        const mission = active[next++];
+        if (!mission) continue;
+        // The replicated digest answers without a worker round trip; only a worker that sent none is asked.
+        const replicated = digestSummary(mission.mission);
+        if (replicated !== null) {
+          nowDoing.set(`${mission.worker}/${mission.mission.id}`, replicated);
+          continue;
+        }
+        try {
+          const status = await api.missionStatus(mission.worker, mission.mission.id);
+          if (disposed || requestSeq !== seq) return;
+          nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(status));
+        } catch { /* list remains useful if a worker status read is unavailable */ }
+      }
+    };
+    await Promise.all([lane(), lane(), lane()]);
+    if (!disposed && requestSeq === seq) renderBody();
   }
   const reload = debounce(() => void load(), 250);
   const changed = (resetPage = true): void => {
@@ -231,7 +246,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   // The coordinator pushes changes through the store; re-run the query when the mission list changes.
   let last = "";
   const un = subscribe(() => {
-    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, isStale(m)]), store.workers.length]);
+    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, isStale(m), m.mission.task_counts, m.mission.current_task, m.mission.station, m.mission.model]), store.workers.length]);
     if (k !== last) {
       last = k;
       reload();

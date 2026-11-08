@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_runtime
-from llm_tools.bridge_runtime import mission_socket_path
+from llm_tools import bridge_sockets
+from llm_tools.bridge_sockets import mission_socket_path
 
 MISSION = "c" * 32
 
@@ -33,7 +33,7 @@ def short_tmp() -> Path:
 def run_user(short_tmp, monkeypatch) -> Path:
     root = short_tmp / "ru"
     root.mkdir(mode=0o700)
-    monkeypatch.setattr(bridge_runtime, "_RUN_USER_ROOT", root)
+    monkeypatch.setattr(bridge_sockets, "_RUN_USER_ROOT", root)
     return root
 
 

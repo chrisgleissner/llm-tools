@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_runtime
-from llm_tools.bridge_runtime import mission_socket_path
+from llm_tools import bridge_sockets
+from llm_tools.bridge_sockets import mission_socket_path
 from tests.test_bridge_security_socket_dir import MISSION, _name, preferred
 
 
 @pytest.fixture()
 def tmp_root(monkeypatch: pytest.MonkeyPatch) -> Path:
     root = Path(tempfile.mkdtemp(prefix="lbx", dir="/tmp"))
-    monkeypatch.setattr(bridge_runtime, "_TMP_ROOT", root)
-    monkeypatch.setattr(bridge_runtime, "_RUN_USER_ROOT", root / "no-run-user")
+    monkeypatch.setattr(bridge_sockets, "_TMP_ROOT", root)
+    monkeypatch.setattr(bridge_sockets, "_RUN_USER_ROOT", root / "no-run-user")
     yield root
     shutil.rmtree(root, ignore_errors=True)
 

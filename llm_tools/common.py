@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 if TYPE_CHECKING:
     from urllib.error import HTTPError
@@ -113,8 +113,9 @@ def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
         new = root / name
         if old.is_dir() and not new.exists():
             try:
-                root.mkdir(parents=True, exist_ok=True)
+                ensure_private_cache_dir(root, env)
                 old.rename(new)
+                _tighten_directory(new)
             except OSError:
                 pass
 
@@ -1187,8 +1188,8 @@ def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
         norm = codex_rate_limits_to_wire(result, "codex app-server")
         if norm:
             try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+                ensure_private_cache_dir(cache.parent, env)
+                write_private_text(cache, json.dumps(result, separators=(",", ":")) + "\n")
             except OSError:
                 pass
             return norm
@@ -1399,8 +1400,8 @@ def _record_claude_oauth_rate_limit(env: dict[str, str], retry_after_seconds: fl
     }
     path = _claude_oauth_rate_limit_path(env)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        ensure_private_cache_dir(path.parent, env)
+        write_private_text(path, json.dumps(payload, separators=(",", ":")) + "\n")
     except OSError:
         pass
 
@@ -1506,8 +1507,8 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
     if not text:
         return None
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+    ensure_private_cache_dir(cache.parent)
+    write_private_text(cache, text + ("\n" if not text.endswith("\n") else ""))
     return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
 
 
@@ -1580,8 +1581,8 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     # or touching any running session. Recheck cache/cooldown after acquiring.
     lock = usage_cache_dir(env) / "claude-usage-api.lock"
     try:
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = lock.open("a", encoding="utf-8")
+        ensure_private_cache_dir(lock.parent, env)
+        lock_file = open_private_text(lock)
     except OSError:
         return _read_claude_api_raw(env)
     with lock_file:
@@ -2027,15 +2028,15 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
             return cached
     refresh_started = False
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        lock.mkdir()
+        ensure_private_cache_dir(cache.parent, env)
+        lock.mkdir(mode=0o700)
         refresh_started = True
     except FileExistsError:
         try:
             stale_after = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 5
             if int(time.time()) - int(lock.stat().st_mtime) > stale_after:
                 lock.rmdir()
-                lock.mkdir()
+                lock.mkdir(mode=0o700)
                 refresh_started = True
         except OSError:
             pass
@@ -2078,9 +2079,9 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     if ignored_transient_mtime is not None and wait_budget > 0:
         live = read_copilot_live(env)
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_cache_dir(cache.parent, env)
             tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(live, separators=(",", ":")) + "\n", encoding="utf-8")
+            write_private_text(tmp, json.dumps(live, separators=(",", ":")) + "\n")
             tmp.replace(cache)
         except OSError:
             pass
@@ -2269,9 +2270,9 @@ def read_copilot_addon(env: dict[str, str] | None = None) -> dict[str, Any] | No
         return _copilot_addon_cache_payload(cache)
     result = {"spent": spent, "currency": "$", "source": "github billing"}
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_cache_dir(cache.parent, env)
         tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
         tmp.replace(cache)
     except OSError:
         pass
@@ -2543,12 +2544,9 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
         if quota is not None:
             result = _copilot_monthly_result_from_quota(quota, env)
             try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_cache_dir(cache.parent, env)
                 tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-                tmp.write_text(
-                    json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n",
-                    encoding="utf-8",
-                )
+                write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
                 tmp.replace(cache)
             except OSError:
                 pass
@@ -2657,9 +2655,9 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
         "source": "github billing",
     }
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_cache_dir(cache.parent, env)
         tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
         tmp.replace(cache)
     except OSError:
         pass
@@ -2735,8 +2733,8 @@ def log_usage_sample(provider: str, window: str, remaining: Any, env: dict[str, 
         return
     path = usage_cache_dir(env) / "llm-usage.log"
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        ensure_private_cache_dir(path.parent, env)
+        with open_private_text(path) as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             fh.write(json.dumps({"ts": now_epoch(env), "provider": provider, "window": window, "remaining": num(remaining)}, separators=(",", ":")) + "\n")
     except OSError:
@@ -2983,6 +2981,51 @@ def validate_gate_args(cwd: str, min_remaining: str, poll_interval: str, max_una
     validate_retry_delays(retry_delays)
 
 
+def _build_run_path_class() -> type[Path]:
+    """The path class for names that are unique to one run (see ``RunPath``)."""
+    platform_path = type(Path())
+    if sys.version_info[:2] != (3, 12) or os.name != "posix" or not hasattr(platform_path, "_parse_path"):
+        return platform_path  # other versions release interned strings, so plain pathlib does not accumulate them
+
+    class _RunPath(platform_path):  # type: ignore[valid-type, misc]
+        """``PosixPath`` whose parser keeps the path components as ordinary strings.
+
+        CPython 3.12 makes every string passed to ``sys.intern`` immortal, and its pathlib interns each
+        component it parses. A long-lived process that parses one new name per run (an iteration directory,
+        a verifier file) therefore keeps about 55 bytes per name for the rest of its life. This parser is the
+        3.12 POSIX parser without the ``sys.intern`` call.
+        """
+
+        __slots__ = ()
+
+        @classmethod
+        def _parse_path(cls, path: str) -> tuple[str, str, list[str]]:  # type: ignore[override]
+            if not path:
+                return "", "", []
+            drive, root, rest = cls._flavour.splitroot(path)  # type: ignore[attr-defined]
+            return drive, root, [part for part in rest.split("/") if part and part != "."]
+
+    _RunPath.__name__ = _RunPath.__qualname__ = platform_path.__name__  # the repr stays PosixPath('...')
+    try:
+        probe = "run-path-probe-%d" % os.getpid()
+        before = sys.getunicodeinternedsize()
+        parts = _RunPath("/", probe, "a.b", "..", "c").parts
+        if parts != ("/", probe, "a.b", "..", "c") or sys.getunicodeinternedsize() != before:
+            return platform_path
+    except Exception:  # a different pathlib internal layout: stay with the standard class
+        return platform_path
+    return _RunPath
+
+
+RunPath: type[Path] = _build_run_path_class()
+"""Path class for locations whose name is unique to one run or one attempt.
+
+Use it for paths a long-lived process builds over and over with a new name each time (the iteration
+directory of each provider run, the verifier files of each attempt). Behaviour, equality and file
+layout are the same as ``pathlib.Path``; only the retained memory differs on CPython 3.12.
+"""
+
+
 @dataclass
 class RunLogs:
     run_dir: Path
@@ -3016,6 +3059,57 @@ def make_private_dirs(path: Path) -> None:
         raise NotADirectoryError(str(path))
 
 
+def _tighten_directory(directory: Path) -> None:
+    """chmod 0700 a directory this user owns; never follow a symlink or touch someone else's directory."""
+    try:
+        info = os.lstat(directory)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+def ensure_private_cache_dir(path: Path, env: dict[str, str] | None = None) -> None:
+    """Create ``path`` for llm-tools cache or state files and make every directory llm-tools owns 0700.
+
+    Missing directories are created 0700. A directory that an earlier release created with the
+    default umask mode is tightened. The tightening covers the cache root (``cache_root``) and the
+    directories between it and ``path``; the user's parent directories (for example ``~/.cache``)
+    keep their mode. A ``path`` outside the cache root, such as an override directory, has only
+    its own directory tightened. Raises ``OSError`` as ``mkdir`` does.
+    """
+    make_private_dirs(path)
+    root = cache_root(env)
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        _tighten_directory(path)
+        return
+    _tighten_directory(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        _tighten_directory(current)
+
+
+def write_private_text(path: Path, text: str, *, append: bool = False) -> None:
+    """Write ``text`` to ``path`` with mode 0600 from creation; an existing file is tightened to 0600."""
+    with open_private_text(path, "a" if append else "w") as stream:
+        stream.write(text)
+
+
+def open_private_text(path: Path, mode: str = "a") -> IO[str]:
+    """Open ``path`` as UTF-8 text (``"a"`` or ``"w"``) created with mode 0600; an existing file is tightened."""
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, mode, encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def touch_private_file(path: Path) -> None:
     """Create ``path`` (if absent) with mode 0600 from the start and enforce 0600 on an existing file."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -3029,7 +3123,7 @@ def touch_private_file(path: Path) -> None:
 
 
 def setup_run_logs(log_dir: Path, suffix: str, provider_link: str = "", run_dir: Path | None = None) -> RunLogs:
-    make_private_dirs(log_dir)
+    ensure_private_cache_dir(log_dir)
     try:
         log_dir.chmod(0o700)
     except OSError:
@@ -3110,7 +3204,7 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
         text = dest.read_text(encoding="utf-8", errors="replace")
     else:
         text = prompt_text
-        dest.write_text(text, encoding="utf-8")
+        write_private_text(dest, text)
     try:
         dest.chmod(0o600)
     except OSError:
@@ -3204,8 +3298,7 @@ def shared_usage_snapshot(
         return reader()
     directory = shared_snapshot_dir(env)
     try:
-        make_private_dirs(directory)
-        directory.chmod(0o700)
+        ensure_private_cache_dir(directory, dict(env) if env is not None else None)
         lock_fd = os.open(directory / f"{provider}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:
         return reader()
@@ -4036,12 +4129,107 @@ def blocking_tail(text: str) -> str:
     return tail_lines(text, BLOCKING_PROMPT_TAIL_LINES)
 
 
+# Output that can end in "?" without being a question put to the user: compiler and runtime
+# warnings (Python ``<file>:<line>: SyntaxWarning: ... Did you mean "=="?``, Node
+# ``(node:123) Warning:``), the exception line of a traceback, and lines that quote or show code.
+_WARNING_LINE_RE = re.compile(
+    r"\b[A-Za-z]*Warning\s*:"  # Warning:, SyntaxWarning:, DeprecationWarning:, UserWarning: ...
+    r"|^\s*\(node:\d+\)"  # Node: (node:123) ...
+    r"|^\s*\S+:\d+(?::\d+)?:\s"  # <file>:<line>: <message>
+)
+_TRACEBACK_START = "Traceback (most recent call last):"
+_EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b")
+_QUESTION_SCAN_CHARS = 4000
+
+
+def _not_a_question_line(line: str) -> bool:
+    """Whether one line is a warning, an exception line, quoted text or an indented code line."""
+    stripped = line.strip()
+    if _WARNING_LINE_RE.search(line) or _EXCEPTION_LINE_RE.match(stripped):
+        return True
+    if stripped[:1] in {">", '"', "'", "`", "#", "$", "|"} or stripped.startswith("//"):
+        return True
+    return line.startswith(("    ", "\t"))
+
+
+def pending_question(text: str) -> str | None:
+    """The question the output ends on, or ``None``.
+
+    The last non-empty line counts only when it reads like a question put to the user and is
+    not a warning, a line inside a traceback block (from ``Traceback (most recent call last):``
+    to its exception line), a line inside or opening a code fence, quoted text, or code.
+    A question earlier in the output, followed by anything else (more model text, a tool
+    call), does not count: the run has moved on.
+    """
+    in_traceback = False
+    in_fence = False
+    last = ""
+    ignored = True
+    for raw in text[-_QUESTION_SCAN_CHARS:].splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            ignored = True
+        elif in_fence:
+            ignored = True
+        elif in_traceback:
+            ignored = True
+            if not line[:1].isspace():
+                in_traceback = False  # the exception line closes the block
+        elif stripped.startswith(_TRACEBACK_START):
+            in_traceback = True
+            ignored = True
+        else:
+            ignored = _not_a_question_line(line)
+        last = stripped
+    if not last or ignored or QUESTION_LINE_RE.match(last) is None:
+        return None
+    return last
+
+
+def ends_with_question(text: str) -> bool:
+    """Whether the last non-empty line of ``text`` reads like a question put to the user.
+
+    Shared by the headless watchdog and the PTY capture; see ``pending_question``.
+    """
+    return pending_question(text) is not None
+
+
 def prompt_abort_reason(text: str, default: str = "interactive prompt detected", *, auto_confirm: bool = False) -> str:
     """Why a run is aborted at a prompt; a folder-trust prompt says how to proceed."""
     if not auto_confirm and trust_prompt_at_tail(text):
         return ("the provider asks to trust the folder and automatic acknowledgement is off; "
                 "trust the folder in the provider CLI once, or recreate the Bridge mission with --trust-folder")
     return default
+
+
+PTY_DRAIN_SECONDS = 2.0
+
+
+def drain_pty_master(fd: int, max_seconds: float | None = None) -> Iterator[bytes]:
+    """Yield the bytes still readable from a pty master after its child exited.
+
+    Stops at end of file (Linux and macOS both report it as EIO or an empty
+    read once the slave side is closed and the buffer is empty), or when nothing
+    arrives for a short interval, or after ``max_seconds``. The bound keeps a
+    surviving grandchild that holds the slave open from stalling the caller.
+    """
+    limit = PTY_DRAIN_SECONDS if max_seconds is None else max_seconds
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if fd not in ready:
+            return
+        try:
+            raw = os.read(fd, 65536)
+        except OSError:
+            return
+        if not raw:
+            return
+        yield raw
 
 
 def run_pty_capture(
@@ -4063,23 +4251,31 @@ def run_pty_capture(
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
-    question_line = QUESTION_LINE_RE
     pid, fd = pty.fork()
     if pid == 0:
+        # This is the forked child. It must never return into the caller: if
+        # exec fails it would continue as a clone of the parent process.
         try:
-            os.chdir(cwd)
-        except OSError:
-            pass
-        if stdin_path is not None:
             try:
-                prompt_fd = os.open(stdin_path, os.O_RDONLY)
-                os.dup2(prompt_fd, 0)
-                os.close(prompt_fd)
+                os.chdir(cwd)
             except OSError:
-                os._exit(126)
-        if env is None:
-            os.execvp(argv[0], list(argv))
-        os.execvpe(argv[0], list(argv), env)
+                pass
+            if stdin_path is not None:
+                try:
+                    prompt_fd = os.open(stdin_path, os.O_RDONLY)
+                    os.dup2(prompt_fd, 0)
+                    os.close(prompt_fd)
+                except OSError:
+                    os._exit(126)
+            if env is None:
+                os.execvp(argv[0], list(argv))
+            os.execvpe(argv[0], list(argv), env)
+        except BaseException as exc:  # noqa: BLE001 - nothing may escape the child
+            try:
+                os.write(2, f"llm-scheduler: cannot start {argv[0]}: {exc}\n".encode("utf-8", "replace"))
+            except OSError:
+                pass
+        os._exit(127)
     if on_process_started is not None:
         try:
             on_process_started(pid)
@@ -4094,169 +4290,191 @@ def run_pty_capture(
             os.waitpid(pid, 0)
             os.close(fd)
             raise
+    # The master end is owned here from now on; close it exactly once on every path
+    # (normal exit, timeout, autonomy abort, interrupt or an exception below).
     try:
-        if sys.stdout.isatty():
-            winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
-        else:
-            winsize = struct.pack("HHHH", 30, 240, 0, 0)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-    except OSError:
-        pass
-
-    chunks: list[str] = []
-    retained_bytes = 0
-    output_truncated = False
-
-    def append_output(text: str) -> None:
-        nonlocal retained_bytes, output_truncated
-        chunks.append(text)
-        retained_bytes += len(text.encode("utf-8", "replace"))
-        if max_output_bytes <= 0:
-            return
-        while chunks and retained_bytes > max_output_bytes:
-            excess = retained_bytes - max_output_bytes
-            first_bytes = chunks[0].encode("utf-8", "replace")
-            if len(first_bytes) <= excess:
-                retained_bytes -= len(first_bytes)
-                chunks.pop(0)
+        try:
+            if sys.stdout.isatty():
+                winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
             else:
-                trimmed = first_bytes[excess:].decode("utf-8", "replace")
-                chunks[0] = trimmed
-                retained_bytes -= excess
-            output_truncated = True
-    trust_sent = False
-    pending_prompt: str | None = None
-    combined = ""
-    exit_code = 124
-    start = time.time()
-    last_progress = start
-    question_seen_at: float | None = None
-    abort_reason = ""
+                winsize = struct.pack("HHHH", 30, 240, 0, 0)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+        except OSError:
+            pass
 
-    def reap(status: int) -> int | None:
-        if os.WIFEXITED(status):
-            return os.WEXITSTATUS(status)
-        if os.WIFSIGNALED(status):
-            return 128 + os.WTERMSIG(status)
-        return None
+        chunks: list[str] = []
+        retained_bytes = 0
+        output_truncated = False
 
-    def record_abort(reason: str) -> None:
-        nonlocal abort_reason, exit_code
-        abort_reason = reason
-        exit_code = AUTONOMY_ABORT_STATUS
-        line = f"\nllm-scheduler: autonomous abort: {reason}\n"
-        append_output(line)
-        if stream:
-            os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
-
-    eof = False
-    try:
-        while True:
-            now = time.time()
-            if now - start > timeout:
-                break
-            if idle_timeout > 0 and now - last_progress > idle_timeout:
-                record_abort(f"no output progress for {idle_timeout}s")
-                break
-            if question_idle_timeout > 0 and question_seen_at is not None and now - question_seen_at > question_idle_timeout:
-                record_abort(prompt_abort_reason(combined, f"question required a response for {question_idle_timeout}s", auto_confirm=auto_confirm))
-                break
-            ready, _, _ = select.select([fd], [], [], 0.2)
-            if fd in ready:
-                try:
-                    raw = os.read(fd, 65536)
-                except OSError:
-                    raw = b""
-                if not raw:
-                    eof = True
-                    if pending_prompt == "blocking":
-                        # The output ended on the prompt; nothing more will follow.
-                        record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
-                    break
-                text = raw.decode("utf-8", "replace")
-                append_output(text)
-                last_progress = time.time()
-                if stream:
-                    try:
-                        os.write(sys.stdout.fileno(), raw)
-                    except OSError:
-                        stream = False
-                combined = strip_ansi("".join(chunks))
-                pending_prompt = None
-                if auto_confirm and not trust_sent and trust_prompt_at_tail(combined):
-                    pending_prompt = "trust"
-                elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
-                    pending_prompt = "blocking"
-                if pending_prompt is None and detect_prompts and question_line.search(combined[-4000:]):
-                    question_seen_at = time.time()
-            if pending_prompt is not None and time.time() - last_progress >= PROMPT_QUIET_SECONDS:
-                if pending_prompt == "trust":
-                    os.write(fd, b"\r")
-                    trust_sent = True
-                    question_seen_at = None
-                    pending_prompt = None
+        def append_output(text: str) -> None:
+            nonlocal retained_bytes, output_truncated
+            chunks.append(text)
+            retained_bytes += len(text.encode("utf-8", "replace"))
+            if max_output_bytes <= 0:
+                return
+            while chunks and retained_bytes > max_output_bytes:
+                excess = retained_bytes - max_output_bytes
+                first_bytes = chunks[0].encode("utf-8", "replace")
+                if len(first_bytes) <= excess:
+                    retained_bytes -= len(first_bytes)
+                    chunks.pop(0)
                 else:
-                    record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                    trimmed = first_bytes[excess:].decode("utf-8", "replace")
+                    chunks[0] = trimmed
+                    retained_bytes -= excess
+                output_truncated = True
+        trust_sent = False
+        pending_prompt: str | None = None
+        combined = ""
+        exit_code = 124
+        start = time.monotonic()
+        last_progress = start
+        question_seen_at: float | None = None
+        abort_reason = ""
+
+        def reap(status: int) -> int | None:
+            if os.WIFEXITED(status):
+                return os.WEXITSTATUS(status)
+            if os.WIFSIGNALED(status):
+                return 128 + os.WTERMSIG(status)
+            return None
+
+        def record_abort(reason: str) -> None:
+            nonlocal abort_reason, exit_code
+            abort_reason = reason
+            exit_code = AUTONOMY_ABORT_STATUS
+            line = f"\nllm-scheduler: autonomous abort: {reason}\n"
+            append_output(line)
+            if stream:
+                os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
+
+        eof = False
+        try:
+            while True:
+                now = time.monotonic()
+                if now - start > timeout:
                     break
-            try:
-                done, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                done, status = pid, 0
-            if done == pid:
-                code = reap(status)
-                if code is not None:
-                    exit_code = code
-                break
-    except KeyboardInterrupt:
-        exit_code = 130
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                break
-            time.sleep(0.2)
-            try:
-                done, _status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if done == pid:
-                break
-    if exit_code == 124:
-        deadline = time.time() + (5.0 if eof else 0.0)
-        while True:
-            try:
-                done, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if done == pid:
-                code = reap(status)
-                if code is not None:
-                    exit_code = code
-                break
-            if time.time() >= deadline:
-                break
-            time.sleep(0.01)
-    if exit_code in (124, AUTONOMY_ABORT_STATUS):
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                break
-            time.sleep(0.2)
-    text = strip_ansi("".join(chunks))
-    if output_truncated:
-        marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
-        text = marker + text
-    if output_path:
-        output_path.write_text(text, encoding="utf-8")
-    if status_path:
-        status_path.write_text(str(exit_code), encoding="utf-8")
-    return exit_code, text
+                if idle_timeout > 0 and now - last_progress > idle_timeout:
+                    record_abort(f"no output progress for {idle_timeout}s")
+                    break
+                if question_idle_timeout > 0 and question_seen_at is not None and now - question_seen_at > question_idle_timeout:
+                    record_abort(prompt_abort_reason(combined, f"question required a response for {question_idle_timeout}s", auto_confirm=auto_confirm))
+                    break
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if fd in ready:
+                    try:
+                        raw = os.read(fd, 65536)
+                    except OSError:
+                        raw = b""
+                    if not raw:
+                        eof = True
+                        if pending_prompt == "blocking":
+                            # The output ended on the prompt; nothing more will follow.
+                            record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                        break
+                    text = raw.decode("utf-8", "replace")
+                    append_output(text)
+                    last_progress = time.monotonic()
+                    if stream:
+                        try:
+                            os.write(sys.stdout.fileno(), raw)
+                        except OSError:
+                            stream = False
+                    combined = strip_ansi("".join(chunks))
+                    pending_prompt = None
+                    if auto_confirm and not trust_sent and trust_prompt_at_tail(combined):
+                        pending_prompt = "trust"
+                    elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
+                        pending_prompt = "blocking"
+                    if pending_prompt is None and detect_prompts:
+                        # Armed only while the output still ends in a question;
+                        # any later output clears it.
+                        question_seen_at = time.monotonic() if ends_with_question(combined) else None
+                if pending_prompt is not None and time.monotonic() - last_progress >= PROMPT_QUIET_SECONDS:
+                    if pending_prompt == "trust":
+                        os.write(fd, b"\r")
+                        trust_sent = True
+                        question_seen_at = None
+                        pending_prompt = None
+                    else:
+                        record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                        break
+                try:
+                    done, status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    done, status = pid, 0
+                if done == pid:
+                    code = reap(status)
+                    if code is not None:
+                        exit_code = code
+                    if not eof:
+                        # The child can exit with output still unread in the pty
+                        # master: the loop reads at most one chunk per pass and
+                        # checks for exit afterwards. Collect the rest, otherwise
+                        # the last provider output is missing from the capture.
+                        for raw in drain_pty_master(fd):
+                            append_output(raw.decode("utf-8", "replace"))
+                            if stream:
+                                try:
+                                    os.write(sys.stdout.fileno(), raw)
+                                except OSError:
+                                    stream = False
+                    break
+        except KeyboardInterrupt:
+            exit_code = 130
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+                try:
+                    done, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if done == pid:
+                    break
+        if exit_code == 124:
+            deadline = time.monotonic() + (5.0 if eof else 0.0)
+            while True:
+                try:
+                    done, status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if done == pid:
+                    code = reap(status)
+                    if code is not None:
+                        exit_code = code
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        if exit_code in (124, AUTONOMY_ABORT_STATUS):
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+        text = strip_ansi("".join(chunks))
+        if output_truncated:
+            marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
+            text = marker + text
+        if output_path:
+            write_private_text(output_path, text)
+        if status_path:
+            write_private_text(status_path, str(exit_code))
+        return exit_code, text
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def clean_capture_file(path: Path) -> None:
     if path.is_file():
-        path.write_text(strip_ansi(path.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        write_private_text(path, strip_ansi(path.read_text(encoding="utf-8", errors="replace")))
 
 
 # Provider/transport rate-limit signatures. These must be specific enough that a
@@ -4421,7 +4639,7 @@ def read_provider_diagnostic(path: str | Path, *, max_bytes: int = 16384) -> dic
     if max_bytes < 1 or max_bytes > 16384:
         raise ValueError("provider diagnostic size limit must be between 1 and 16384 bytes")
     try:
-        with Path(path).open("rb") as stream:
+        with open(path, "rb") as stream:  # not Path(path): that would intern a run-specific directory name
             raw = stream.read(max_bytes + 1)
         if len(raw) > max_bytes:
             return None
@@ -4931,8 +5149,10 @@ def suspend_ledger_path(env: dict[str, str] | None = None) -> Path:
 
 def _append_ledger(path: Path, record: dict[str, Any]) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        ensure_private_cache_dir(path.parent)
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)  # a ledger created by an older release is tightened too
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
@@ -4948,12 +5168,21 @@ def ledger_record_start(path: Path, cycle_id: str, target_epoch: int, env: dict[
     ``done`` -- ground truth that a cycle failed to resume.
     """
     record = {"event": "suspend_start", "cycle_id": cycle_id, "target_epoch": int(target_epoch), "started_epoch": now_epoch(env), **diagnostic_clock_fields()}
+    boot_id = read_boot_id(env)
+    if boot_id:
+        record["boot_id"] = boot_id
+    success = read_suspend_success_count(env)
+    if success is not None:
+        record["suspend_success"] = success
     record.update(extra)
     _append_ledger(path, record)
 
 
 def ledger_record_done(path: Path, cycle_id: str, woke_epoch: int, reliable: bool, env: dict[str, str] | None = None, **extra: Any) -> None:
     record = {"event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": int(woke_epoch), "reliable": bool(reliable), **diagnostic_clock_fields()}
+    boot_id = read_boot_id(env)
+    if boot_id:
+        record["boot_id"] = boot_id
     record.update(extra)
     _append_ledger(path, record)
 
@@ -4982,6 +5211,202 @@ def incomplete_suspend_cycles(path: Path) -> list[dict[str, Any]]:
     return [rec for cid, rec in starts.items() if cid not in done]
 
 
+def _read_text_file(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+
+
+def _sys_root(env: Mapping[str, str] | None = None) -> Path:
+    """Root of the sysfs tree read for wake diagnostics (``LLM_TOOLS_SYS_ROOT``; tests)."""
+    return Path((env or os.environ).get("LLM_TOOLS_SYS_ROOT") or "/sys")
+
+
+def read_boot_id(env: Mapping[str, str] | None = None) -> str | None:
+    """The kernel boot ID, or None where the platform does not expose one.
+
+    ``LLM_TOOLS_BOOT_ID_FILE`` overrides ``/proc/sys/kernel/random/boot_id`` (tests).
+    """
+    configured = (env or os.environ).get("LLM_TOOLS_BOOT_ID_FILE")
+    value = _read_text_file(Path(configured or "/proc/sys/kernel/random/boot_id"))
+    return value or None
+
+
+def read_suspend_success_count(env: Mapping[str, str] | None = None) -> int | None:
+    """Kernel count of completed suspend cycles (``/sys/power/suspend_stats/success``)."""
+    text = _read_text_file(_sys_root(env) / "power" / "suspend_stats" / "success")
+    try:
+        return int(text) if text is not None else None
+    except ValueError:
+        return None
+
+
+def wakeup_event_counts(env: Mapping[str, str] | None = None) -> dict[str, int]:
+    """Event count per kernel wakeup source (``/sys/class/wakeup/wakeup*``), keyed ``wakeupN:name``."""
+    counts: dict[str, int] = {}
+    root = _sys_root(env) / "class" / "wakeup"
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return counts
+    for entry in entries:
+        name = _read_text_file(entry / "name")
+        raw = _read_text_file(entry / "event_count")
+        if not name or raw is None:
+            continue
+        try:
+            counts[f"{entry.name}:{name}"] = int(raw)
+        except ValueError:
+            continue
+    return counts
+
+
+def wake_source_report(before: Mapping[str, int] | None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Best-effort description of what woke the machine, from whatever sysfs exposes.
+
+    ``wake_irq`` is the first IRQ of the last resume (``/sys/power/pm_wakeup_irq``)
+    and ``wake_irq_actions`` the drivers attached to it; ``wakeup_sources`` lists
+    the wakeup sources whose event count rose since ``before``. Absent data is
+    omitted, so an empty dict means the platform exposes nothing.
+    """
+    report: dict[str, Any] = {}
+    root = _sys_root(env)
+    irq_text = _read_text_file(root / "power" / "pm_wakeup_irq")
+    if irq_text and irq_text.isdigit():
+        report["wake_irq"] = int(irq_text)
+        actions = _read_text_file(root / "kernel" / "irq" / irq_text / "actions")
+        if actions:
+            report["wake_irq_actions"] = actions
+    if before is not None:
+        after = wakeup_event_counts(env)
+        fired = sorted(name.split(":", 1)[1] for name, count in after.items() if count > before.get(name, count))
+        if fired:
+            report["wakeup_sources"] = fired
+    return report
+
+
+def _boottime_seconds() -> float | None:
+    sample = suspend_clock_sample()
+    return sample[0] if sample is not None else None
+
+
+def _planner_lock_free(env: dict[str, str] | None = None) -> bool:
+    """True when no process is inside a suspend cycle (the planner lock is free)."""
+    if fcntl is None:
+        return True
+    path = cache_root(env) / "llm-bridge" / "capacity-wakes" / "planner.lock"
+    try:
+        ensure_private_cache_dir(path.parent, env)
+        with path.open("a+") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            return True
+    except OSError:
+        return False
+
+
+@dataclass
+class SuspendLedgerReport:
+    """Outcome of :func:`reconcile_suspend_ledger`.
+
+    ``wedged``: starts followed by a different boot ID -- the machine never resumed
+    from them. ``unverified``: starts written by an older release (no boot ID) that
+    predate the current boot; they were marked closed so the note appears once.
+    ``recovered``: starts from this boot whose process ended after a normal resume.
+    """
+
+    wedged: list[dict[str, Any]]
+    unverified: list[dict[str, Any]]
+    recovered: list[dict[str, Any]]
+
+
+def reconcile_suspend_ledger(path: Path, env: dict[str, str] | None = None) -> SuspendLedgerReport:
+    """Classify suspend cycles that have a start but no done record.
+
+    A start with no done can mean three things, told apart by the boot ID that
+    ``suspend_start`` records:
+
+    * same boot ID as now: the machine resumed (it is running this process) and the
+      process that waited for the target ended before it could record the resume
+      (stopped, crashed, or killed after an early wake). Not a failure: a
+      ``suspend_done`` with ``reason="process-ended-after-resume"`` is appended.
+    * different boot ID: the machine rebooted after the suspend began, so it never
+      resumed normally. This is the wedge fingerprint and stays reported on every
+      start until its lines are removed from the ledger.
+    * no boot ID (written by an older release): if the start is after this boot's
+      start time it is treated like the same-boot case; if it predates this boot
+      nothing can be proven, so it is reported once as unverified and closed with
+      ``reason="legacy-unverified"``.
+
+    A cycle that may still be in flight (the planner lock is held) is neither
+    reported nor closed.
+    """
+    report = SuspendLedgerReport([], [], [])
+    incomplete = incomplete_suspend_cycles(path)
+    if not incomplete:
+        return report
+    current_boot = read_boot_id(env)
+    uptime = _boottime_seconds()
+    now = now_epoch(env)
+    boot_started = now - uptime if uptime is not None else None
+    settled = _planner_lock_free(env)
+    success_now = read_suspend_success_count(env)
+    for record in incomplete:
+        cycle_id = str(record.get("cycle_id") or "")
+        recorded_boot = record.get("boot_id")
+        if isinstance(recorded_boot, str) and recorded_boot:
+            if current_boot and recorded_boot != current_boot:
+                report.wedged.append(record)
+                continue
+            same_boot = True  # an unreadable boot ID now cannot show a reboot, so do not alarm
+        else:
+            started = record.get("started_epoch")
+            same_boot = boot_started is not None and isinstance(started, (int, float)) and started >= boot_started
+        if not settled:
+            continue
+        if same_boot:
+            before = record.get("suspend_success")
+            confirmed = isinstance(before, int) and success_now is not None and success_now > before
+            _append_ledger(path, {
+                "event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": None, "reliable": True,
+                "reason": "process-ended-after-resume", "resume_confirmed": confirmed,
+                "boot_id": current_boot, **diagnostic_clock_fields(),
+            })
+            report.recovered.append(record)
+        else:
+            _append_ledger(path, {
+                "event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": None, "reliable": False,
+                "reason": "legacy-unverified", "boot_id": current_boot, **diagnostic_clock_fields(),
+            })
+            report.unverified.append(record)
+    return report
+
+
+def suspend_ledger_messages(report: SuspendLedgerReport, ledger: Path) -> list[tuple[str, str]]:
+    """Operator-facing ``(level, text)`` lines for a reconcile result; empty when all is well."""
+    messages: list[tuple[str, str]] = []
+    for record in report.wedged:
+        started = int(record.get("started_epoch") or 0)
+        messages.append((
+            "warn",
+            f"warning: suspend cycle {record.get('cycle_id')} (started {format_local_epoch(started)}) never resumed: "
+            "the machine booted again afterwards, so a wake may have wedged it. "
+            "Consider --watchdog, or longer reset windows so the machine suspends less often. "
+            f"To clear this warning, delete the lines for that cycle from {ledger}.",
+        ))
+    if report.unverified:
+        messages.append((
+            "dim",
+            f"note: {len(report.unverified)} suspend record(s) from an older release have no boot ID and predate this boot, "
+            "so whether they resumed cannot be checked. They are now marked unverified and this note will not repeat.",
+        ))
+    return messages
+
+
 def trim_ledger(path: Path, keep: int = 200) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -4990,7 +5415,7 @@ def trim_ledger(path: Path, keep: int = 200) -> None:
     if len(lines) <= keep:
         return
     try:
-        path.write_text("\n".join(lines[-keep:]) + "\n", encoding="utf-8")
+        write_private_text(path, "\n".join(lines[-keep:]) + "\n")
     except OSError:
         pass
 
@@ -5009,8 +5434,7 @@ class WakeArm:
 def wake_planner_lock(env: dict[str, str] | None = None) -> Iterator[None]:
     """Serialize wake-plan owners and the full suspend cycle across processes."""
     path = cache_root(env) / "llm-bridge" / "capacity-wakes" / "planner.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    ensure_private_cache_dir(path.parent, env)
     with path.open("a+") as lock:
         os.chmod(path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -5086,6 +5510,7 @@ class SuspendOutcome:
     reason: str              # includes sleep-not-observed and sleep-unverified after accepted requests
     detail: str = ""
     sleep_observed: bool | None = False
+    early_by_seconds: int = 0  # the machine resumed this long before the target (a non-timer wake)
 
 
 SUSPEND_OBSERVED_MIN_GAP_SECONDS = 2.0
@@ -5126,6 +5551,7 @@ def wall_clock_wait_until(
     target_epoch: int,
     env: dict[str, str] | None = None,
     should_interrupt: Callable[[], bool] | None = None,
+    on_poll: Callable[[], None] | None = None,
 ) -> bool:
     """Wait until wall-clock time reaches ``target_epoch``, in bounded chunks.
 
@@ -5138,16 +5564,20 @@ def wall_clock_wait_until(
     Returns True at the target, or False when ``should_interrupt`` ended the
     wait early. With a callback the chunk is at most one second, so an operator
     request is seen promptly when a suspend was accepted but the machine stayed
-    awake.
+    awake. ``on_poll`` runs before every check (the suspend cycle uses it to
+    record an early resume as soon as it happens) and also shortens the chunk to
+    one second.
     """
     raw = (env or os.environ).get("LLM_TOOLS_WAIT_POLL_SECONDS", "30") or "30"
     try:
         chunk = max(1.0, float(raw))
     except ValueError:
         chunk = 30.0
-    if callable(should_interrupt):
+    if callable(should_interrupt) or callable(on_poll):
         chunk = 1.0
     while True:
+        if callable(on_poll):
+            on_poll()
         if callable(should_interrupt) and should_interrupt():
             return False
         remaining = target_epoch - now_epoch(env)
@@ -5258,6 +5688,7 @@ def _suspend_with_wake_locked(
 
     subprocess.run(["sync"], check=False)
     clock_before = suspend_clock_sample()
+    wakeups_before = wakeup_event_counts(env)
     suspend = subprocess.run(["systemctl", "suspend"], check=False)
     if suspend.returncode != 0:
         disarm_rtc_wake(arm, env)
@@ -5274,7 +5705,38 @@ def _suspend_with_wake_locked(
 
     # systemctl suspend returns asynchronously; poll the wall clock so we proceed
     # exactly when real time reaches the target (the RTC wake), not before.
-    wall_clock_wait_until(int(target_epoch), env, should_interrupt)
+    early_record: dict[str, Any] = {}
+
+    def observe_resume() -> None:
+        # Record the resume the moment it is seen. A wake before the target (USB
+        # keyboard, lid, network) leaves this process waiting for the target; if it
+        # were stopped meanwhile the ledger would keep a start with no done.
+        if early_record:
+            return
+        gap = suspend_clock_gap_seconds(clock_before, suspend_clock_sample())
+        if gap is None or gap < SUSPEND_OBSERVED_MIN_GAP_SECONDS:
+            return
+        woke_now = now_epoch(env)
+        early = int(target_epoch) - woke_now
+        if early <= 0:
+            return
+        early_record.update(early_by_seconds=early, woke_epoch=woke_now, sleep_gap_seconds=round(gap, 3))
+        ledger_record_done(
+            ledger, cycle_id, woke_now, True, env,
+            drift_seconds=-early, early_by_seconds=early, method=arm.method, sleep_gap_seconds=round(gap, 3),
+            sleep_observed=True, phase="resume-observed", **wake_source_report(wakeups_before, env),
+        )
+        trim_ledger(ledger)
+        _log("suspend_woke_early", {"cycle_id": cycle_id, "early_by_seconds": early, "method": arm.method})
+
+    try:
+        wall_clock_wait_until(int(target_epoch), env, should_interrupt, observe_resume)
+    except BaseException:
+        # Interrupted (signal, error) while waiting: make sure a resume that already
+        # happened is on record before propagating.
+        if not early_record:
+            observe_resume()
+        raise
     clock_after = suspend_clock_sample()
     sleep_gap = suspend_clock_gap_seconds(clock_before, clock_after)
     if dog is not None:
@@ -5311,17 +5773,26 @@ def _suspend_with_wake_locked(
             False, woke, int(target_epoch), drift, False, arm.method, "sleep-not-observed",
             f"accepted suspend request but observed only {sleep_gap:.3f}s of suspend time", False,
         )
-    reliable = abs(drift) <= suspend_drift_tolerance(env)
-    ledger_record_done(
-        ledger, cycle_id, woke, reliable, env,
-        drift_seconds=drift, method=arm.method, sleep_gap_seconds=round(sleep_gap, 3), sleep_observed=True,
-    )
-    trim_ledger(ledger)
+    early_by = max(0, -drift)
+    if early_record:
+        early_by = max(early_by, int(early_record["early_by_seconds"]))
+    # Only a wake that lands late by more than the tolerance shows an unreliable
+    # wake timer. An early wake is a different event (something else woke the
+    # machine) and says nothing against the timer.
+    reliable = drift <= suspend_drift_tolerance(env)
+    if not early_record:
+        ledger_record_done(
+            ledger, cycle_id, woke, reliable, env,
+            drift_seconds=drift, method=arm.method, sleep_gap_seconds=round(sleep_gap, 3), sleep_observed=True,
+            early_by_seconds=early_by, **wake_source_report(wakeups_before, env),
+        )
+        trim_ledger(ledger)
     _log("suspend_resumed", {
         "cycle_id": cycle_id, "woke_epoch": woke, "drift_seconds": drift,
         "reliable": reliable, "method": arm.method, "sleep_gap_seconds": round(sleep_gap, 3),
+        "early_by_seconds": early_by,
     })
-    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok", "", True)
+    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok", "", True, early_by)
 
 
 def suspend_with_wake(

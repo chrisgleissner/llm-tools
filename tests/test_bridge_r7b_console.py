@@ -100,14 +100,14 @@ def test_console_commands_use_the_mission_task_number_not_the_global_id(two_miss
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     bridge_tui._edit_task_prompt(FakeWindow(24, 80), state, bridge_tui._selected_task_id(state))  # type: ignore[arg-type]
     settle(state)
-    assert state.status_message() == "Task 1 amended (revision 2)"
+    assert state.status_message() == "Task 1 amended (revision 2) — starts next"
     with bridge.open_store() as store:
         assert "amended" in store.task_by_ordinal(second, 1)["prompt"]
         assert "amended" not in store.task_by_ordinal(first, 1)["prompt"]
 
     # Approve: `/approve 2` verifies the mission's task 2, not global task 2 (the first mission's task).
     state._confirm_or_dispatch("/approve 2")
-    assert state.confirm_command == "task verify --task 2 --approve"
+    assert state.confirm_command == "task approve --task 2"
     assert any("Task 2: second mission approve me" in line for line in state.output)
     state.handle_key("y")
     settle(state)
@@ -130,7 +130,7 @@ def test_tasks_without_ordinals_are_addressed_by_global_id() -> None:
     assert bridge_tui._task_ref(snapshot, "42") == ["--task-id", "42"]
     assert bridge_tui._task_ref({"tasks": [{"id": 42, "ordinal": 2}]}, "2") == ["--task", "2"]
     command, problem = bridge_tui._expand_console_alias("/approve", snapshot)
-    assert problem is None and command == "task verify --task-id 42 --approve"
+    assert problem is None and command == "task approve --task-id 42"
     command, _ = bridge_tui._expand_console_alias("/reject 42 not done", snapshot)
     assert command.startswith("task reject --task-id 42 ")
 
@@ -266,7 +266,8 @@ def test_console_help_lists_slash_commands_not_shell_commands() -> None:
     state._dispatch("/help")
     text = state.document_viewer.source  # type: ignore[union-attr]
     assert "/approve" in text and "/home" in text and "/start" in text
-    assert "llm-bridge task add" in text and text.count("llm-bridge ") <= 3  # a pointer, not the shell grammar
+    assert "/task add" in text and "llm-bridge task reject --task N --reason WHY" in text
+    assert "llm-bridge " not in text.split("Slash commands and shell commands")[0]  # the commands are slash forms; shell forms appear only in the mapping
     state._dispatch("/help keys")
     assert "Keys and terminal ownership" in state.document_viewer.source  # type: ignore[union-attr]
     assert "remote" in bridge_help.TOPICS and "window-size latest" in bridge_help.TOPICS["remote"]
@@ -408,12 +409,14 @@ def test_approve_confirmation_shows_title_evidence_exit_status_and_workspace() -
     assert "Evidence (latest 3 of 4):" in text and "extra: latest line" in text and "pytest: 12 passed" not in text
     assert "Last run: codex, exit 0, exited" in text
     assert "Workspace: changed during the run" in text
-    assert state.output[-1] == "Y approve · N or Esc cancel"
+    assert state.output[-1] == "Y approve · N or Esc cancel · o output · d diff"
     screen = Screen(20, 100)
     bridge_tui._draw_response_overlay(screen, state)  # type: ignore[arg-type]
     assert "Y approve" in "".join(screen.lines) and "Fix the typo" in "".join(screen.lines)
-    # Other confirmations keep their wording.
+    # Cancelling a mission names both ways out; other confirmations keep their wording.
     state._confirm_or_dispatch("/cancel")
+    assert state.output[-1] == "Y Cancel mission · N or Esc Keep mission"
+    state._confirm_or_dispatch("/stop --force")
     assert state.output[-1] == "Y confirm · N or Esc cancel"
 
 

@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from llm_tools.bridge import _build_parser, main
-from llm_tools.bridge_help import COMMANDS, TOPICS, topic_text
+from llm_tools.bridge_help import COMMANDS, TOPICS, _command_path_parser, topic_text
 
 
 def test_all_documented_examples_parse_and_command_help_has_context() -> None:
@@ -10,9 +10,9 @@ def test_all_documented_examples_parse_and_command_help_has_context() -> None:
     parser = _build_parser()
     for path, (_, example) in COMMANDS.items():
         parser.parse_args(shlex.split(example))
-        text = topic_text(path)
+        text = _command_path_parser(path).format_help()  # topic_text("remote") is the remote-use topic, not the command page
         assert "Example:" in text, path
-        assert "provider work" in text or "paid capacity" in text, path
+        assert text.count("Example:") == 1, path
         assert "==SUPPRESS==" not in text
         assert "_controller" not in text
 
@@ -26,7 +26,7 @@ def test_help_topics_and_root_create_no_state(tmp_path: Path, monkeypatch, capsy
     assert not state.exists()
     text = _build_parser().format_help()
     assert "_controller" not in text and "==SUPPRESS==" not in text
-    assert len(text.splitlines()) <= 25
+    assert len(text.splitlines()) <= 80  # grouped by task, one line per command, then the exit status
 
 
 def test_help_help_uses_public_parser(capsys) -> None:
@@ -64,11 +64,13 @@ def test_keys_help_states_osc52_clipboard_and_detach_choice() -> None:
 
 
 def test_quickstart_help_matches_default_rotation_slash_commands_and_detach() -> None:
-    from llm_tools.bridge import BUILTIN_PROVIDERS
+    from llm_tools.bridge import BUILTIN_PROVIDERS, resolved_default_rotation
 
     quickstart = " ".join(topic_text("quickstart").split())
     assert BUILTIN_PROVIDERS == "claude,codex,opencode"
-    assert "[ralph] wins over [defaults]" in quickstart and f"built-in {BUILTIN_PROVIDERS}" in quickstart
+    providers, routes = resolved_default_rotation()
+    assert (providers, routes) == (BUILTIN_PROVIDERS, "")  # the test environment has no llm-tools config
+    assert "[ralph] wins over [defaults]" in quickstart and f"that is providers {BUILTIN_PROVIDERS}." in quickstart
     assert "/start, /attach, /pause, /status and /approve [N]" in quickstart
     assert "Ctrl-] then d" in quickstart and "llm-bridge detach is different" in quickstart
     detach = " ".join(topic_text("detach").split())

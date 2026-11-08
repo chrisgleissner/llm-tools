@@ -3,14 +3,12 @@ import { h, startClock } from "./dom";
 import { applyTheme, installShortcuts, savedTheme, shell } from "./shell";
 import { startLive, stopLive, refresh } from "./store";
 import { announce, mountFeedback } from "./ui";
+import { missions } from "./views/missions";
+import { missionDetail } from "./views/mission";
 import { diagnostics } from "./views/diagnostics";
 import { loginView, type NoticeKind } from "./views/login";
-import { missionDetail } from "./views/mission";
-import { missions } from "./views/missions";
 import { overview } from "./views/overview";
-import { sessions } from "./views/sessions";
-import { usage } from "./views/usage";
-import { workers } from "./views/workers";
+import { forcedChangeView, resetNotice } from "./views/reset";
 
 const app = document.getElementById("app") as HTMLElement;
 let authed = false;
@@ -54,6 +52,11 @@ api.onUnauthorized(() => {
   if (authed) toLogin({ kind: "expired", text: "Your session expired or was ended. Sign in again to continue." });
 });
 
+// A 403 `password-change-required` from any call means a temporary password is still in place: show the change screen.
+api.onPasswordChangeRequired(() => {
+  if (authed) void route();
+});
+
 async function signOut(): Promise<void> {
   try {
     await api.logout();
@@ -62,6 +65,26 @@ async function signOut(): Promise<void> {
   }
   history.replaceState(null, "", "/login");
   toLogin({ kind: "signed-out", text: "You signed out. Your session on this device has ended." });
+}
+
+/**
+ * Load a view's code on demand and mount it into `main`. A placeholder shows while the chunk loads.
+ * Returns false when the route changed meanwhile (the caller stops), true once the view is mounted.
+ */
+async function lazyView<T>(main: HTMLElement, generation: number, load: () => Promise<T>, mount: (module: T) => () => void): Promise<boolean> {
+  const placeholder = h("div", { class: "status-skeleton", "aria-hidden": "true" });
+  main.setAttribute("aria-busy", "true");
+  main.append(placeholder);
+  try {
+    const module = await load();
+    if (generation !== routeGeneration) return false;
+    placeholder.remove();
+    cleanup = mount(module);
+    return true;
+  } finally {
+    placeholder.remove();
+    main.removeAttribute("aria-busy");
+  }
 }
 
 async function route(): Promise<void> {
@@ -105,6 +128,14 @@ async function route(): Promise<void> {
     });
     return;
   }
+  if (state.password_change_required) {
+    stopLive();
+    forcedChangeView(app, state, {
+      onChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }),
+      signOut: () => void signOut(),
+    });
+    return;
+  }
   if (path === "/login") return go("/", true);
   startLive();
   void refresh().catch(() => {});
@@ -119,19 +150,21 @@ async function route(): Promise<void> {
   const main = app.querySelector<HTMLElement>("#main") as HTMLElement;
   document.title = "LLM Bridge";
   const m = /^\/missions\/([^/]+)\/([^/]+)$/.exec(path);
+  const query = new URLSearchParams(location.search);
   if (path === "/") cleanup = overview(main);
-  else if (path === "/workers") cleanup = workers(main);
-  else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
-  else if (path === "/sessions") cleanup = sessions(main, new URLSearchParams(location.search));
-  else if (path === "/usage") cleanup = usage(main, new URLSearchParams(location.search));
-  else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+  else if (path === "/workers") { if (!(await lazyView(main, generation, () => import("./views/workers"), (v) => v.workers(main)))) return; }
+  else if (path === "/missions") cleanup = missions(main, query);
+  else if (path === "/sessions") { if (!(await lazyView(main, generation, () => import("./views/sessions"), (v) => v.sessions(main, query)))) return; }
+  else if (path === "/usage") { if (!(await lazyView(main, generation, () => import("./views/usage"), (v) => v.usage(main, query)))) return; }
+  else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1] ?? ""), decodeURIComponent(m[2] ?? ""));
   else if (path === "/diagnostics") cleanup = diagnostics(main);
   else if (path === "/account") {
-    const { account } = await import("./views/account");
-    if (generation !== routeGeneration) return;
-    cleanup = account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) });
+    if (!(await lazyView(main, generation, () => import("./views/account"), (v) => v.account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) })))) return;
   }
   else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
+  const reset = state.password_reset_notice;
+  const box = reset ? resetNotice(reset) : null;
+  if (box) main.prepend(box);
   const heading = main.querySelector("h1");
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;
   main.focus({ preventScroll: true });

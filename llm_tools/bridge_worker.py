@@ -33,6 +33,8 @@ from typing import Any, Callable
 from . import bridge_commands as commands
 from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
 from .bridge_store import BridgeStore, default_state_dir, store_path
+from .bridge_states import LIVE_MISSION_STATUSES
+from .bridge_status_bound import mission_digest
 from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
@@ -93,8 +95,20 @@ def worker_dir(env: dict[str, str] | None = None) -> Path:
     return default_state_dir(env) / "worker"
 
 
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` and its missing parents as 0700; Bridge refuses a state directory that others can enter.
+
+    ``mkdir(mode=0o700, parents=True)`` applies the mode to the last component only, so the first
+    command on a new host (``worker enroll``, ``remote login``) would otherwise leave the state
+    directory with the default umask mode and every later Bridge command would fail.
+    """
+    from .common import make_private_dirs
+
+    make_private_dirs(path)
+
+
 def _atomic_private_write(path: Path, text: str) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_dir(path.parent)
     os.chmod(path.parent, 0o700)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
     try:
@@ -140,7 +154,7 @@ def audit(action: str, env: dict[str, str] | None = None, **detail: Any) -> None
     path = worker_dir(env) / AUDIT_FILE
     try:
         with _AUDIT_LOCK:
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _make_private_dir(path.parent)
             if path.exists() and path.stat().st_size > AUDIT_MAX_BYTES:
                 os.replace(path, path.with_name(AUDIT_FILE + ".1"))
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -330,7 +344,8 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
     path = worker_dir(env) / WORKER_FILE
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return WorkerConfig(
+        plain = not str(value["coordinator_url"]).startswith("wss://")  # enrolment enforces this; an edited file must not bypass it
+        config = WorkerConfig(
             worker_id=str(value["worker_id"]), name=str(value["name"]), coordinator_url=str(value["coordinator_url"]),
             token=str(value["token"]), allow_control=bool(value["allow_control"]), max_generation=int(value.get("max_generation", 0)),
             allow_terminal_view=bool(value.get("allow_terminal_view", False)),
@@ -343,6 +358,9 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise WorkerConfigError(f"worker configuration {path} is unreadable: {type(exc).__name__}") from None
+    if plain:
+        raise WorkerConfigError(f"worker configuration {path} must name the coordinator with wss:// (workers never connect without TLS); run llm-bridge worker enroll again")
+    return config
 
 
 def rotate_token(token: str, env: dict[str, str] | None = None) -> WorkerConfig:
@@ -463,6 +481,8 @@ def tls_context(env: dict[str, str] | None = None) -> ssl.SSLContext:
     ca = worker_dir(env) / CA_FILE
     context = ssl.create_default_context(cafile=str(ca) if ca.exists() else None)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if not (worker_dir(env) / WORKER_FILE).exists():
+        return context  # not enrolled: no client identity to present
     config = load_config(env)
     if config.client_certificate:
         cert = worker_dir(env) / CLIENT_CERT_FILE
@@ -549,14 +569,19 @@ class WorkerSession:
             payload["host_name"] = host_name
         return Message("hello", self.config.worker_id, 0, payload)
 
-    def _provider_question(self, store: BridgeStore, mission_id: str) -> dict[str, str] | None:
-        """Project the existing bounded status decision for one active native mission."""
+    def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
+        """The existing bounded status projection with one task, or ``None`` when it cannot be read."""
         try:
             from .bridge_monitor import project_snapshot
 
-            needs = project_snapshot(store, mission_id, task_limit=1).get("needs_you")
+            return dict(project_snapshot(store, mission_id, task_limit=1, prompt_chars=1))
         except Exception:  # noqa: BLE001 - observation must never stop worker replication
             return None
+
+    @staticmethod
+    def _provider_question(snapshot: dict[str, Any] | None) -> dict[str, str] | None:
+        """The pending provider question in a status projection, bounded."""
+        needs = snapshot.get("needs_you") if snapshot else None
         if not isinstance(needs, dict) or needs.get("kind") != "provider":
             return None
         message = needs.get("message")
@@ -564,6 +589,25 @@ class WorkerSession:
         if not isinstance(message, str) or not message or not isinstance(command, str) or not command:
             return None
         return {"kind": "provider", "message": message[:2048], "command": command[:512]}
+
+    @staticmethod
+    def _compact_needs(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """What needs the operator, bounded: the kind, the message, the command and the task numbers."""
+        needs = snapshot.get("needs_you")
+        if not isinstance(needs, dict):
+            return None
+        compact: dict[str, Any] = {}
+        if needs.get("kind") in {"approval", "failed", "blocked", "proposal", "capacity", "provider"}:
+            compact["kind"] = needs["kind"]
+        if isinstance(needs.get("message"), str):
+            compact["message"] = needs["message"][:2048]
+        if isinstance(needs.get("command"), str):
+            compact["command"] = needs["command"][:512]
+        if isinstance(needs.get("tasks"), list):
+            compact["tasks"] = [task for task in needs["tasks"][:32] if isinstance(task, int) and task > 0]
+        if isinstance(needs.get("hold"), bool):
+            compact["hold"] = needs["hold"]
+        return compact or None
 
     def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
         mission_id = str(row["id"])
@@ -574,50 +618,25 @@ class WorkerSession:
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }
-        # Console cards need only the current task and provider labels. Replicate this small
-        # projection with the mission snapshot so the browser does not persist a 100+ KiB
-        # mission.status command result on every refresh.
-        try:
-            from .bridge_monitor import project_snapshot
-
-            projected = project_snapshot(store, mission_id, task_limit=1, prompt_chars=0)
-            summary["task_counts"] = projected.get("task_counts") or {}
-            task = projected.get("current_task")
-            if isinstance(task, dict):
-                summary["current_task"] = {
-                    "ordinal": task.get("ordinal"),
-                    "title": str(task.get("title") or "")[:256],
-                }
-            context = projected.get("station_context") or {}
-            observed = projected.get("station_observation") or {}
-            station = str(observed.get("station") or context.get("last_launched_station") or "")[:64]
-            model = str(observed.get("model") or "")[:128]
-            summary["station"] = station
-            summary["model"] = model
-            needs = projected.get("needs_you")
-            if isinstance(needs, dict):
-                compact: dict[str, Any] = {}
-                if needs.get("kind") in {"approval", "failed", "blocked", "proposal", "capacity", "provider"}:
-                    compact["kind"] = needs["kind"]
-                if isinstance(needs.get("message"), str):
-                    compact["message"] = needs["message"][:2048]
-                if isinstance(needs.get("command"), str):
-                    compact["command"] = needs["command"][:512]
-                if isinstance(needs.get("tasks"), list):
-                    compact["tasks"] = [task for task in needs["tasks"][:32] if isinstance(task, int) and task > 0]
-                if isinstance(needs.get("hold"), bool):
-                    compact["hold"] = needs["hold"]
-                summary["needs_you"] = compact or None
-        except Exception:  # noqa: BLE001 - summary enrichment must never interrupt replication
-            summary["task_counts"] = store.task_counters(mission_id).get("status", {})
         config = row.get("config")
+        snapshot = self._live_projection(store, mission_id) if row.get("status") in LIVE_MISSION_STATUSES else None
+        if snapshot is not None:
+            # Task counts and the current task let a console draw its lists from the replicated
+            # summary instead of asking the worker for the status of every active mission.
+            summary.update(mission_digest(snapshot))
+            compact = self._compact_needs(snapshot)
+            if compact is not None:
+                summary["needs_you"] = compact
+        else:
+            counters = store.task_counters(mission_id)
+            summary["task_counts"] = {str(key): int(value) for key, value in counters["status"].items()}
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
-            question = self._provider_question(store, mission_id)
-            summary["needs_you"] = question
+            question = self._provider_question(snapshot)
+            summary["needs_you"] = question if question is not None else summary.get("needs_you")
             self.mission_questions[mission_id] = question
         elif mission_id in self.mission_questions:
             # Event-driven summaries clear a question when its mission leaves RUNNING.
-            summary["needs_you"] = None
+            summary.setdefault("needs_you", None)
             self.mission_questions.pop(mission_id, None)
         return summary
 
@@ -990,7 +1009,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
 
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:
     config = load_config(env)
-    return WorkerSession(config, open_store=lambda: BridgeStore(store_path(env)), software_version=software_version,
+    return WorkerSession(config, open_store=lambda: BridgeStore(store_path(env), readonly=True), software_version=software_version,  # every use reads
                          save=lambda value: _save(value, env), terminal_launcher=TerminalLauncher(terminal_connector(env)))
 
 
