@@ -216,7 +216,7 @@ def test_worker_survives_coordinator_restart(system):
     assert result["result"]["outcome"] == "ok"
 
 
-def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
+def test_remote_cli_preserves_mission_identity_without_private_fields(system, tmp_path, capsys):
     coordinator, mission_id, state = system
     wait_for(lambda: _online(coordinator), timeout=scaled(15), interval=0.05, message="worker never came online")
     token_file = tmp_path / "api-token"
@@ -235,7 +235,15 @@ def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
         remote_code, remote_out, err = run("--target", "ws", *argv)
         assert (code, remote_code) == (0, 0), err
         local, remote = json.loads(local_out), json.loads(remote_out)
-        assert (remote["tasks"] if "tasks" in remote else remote) == local
+        remote_value = remote["tasks"] if "tasks" in remote else remote
+        if argv[0] == "mission":
+            local_row = local["missions"][0]
+            remote_row = remote_value["missions"][0]
+            redacted = {"cwd", "repo_identity", "objective", "config"}
+            assert remote_row == {key: value for key, value in local_row.items() if key not in redacted}
+            assert not redacted & remote_row.keys()
+        else:
+            assert remote_value == local
 
     code, out, _ = run("--target", "ws", "status", "--mission", mission_id[:8])
     assert code == 0 and mission_id[:8] in out

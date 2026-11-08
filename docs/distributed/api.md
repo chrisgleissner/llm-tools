@@ -140,6 +140,15 @@ authenticated and encrypted, and bound to the original filters and sort order. T
 rejected if changed or reused with different filters. `offset` remains available
 for compatibility but cannot be combined with `cursor`.
 
+Mission rows are a bounded public projection. They include console fields such as
+the mission ID, name, status, folder label, current task counts and update time;
+the remote `llm-bridge --target WORKER mission list --json` result matches the
+local mission-list row after removing exactly these redacted fields from the
+local row: `cwd`, `repo_identity`, `objective`, and `config`. The remote client
+filters the console-only fields (`folder`, task counts, station and model) from
+its JSON result, so no other fields differ. `mission list --include-config` is
+local-only and is not exposed over REST.
+
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   "$COORDINATOR/api/v1/missions?limit=100"

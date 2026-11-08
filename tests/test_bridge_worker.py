@@ -181,6 +181,7 @@ def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatc
     assert hello.payload["missions"][0]["id"] == mission_id
     summary = hello.payload["missions"][0]
     assert summary["task_counts"]["QUEUED"] == 1
+    assert summary["created_at"] and isinstance(summary["controller_running"], bool)
     assert summary["station"] == "unknown" and summary["model"] == "unknown"
     assert "cwd" not in summary and "config" not in summary
     assert hello.payload["host_name"] == "test-host.example"

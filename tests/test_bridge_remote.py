@@ -347,14 +347,19 @@ def test_target_all_aggregates_reads_and_reports_unavailable_workers(capsys):
 
 
 def test_mission_list_uses_worker_scoped_resource_route_and_preserves_cli_json(capsys):
-    mission = {"id": "m-1", "name": "Example", "status": "RUNNING", "cwd": "/tmp/example"}
+    mission = {
+        "id": "m-1", "name": "Example", "status": "RUNNING",
+        "created_at": "2026-11-07T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z",
+        "controller_running": True, "folder": "example", "task_counts": {"QUEUED": 1}, "model": "codex",
+    }
     api = client({
         ("GET", "/api/v1/missions"): (200, {
             "missions": [{"worker": "worker-a", "stale": False, "mission": mission}], "next_cursor": None
         })
     })
     assert remote.run_cli("worker-a", args("mission", "list", "--json"), client=api) == 0
-    assert json.loads(capsys.readouterr().out) == {"missions": [mission]}
+    public_cli_row = {field: mission[field] for field in ("id", "name", "status", "created_at", "updated_at", "controller_running")}
+    assert json.loads(capsys.readouterr().out) == {"missions": [public_cli_row]}
     call = api.opener.calls[0]
     assert call[0] == ("GET", "/api/v1/missions")
     assert "limit=500" in call[3]

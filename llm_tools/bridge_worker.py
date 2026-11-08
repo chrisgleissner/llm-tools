@@ -32,7 +32,7 @@ from typing import Any, Callable
 
 from . import bridge_commands as commands
 from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
-from .bridge_store import BridgeStore, default_state_dir, store_path
+from .bridge_store import BridgeStore, controller_running as _controller_running, default_state_dir, store_path
 from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
@@ -571,6 +571,8 @@ class WorkerSession:
             "id": mission_id,
             "name": row.get("name") or "",
             "status": row["status"],
+            "created_at": row.get("created_at"),
+            "controller_running": bool(_controller_running(mission_id, on_error=False)),
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }

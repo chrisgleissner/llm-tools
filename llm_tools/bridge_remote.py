@@ -185,7 +185,16 @@ class Client:
                 for row in body["missions"]:
                     if not isinstance(row, dict) or not isinstance(row.get("mission"), dict):
                         raise RemoteError("coordinator returned an unexpected mission row")
-                    missions.append(dict(row["mission"]))
+                    mission = row["mission"]
+                    public_cli_fields = ("id", "name", "status", "created_at", "updated_at", "controller_running")
+                    if any(field not in mission for field in public_cli_fields):
+                        raise RemoteError("coordinator returned an incomplete mission summary")
+                    if (
+                        not all(isinstance(mission[field], str) for field in public_cli_fields[:5])
+                        or not isinstance(mission["controller_running"], bool)
+                    ):
+                        raise RemoteError("coordinator returned invalid mission summary fields")
+                    missions.append({field: mission[field] for field in public_cli_fields})
                 next_cursor = body.get("next_cursor")
                 if not isinstance(next_cursor, str) or not next_cursor:
                     break

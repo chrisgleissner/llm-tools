@@ -24,7 +24,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | API-010 | ASVS 03.02, 04.01, 04.02; API8:2023, API9:2023 | `[~]` Local script-free `/api/docs` reference exists. Test and bundle evidence pending. |
 | API-011 | ASVS 04.01, 04.02; API9:2023 | `[~]` Snapshot is committed and regeneration checked in CI; released-baseline breaking-change checker remains. |
 | API-012 | ASVS 04.01, 04.02; API1:2023, API3:2023, API4:2023, API8:2023 | `[~]` OpenAPI route/scope/snapshot tests added; response-wide schema validation and Schemathesis fuzzing remain. |
-| API-013 | ASVS 04.01, 08.02, 08.03; API1:2023, API5:2023 | `[~]` Remote CLI maps listed operations to resource routes (named Python test in register). Remaining operations use `/commands` or return explicit unmappable errors. |
+| API-013 | ASVS 04.01, 08.02, 08.03; API1:2023, API5:2023 | `[~]` Remote CLI mission-list JSON is identical to the local row after removal of exactly `cwd`, `repo_identity`, `objective`, and `config`. Python cross-component regression compares all remaining fields; local-only `--include-config` stays local. Remaining operation mappings and final green CI evidence are tracked in the register. |
 | API-014 | ASVS 04.01, 04.02; API9:2023 | `[~]` Coordinator guide, API examples, README and site link updated. Full versioning, pagination and rate-limit contract remains. |
 | API-015 | ASVS 04.01; API9:2023 | `[ ]` CLI/route parity table and argparse-tree test remain. |
 | API-016 | ASVS 06.07, 12.03; API2:2023, API8:2023 | `[~]` Worker-side opt-ins and resolved-root enforcement cover typed mission creation, power suspend, and restore; coordinator advertises stored policy and resource routes dispatch typed operations. CI evidence remains. |
@@ -33,11 +33,11 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 
 | ID | Relevant clauses | Status and register evidence / remaining work |
 |---|---|---|
-| SEC2-001 | ASVS 12.01, 12.02; API8:2023 | `[~]` `min_tls` defaults to `1.3`; configuration accepts only `1.3` or explicit `1.2`. `coordinator/tests/certs.rs::tls13_is_the_default_and_tls12_requires_explicit_opt_in` proves the TLS 1.2-only client fails by default and succeeds after opt-in, and checks tickets/resumption and 0-RTT are disabled. The provider restricts suites to AEAD; the pinned testssl.sh scan rejects medium-or-higher findings. CI evidence remains. |
+| SEC2-001 | ASVS 12.01, 12.02; API8:2023 | `[x]` `min_tls` defaults to `1.3`; configuration accepts only `1.3` or explicit `1.2`. `coordinator/tests/certs.rs::tls13_is_the_default_and_tls12_requires_explicit_opt_in` proves the TLS 1.2-only client fails by default and succeeds after opt-in, and checks tickets/resumption and 0-RTT are disabled. The provider restricts suites to AEAD; the 365-day leaf bound has a regression test and the pinned testssl.sh scan found no medium-or-higher findings (runs 42428729914, 42428729865). |
 | SEC2-002 | ASVS 03.04, 03.05, 03.07; API8:2023 | `[~]` Global security headers have route/static tests in register. API CSP explicitly sets `default-src 'none'; form-action 'none'; frame-ancestors 'none'`. The xterm console's inline-style allowance is the reviewed exception in `review-findings.md`; CI evidence remains. |
 | SEC2-003 | ASVS 02.02, 04.02; API4:2023, API8:2023 | `[~]` JSON media type, bounded parser, schema limits, OPTIONS/HEAD behavior have named tests. Unknown-field and identifier audits remain. |
 | SEC2-004 | ASVS 03.05, 03.07; API8:2023 | `[~]` `fetch_metadata_guard` rejects cross-site cookie API/fetch and WebSocket requests; only top-level console document navigation is exempt. Unit and coordinator route regressions cover the policy. Exact-Origin and CSRF checks remain independent. |
-| SEC2-005 | ASVS 03.05, 04.01, 04.02; API8:2023 | `[~]` No-CORS baseline and preflight rejection have a named test. Explicit HTTPS origin allow-list is deferred unless CORS is introduced. |
+| SEC2-005 | ASVS 03.05, 04.01, 04.02; API8:2023 | `[x]` No-CORS baseline and actual resource preflight rejection (405, no allow-origin header) are tested; no CORS allow-list is implemented. Any future CORS support must use an explicit HTTPS origin list. Coordinator CI run 42428729914. |
 | SEC2-006 | ASVS 06.04, 06.05, 06.07; NIST 3.2.5, 4.1, 4.2; API2:2023 | `[~]` Password first run exists. TOTP, recovery codes, origin-gated passkeys and Internet-mode MFA remain. |
 | SEC2-007 | ASVS 06.02, 06.03; NIST 3.1.1.2; API2:2023 | `[~]` Current password policy and Argon2id exist. NIST length policy, offline breached-password blocklist and measured configurable cost remain. |
 | SEC2-008 | ASVS 03.03, 03.04, 07.02, 07.04, 07.05; API2:2023 | `[~]` Session-only endpoints list and revoke this principal's active sessions using independent random public IDs; the API does not return session credential hashes. Rust integration and migration tests, plus the Account page Playwright test, cover revocation, ownership and display. Privilege-change rotation and fresh-credential step-up remain; CI evidence is pending. |
@@ -69,7 +69,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | PK-009 | ASVS 06.05, 08.03; NIST 2, 3.2.5 | `[ ]` Passkey step-up for token creation remains. |
 | PK-010 | ASVS 06.01, 06.03, 06.07; NIST 3.1.7, 3.2.5 | `[ ]` Browser capability detection and calm unavailable state remain. No direct standards clause prescribes the UI state. |
 | PK-011 | ASVS 06.07, 15.01; NIST 3.1.7, 3.2.5, 3.2.7, 4.1.2 | `[ ]` WebAuthn vectors, Playwright virtual-authenticator flow and negative tests remain. |
-| PK-012 | ASVS 06.07, 15.01; NIST 3.1.7, 3.2.5 | `[ ]` Physical Android validation belongs to the separate Pi verification prompt; no cited clause mandates a particular device test. |
+| PK-012 | ASVS 06.07, 15.01; NIST 3.1.7, 3.2.5 | `[x]` Operator waiver dated 2026-11-07: a physical Android passkey check is not required for this merge. Chromium virtual-authenticator flows are the passkey evidence; no physical-device support claim is made. |
 
 ## Mapping limits
 

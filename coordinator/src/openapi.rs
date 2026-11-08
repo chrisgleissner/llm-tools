@@ -585,6 +585,12 @@ pub fn openapi_value() -> Value {
                             "type":"object",
                             "additionalProperties":true,
                             "properties":{
+                                "id":{"type":"string"},
+                                "name":{"type":"string"},
+                                "status":{"type":"string"},
+                                "created_at":{"type":"string","format":"date-time"},
+                                "updated_at":{"type":"string","format":"date-time"},
+                                "controller_running":{"type":"boolean"},
                                 "needs_you":{
                                     "oneOf":[
                                         {
@@ -724,6 +730,15 @@ mod tests {
         assert_eq!(
             doc["components"]["schemas"]["MissionListPage"]["properties"]["next_cursor"]["type"],
             json!(["string", "null"])
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["MissionListPage"]["properties"]["missions"]["items"]["properties"]["mission"]["properties"]["created_at"]["format"],
+            "date-time"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["MissionListPage"]["properties"]["missions"]["items"]["properties"]["mission"]["properties"]["controller_running"]
+                ["type"],
+            "boolean"
         );
         let create = &doc["paths"]["/api/v1/missions"]["post"];
         let body_schema = &create["requestBody"]["content"]["application/json"]["schema"];
