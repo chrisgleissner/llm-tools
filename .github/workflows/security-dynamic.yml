@@ -93,12 +93,19 @@ jobs:
           python -m http.server 18444 --bind 127.0.0.1 --directory "$pki" \
             >"$RUNNER_TEMP/bridge-security-crl.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/bridge-security-crl.pid"
+          crl_server_ready=0
           for attempt in $(seq 1 10); do
             if curl --silent --show-error --fail http://127.0.0.1:18444/ca.crl >/dev/null; then
+              crl_server_ready=1
               break
             fi
             sleep 1
           done
+          if [ "$crl_server_ready" -ne 1 ]; then
+            cat "$RUNNER_TEMP/bridge-security-crl.log"
+            echo "::error::The local CA-signed CRL endpoint did not become ready"
+            exit 1
+          fi
           test -s "$pki/ca.crl"
           python - "$data/config.toml" "$pki" <<'PY'
           import json

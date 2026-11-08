@@ -110,6 +110,8 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "crlDistributionPoints = URI:http://127.0.0.1:18444/ca.crl" in workflow
     assert "tls_cert_file =" in workflow and "tls_key_file =" in workflow
     assert 'python -m http.server 18444 --bind 127.0.0.1 --directory "$pki"' in workflow
+    assert 'if [ "$crl_server_ready" -ne 1 ]; then' in workflow
+    assert "The local CA-signed CRL endpoint did not become ready" in workflow
     assert 'mutation_limit_per_token = 10000' in workflow
     assert 'mutation_limit_per_address = 10000' in workflow
     assert 'mutation_limit_global = 10000' in workflow
