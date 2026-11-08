@@ -31,6 +31,8 @@ export const screens: ScreenDef[] = [
     await p.clock.fastForward("22:00:00");
     await expect(p.locator("[data-older-failures]")).toContainText("1 older failure");
     await expect(p.locator('[data-section="needs-you"] [data-state="failed"]')).toHaveCount(0);
+    // The preview moves to a row that is shown (the approval), not the failure that was folded away.
+    if (await p.locator(".inbox-preview").isVisible()) await expect(p.locator(".inbox-preview .preview-title")).toContainText("Refactor the parser");
   } },
   { name: "inbox-empty", variant: "empty", mock: { ...IN, missions: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No missions yet" })).toBeVisible(); } },
   { name: "inbox-no-workers", variant: "empty", mock: { auth: "in", workers: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No workers yet" })).toBeVisible(); } },

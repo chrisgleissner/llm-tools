@@ -162,11 +162,13 @@ export function inbox(root: HTMLElement): () => void {
     const running = groups["running"]!;
     const waiting = groups["waiting"]!;
     const wide = previewVisible();
-    if (wide && !items.some((i) => i.key === selected)) {
-      selected = (needs[0] ?? running[0])?.key ?? "";
+    // The preview follows a row that is on the screen: not a failure that is folded into the "older failures" row.
+    const shown = (i: Item) => i.key === selected && (expandedOlder || !isOlderFailure(i));
+    if (wide && !items.some(shown)) {
+      selected = (needs.find((i) => expandedOlder || !isOlderFailure(i)) ?? running[0])?.key ?? "";
       if (selected) void renderPreview();
     }
-    preview.hidden = !wide || !items.some((i) => i.key === selected);
+    preview.hidden = !wide || !items.some(shown);
 
     // The answer line: does it need me, what is happening, what next. Counts are not shown as zero while still being read.
     const checking = !store.loaded || (pending && needs.length === 0);
