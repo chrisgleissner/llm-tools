@@ -39,3 +39,19 @@ must have a concrete reason and a narrowly scoped regression gate. The independe
 - **Location:** `coordinator/src/db.rs::admin_set_password` and `coordinator/src/main.rs::admin reset-password`
 - **Evidence:** The independent reviewer found that resetting a lost password left TOTP enabled, so an administrator who lost both the authenticator and recovery codes remained unable to sign in. Clearing MFA during ordinary browser password changes would be unsafe.
 - **Disposition:** Fixed with a separate `admin_reset_password_local` transaction used only by the local shell recovery command. It clears TOTP and recovery codes and deletes sessions; ordinary browser password changes continue to preserve MFA. `coordinator/tests/ops.rs::recovery_commands_reset_password_and_certificates` covers both behaviors. Docs now describe the recovery effect and require TOTP re-enrollment.
+
+## Independent API data-minimization review
+
+### API-LEAK-001 — Generic command resource exposed internal request and result fields
+
+- **Severity:** Medium
+- **Location:** `coordinator/src/http.rs::command_response_json`
+- **Evidence:** A read-scoped command lookup returned durable request/result JSON without a public
+  projection. Mission creation request values included private working paths and prompts; event
+  results could contain working paths and raw terminal output.
+- **Disposition:** Fixed by recursively removing private path, prompt, credential and terminal field
+  names from generic command responses. Resource-specific endpoints remain the preferred public
+  projection.
+- **Regression evidence:** `coordinator/tests/web_api.rs::command_resource_redacts_private_request_and_event_fields`
+  checks distinctive request-path, prompt, event-path and terminal-output sentinels through a
+  read-scoped token while retaining a safe event summary.

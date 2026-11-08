@@ -3154,10 +3154,51 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
 
 fn command_response_json(st: &St, row: &CommandRow) -> Value {
     let mut value = row.to_json();
+    redact_private_api_fields(&mut value);
     value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
     value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
     add_next_page_cursor(st, row, &mut value);
     value
+}
+
+/// Command requests and worker results are durable internal records, not public API schemas.
+/// Remove known private fields recursively before exposing them through the generic command
+/// resource. Resource-specific endpoints remain the preferred, explicitly projected interface.
+fn redact_private_api_fields(value: &mut Value) {
+    const PRIVATE_FIELDS: &[&str] = &[
+        "cwd",
+        "repo_identity",
+        "objective",
+        "config",
+        "prompt",
+        "environment",
+        "env",
+        "terminal",
+        "terminal_content",
+        "terminal_output",
+        "output",
+        "secret",
+        "token",
+        "token_hash",
+        "password",
+        "credential",
+        "credentials",
+        "authorization",
+    ];
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, _| !PRIVATE_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private)));
+            for child in fields.values_mut() {
+                redact_private_api_fields(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                redact_private_api_fields(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {

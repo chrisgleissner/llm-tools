@@ -1689,6 +1689,74 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn command_resource_redacts_private_request_and_event_fields() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    admin.add_worker("w1").await;
+    let request = json!({
+        "schema_version": 1,
+        "request_id": "private-command-1",
+        "operation": "mission.create",
+        "mission_id": "m1",
+        "target": "w1",
+        "params": {
+            "cwd": "/private/request-path-sentinel",
+            "prompt": "private-request-prompt-sentinel"
+        }
+    });
+    env.srv.state.db.command_insert("w1", "mission.create", true, &request).unwrap();
+    env.srv
+        .state
+        .db
+        .command_done(
+            "w1",
+            "private-command-1",
+            &json!({
+                "outcome": "ok",
+                "result": {
+                    "events": [{
+                        "id": 1,
+                        "kind": "mission-created",
+                        "data": {
+                            "cwd": "/private/event-path-sentinel",
+                            "terminal_output": "raw-terminal-sentinel",
+                            "summary": "mission created"
+                        }
+                    }]
+                },
+                "error": null
+            }),
+        )
+        .unwrap();
+
+    let secret = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped("read-only", &bridge_coordinator::auth::sha256_hex(&secret), None, &["read".to_string()])
+        .unwrap());
+    let mut reader = env.api();
+    reader.bearer = Some(secret);
+    let (status, response) = reader.get("/api/v1/commands/private-command-1").await;
+    assert_eq!(status, 200, "{response}");
+    let serialized = response.to_string();
+    for sentinel in [
+        "/private/request-path-sentinel",
+        "private-request-prompt-sentinel",
+        "/private/event-path-sentinel",
+        "raw-terminal-sentinel",
+    ] {
+        assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
+    }
+    assert_eq!(
+        response.pointer("/result/result/events/0/data/summary").and_then(Value::as_str),
+        Some("mission created")
+    );
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let env = boot().await;
     let api = env.admin().await;
