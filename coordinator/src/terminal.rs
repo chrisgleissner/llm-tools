@@ -436,7 +436,15 @@ pub async fn worker(
         Some(Ok(Some(w))) => w,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
-            return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
+            return if crate::db::is_busy(&e) {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database-busy",
+                    "the database did not answer in time; retry shortly",
+                )
+            } else {
+                fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
+            };
         }
         _ => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or revoked worker token"),
     };
@@ -449,7 +457,15 @@ pub async fn worker(
             Ok(false) => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "worker client certificate does not match token"),
             Err(e) => {
                 eprintln!("database error: {e}");
-                return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
+                return if crate::db::is_busy(&e) {
+                    fail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "database-busy",
+                        "the database did not answer in time; retry shortly",
+                    )
+                } else {
+                    fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
+                };
             }
         }
     }

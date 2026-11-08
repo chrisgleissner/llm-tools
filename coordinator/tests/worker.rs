@@ -956,6 +956,41 @@ async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
     env.stop().await;
 }
 
+/// The disconnect is written to the database after the worker has been seen offline. A client that polls
+/// the command right then must still get the finished read, even when the commit is slow: the command
+/// read waits for the write that is under way instead of answering from the older snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_command_polled_while_the_disconnect_is_committing_is_seen_finished() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let (st, _) = api
+        .post("/api/v1/commands", json!({"target": "w1", "request": request("read-slow", "mission.list")}))
+        .await;
+    assert_eq!(st, 202);
+    assert_eq!(fw.recv().await["payload"]["request_id"], "read-slow");
+
+    // Another connection holds SQLite's write lock for a second, so the disconnect's commit is slow.
+    let path = bridge_coordinator::db_path(&env.dir);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(1000));
+        c.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx.recv().unwrap();
+    drop(fw);
+    wait_offline(&api).await;
+    let (_, read) = api.get("/api/v1/commands/read-slow").await;
+    assert_eq!(read["state"], "done", "{read}");
+    assert_eq!(read["result"]["error"]["code"], "worker-offline");
+    holder.join().unwrap();
+    env.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed() {
     let env = boot().await;

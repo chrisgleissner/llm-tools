@@ -31,6 +31,15 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
         .into_response()
 }
 
+/// 503 when the database did not answer in time (a slow commit), 500 for any other storage error.
+fn db_failure(e: &rusqlite::Error) -> Response {
+    if crate::db::is_busy(e) {
+        plain(StatusCode::SERVICE_UNAVAILABLE, "the database did not answer in time; retry shortly")
+    } else {
+        plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+    }
+}
+
 pub async fn connect(
     State(st): State<St>,
     Extension(peer): Extension<Peer>,
@@ -47,7 +56,7 @@ pub async fn connect(
         Some(Ok(Some(authenticated))) => authenticated,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
-            return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            return db_failure(&e);
         }
         _ => return plain(StatusCode::UNAUTHORIZED, "invalid or revoked worker token"),
     };
@@ -61,7 +70,7 @@ pub async fn connect(
             Ok(false) => return plain(StatusCode::UNAUTHORIZED, "worker client certificate does not match token"),
             Err(e) => {
                 eprintln!("database error: {e}");
-                return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+                return db_failure(&e);
             }
         }
     }
@@ -347,8 +356,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
         let _ = socket.send(close_frame(code, reason)).await;
     }
     if st.hub.unregister(&name, conn_id) {
-        let _ = st.db.worker_disconnected(&name);
-        expire_reads(&st, &name);
+        worker_gone(&st, &name);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
     }
@@ -356,7 +364,17 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
 
 /// Finish the worker's unanswered read-only commands with a `worker-offline` failure and tell the browsers.
 fn expire_reads(st: &St, name: &str) {
-    match st.db.commands_expire_reads(name) {
+    notify_finished(st, st.db.commands_expire_reads(name));
+}
+
+/// The worker's connection ended: record it and finish its unanswered read-only commands in one
+/// transaction, so that a client that sees the worker offline and then reads a command sees it finished.
+fn worker_gone(st: &St, name: &str) {
+    notify_finished(st, st.db.worker_gone(name));
+}
+
+fn notify_finished(st: &St, rows: rusqlite::Result<Vec<crate::db::CommandRow>>) {
+    match rows {
         Ok(rows) => {
             for row in rows {
                 st.hub.publish(json!({"type": "command", "command": row.to_notice()}));

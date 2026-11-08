@@ -71,10 +71,10 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 311 |
+| Verified `[x]` | 312 |
 | Incomplete `[~]` | 82 |
 | Blocked `[!]` | 5 |
-| Not started `[ ]` | 43 |
+| Not started `[ ]` | 42 |
 | **Total** | **441** |
 
 The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Two of the verified rows (DOG-023, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 rather than by new evidence; each row says so.

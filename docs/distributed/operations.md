@@ -101,6 +101,36 @@ messages to standard error; under the systemd user unit read them with
 `journalctl --user -u llm-bridge-worker`. `llm-bridge worker audit` shows what the
 worker accepted and refused.
 
+### The coordinator backup is refused, slow or fails
+
+`bridge-coordinator backup` prints its plan before it copies anything: pages in use, free
+pages, the measured write rate and the estimated duration against the budget.
+
+- "exceeds the budget": the estimate is above 15 minutes (`--budget-minutes`). The
+  database is large or the card is slow. Stop the service and run `bridge-coordinator
+  compact` if it holds many free pages (the start-up log says so), or accept the estimate
+  with `--force`, or give the rate you have measured with `--assume-mb-s`.
+- "not enough free space": the output directory needs about the size of the pages in use.
+- The copy runs at nice 19 and a capped write rate (`--max-mb-s`, default 6), so it takes
+  minutes on a large database by design; the progress lines show the rate and the time
+  left. While it runs the web console and worker connections keep working. If they do
+  not, run `bridge-coordinator health` and report the figures `backup` printed.
+- A hidden `.NAME.partial-PID` file next to the output is the unfinished copy of a backup
+  that was killed; delete it, it is not a backup. `backup-check` ignores it.
+- `scripts/coordinator_offsite_backup.py` prints which stage failed and the command that
+  resumes it; see install.md (Backup and restore).
+
+### Requests answer 503 `database-busy`
+
+The coordinator keeps answering `/healthz`, accepting connections and completing TLS
+handshakes while the database is slow, but a request that needs the database waits at most
+3 s for it and then gets 503 `database-busy` (`Retry-After: 2`). Workers close and
+reconnect with their backoff. A short burst is a slow commit on the storage; a lasting
+one means something holds the database write lock for long (a backup from an older
+version, a second process) or the card is failing. `bridge-coordinator health` and the
+coordinator's standard error (`database error: ...`) show it; the service recovers by
+itself when the commit ends.
+
 ### Worker shows offline
 
 A worker is offline when it has no open control connection. The worker retries with an
