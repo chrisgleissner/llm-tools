@@ -44,6 +44,8 @@ export interface HeaderHandlers {
   copy(text: string, what: string): void;
 }
 
+const wide = window.matchMedia("(min-width: 30rem)");
+const LOADING = "Loading the task list";
 const known = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && v.toLowerCase() !== "unknown";
 
 /** "Codex gpt-5": provider and model from the status projection. Unknown parts are omitted. */
@@ -129,7 +131,7 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
   const retry = (): void => {
     const n = retryOrdinal(m);
     const t = find(n);
-    out.push(b(n ? `Retry task ${n}` : "Retry", "retry", () => t && hd.retry(t), primary(), why || (t ? "" : "Loading the task list")));
+    out.push(b(n ? `Retry task ${n}` : "Retry", "retry", () => t && hd.retry(t), primary(), why || (t ? "" : LOADING)));
   };
   if (status === "FAILED") return retry(), out;
   if (!finished && s === "failed") {
@@ -138,7 +140,7 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
     const ords = approvalOrdinals(m);
     if (ords.length === 1) {
       const t = find(ords[0]);
-      const loading = why || (t ? "" : "Loading the task list");
+      const loading = why || (t ? "" : LOADING);
       const approve = b("Approve", "approve", () => t && hd.approve(t), primary(), loading);
       approve.setAttribute("aria-label", `Approve task ${ords[0]}`); // the task number is in the answer line and the row; the name keeps it
       out.push(approve);
@@ -149,8 +151,8 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
   if (status === "CREATED" || status === "STOPPED" || status === "QUEUED" || status === "READY") out.push(b("Start", "start", hd.start, primary()));
   else if (status === "PAUSED") out.push(b("Resume", "resume", hd.resume, primary()));
   else if (pausable) out.push(b("Pause", "pause", hd.pause));
-  // Stop beside Reject is a plain button: two red outlines side by side invite the wrong tap.
-  if (pausable || status === "PAUSED") out.push(b("Stop", "stop", hd.stop, out.some((x) => x.dataset["action"] === "reject") ? "" : "danger"));
+  // Stop beside a Reject that is shown (from 30rem; below it Reject is in the menu) is a plain button: two red outlines side by side invite the wrong tap.
+  if (pausable || status === "PAUSED") out.push(b("Stop", "stop", hd.stop, wide.matches && out.some((x) => x.dataset["action"] === "reject") ? "" : "danger"));
   return out;
 }
 
@@ -163,7 +165,7 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
   const awaiting = !finished && m.state.id === "needs-approval" ? approvalOrdinals(m) : [];
   if (awaiting.length === 1) {
     const t = m.tasks.find((x) => x.ordinal === awaiting[0]);
-    items.push({ label: `Reject task ${awaiting[0]}`, danger: true, onSelect: () => t && hd.reject(t), disabled: Boolean(why) || !t, reason: why || (t ? "" : "Loading the task list") });
+    items.push({ label: `Reject task ${awaiting[0]}`, danger: true, onSelect: () => t && hd.reject(t), disabled: Boolean(why) || !t, reason: why || (t ? "" : LOADING) });
   }
   items.push({ label: "Copy mission ID", onSelect: () => hd.copy(m.missionId, "mission ID") });
   if (m.folder) items.push({ label: "Copy folder path", onSelect: () => hd.copy(m.folder, "folder path") });

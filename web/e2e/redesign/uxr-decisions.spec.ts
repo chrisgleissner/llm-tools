@@ -85,13 +85,17 @@ uxr({ t: "T48", uxr: ["UXR-014", "UXR-029"], needs: [...NEEDS] }, "D28.2: the wa
 });
 
 // ---- decision 3: Stop beside Reject, Undo for Pause ----------------------------------------------------------------------------
-uxr({ t: "T48", uxr: ["UXR-007"], needs: [...NEEDS] }, "D28.3: Stop has no danger outline beside Reject and stays visible; without Reject it keeps it", async ({ page }) => {
+uxr({ t: "T48", uxr: ["UXR-007"], needs: [...NEEDS] }, "D28.3: Stop has no danger outline beside a shown Reject and stays visible", async ({ page }) => {
   await openApp(page, { auth: "in" }, MISSION_URL);
   const stop = page.locator('[data-l0="mission.header"] [data-action="stop"]');
-  await expect(page.locator('[data-l0="mission.header"] [data-action="reject"]')).toHaveClass(/danger/);
+  const reject = page.locator('[data-l0="mission.header"] [data-action="reject"]');
   await expect(stop).toBeVisible();
   await expect(stop).toBeEnabled();
-  await expect(stop, "Stop beside Reject is plain").not.toHaveClass(/danger/);
+  // Below 30rem Reject is in the menu, so nothing red stands beside Stop and it keeps its outline.
+  if (await reject.isVisible()) {
+    await expect(reject).toHaveClass(/danger/);
+    await expect(stop, "Stop beside Reject is plain").not.toHaveClass(/danger/);
+  } else await expect(stop, "Reject is in the menu: Stop keeps its outline").toHaveClass(/danger/);
 });
 
 uxr({ t: "T48", uxr: ["UXR-007"], needs: [...NEEDS] }, "D28.3: without Reject, Stop keeps its danger outline", async ({ page }) => {
