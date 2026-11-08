@@ -19,7 +19,8 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   serve [--web-dir DIR]
   worker add NAME [--client-cert-file FILE --client-key-file FILE] | worker rotate-token NAME | worker revoke NAME
   admin reset-password [--keep-api-tokens]
-                                (new password on stdin; revokes all API tokens unless kept)
+                                (local recovery; clears TOTP and recovery codes, deletes sessions;
+                                 revokes all API tokens unless kept)
   admin reset-passkeys          (local recovery; deletes all passkeys and browser sessions)
   cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
                                                     within the CA's name constraints)
@@ -309,18 +310,18 @@ async fn run(args: Args) -> Result<(), String> {
             let password = line.trim_end_matches(['\n', '\r']);
             auth::valid_password(password)?;
             let revoked = db
-                .admin_set_password(&auth::hash_password(password), args.keep_api_tokens)
+                .admin_reset_password_local(&auth::hash_password(password), args.keep_api_tokens)
                 .map_err(|e| e.to_string())?;
             db.audit(
                 "cli",
                 "password.reset",
-                &format!("all sessions deleted; {revoked} API token(s) revoked"),
+                &format!("all sessions and TOTP recovery state deleted; {revoked} API token(s) revoked"),
                 "local",
             );
             if args.keep_api_tokens {
-                println!("password changed; all sessions deleted; API tokens kept (--keep-api-tokens)");
+                println!("password reset; all sessions and TOTP recovery state cleared; API tokens kept (--keep-api-tokens)");
             } else {
-                println!("password changed; all sessions deleted; {revoked} API token(s) revoked");
+                println!("password reset; all sessions and TOTP recovery state cleared; {revoked} API token(s) revoked");
             }
             Ok(())
         }

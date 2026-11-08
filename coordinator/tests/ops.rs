@@ -196,11 +196,19 @@ fn recovery_commands_reset_password_and_certificates() {
     let db = Db::open(&db_path(&dir)).unwrap();
     db.admin_create("admin", "old-hash").unwrap();
     db.session_create("tokenhash", "csrf").unwrap();
+    let principal = db.admin_principal_id().unwrap().unwrap();
+    db.totp_pending_set(&principal, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+    db.totp_enable_with_recovery_codes(&principal, &["$argon2id$recovery-hash".into()], 1).unwrap();
+    db.admin_set_password("browser-change-hash", true).unwrap();
+    assert!(db.totp_get(&principal).unwrap().unwrap().1, "browser password changes must preserve MFA");
+    assert_eq!(db.recovery_code_hashes(&principal).unwrap().len(), 1);
     let o = run(&["admin", "reset-password", "--data-dir", d], Some("a long enough password\n"));
     assert!(o.status.success(), "{}", text(&o));
     let (_, hash) = db.admin_get().unwrap().unwrap();
     assert!(hash.starts_with("$argon2id$"), "{hash}");
     assert_eq!(db.session_count().unwrap(), 0, "all sessions deleted");
+    assert!(db.totp_get(&principal).unwrap().is_none(), "local password recovery clears a lost TOTP factor");
+    assert!(db.recovery_code_hashes(&principal).unwrap().is_empty());
     assert!(!run(&["admin", "reset-password", "--data-dir", d], Some("short\n")).status.success());
 
     // cert renew within the CA's name constraints works.

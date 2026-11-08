@@ -929,8 +929,20 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
     }
     let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let totp = st.db.totp_get(&principal)?;
+    let totp_enabled = totp.as_ref().is_some_and(|(_, enabled, _)| *enabled);
+    if password_login_blocked(st.cfg.exposure, totp_enabled) {
+        attempt.fail();
+        st.db
+            .audit(&clean(&username), "login.failure", "Internet exposure requires TOTP for password sign-in", &ip);
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "invalid-credentials",
+            "password sign-in requires a second factor in Internet mode; use a passkey or enable TOTP",
+        ));
+    }
     let mut used_recovery_code = false;
-    if let Some((secret, enabled, _)) = st.db.totp_get(&principal)? {
+    if let Some((secret, enabled, _)) = totp {
         if enabled {
             let mut mfa_ok = false;
             if let Some(code) = totp_code.as_deref() {
@@ -982,6 +994,10 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
             .expect("cookie"),
     );
     Ok(r)
+}
+
+fn password_login_blocked(exposure: crate::config::Exposure, totp_enabled: bool) -> bool {
+    exposure == crate::config::Exposure::Internet && !totp_enabled
 }
 
 fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
@@ -3696,6 +3712,14 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[test]
+    fn internet_mode_never_allows_password_only_sign_in() {
+        assert!(password_login_blocked(crate::config::Exposure::Internet, false));
+        assert!(!password_login_blocked(crate::config::Exposure::Internet, true));
+        assert!(!password_login_blocked(crate::config::Exposure::Lan, false));
+        assert!(!password_login_blocked(crate::config::Exposure::Loopback, false));
+    }
 
     #[tokio::test]
     async fn internal_problem_is_generic_and_has_a_correlation_id() {

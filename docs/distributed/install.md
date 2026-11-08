@@ -337,9 +337,11 @@ All recovery commands run on the machine, as the service user, with the same dat
 directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 
 - Lost administrator password: `bridge-coordinator admin reset-password` reads the new
-  password from standard input (at least the minimum length), deletes every
-  session and revokes every API token (it prints how many; `--keep-api-tokens` keeps
-  them). Example: `printf '%s\n' "$NEW" | bridge-coordinator admin reset-password`.
+  password from standard input (at least the minimum length), deletes every session,
+  resets TOTP and its recovery codes, and revokes every API token (it prints how many;
+  `--keep-api-tokens` keeps them). Re-enroll TOTP after signing in. Browser password
+  changes preserve TOTP. Example:
+  `printf '%s\n' "$NEW" | bridge-coordinator admin reset-password`.
 - Expired certificate, or the machine's address or name changed: run
   `bridge-coordinator cert renew --hostname NAME --ip ADDR` (or without options to
   rediscover this machine's names) and restart the service. The CA is unchanged, so

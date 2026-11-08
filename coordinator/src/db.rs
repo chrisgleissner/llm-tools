@@ -911,10 +911,25 @@ impl Db {
     /// Set the password and delete every session in one transaction. Unless `keep_api_tokens`,
     /// every API token is revoked in the same transaction; returns how many were revoked.
     pub fn admin_set_password(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
+        self.admin_set_password_inner(hash, keep_api_tokens, false)
+    }
+
+    /// Local shell recovery also clears TOTP and recovery codes so a lost authenticator cannot
+    /// permanently lock out the administrator. Normal browser password changes preserve MFA.
+    pub fn admin_reset_password_local(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
+        self.admin_set_password_inner(hash, keep_api_tokens, true)
+    }
+
+    fn admin_set_password_inner(&self, hash: &str, keep_api_tokens: bool, clear_mfa: bool) -> R<usize> {
+        let principal = self.admin_principal_id()?.unwrap_or_else(|| "admin".into());
         let mut c = self.c();
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
+        if clear_mfa {
+            tx.execute("DELETE FROM totp_auth WHERE principal_id=?", [&principal])?;
+            tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [&principal])?;
+        }
         let revoked = if keep_api_tokens { 0 } else { tx.execute("DELETE FROM api_tokens", [])? };
         tx.commit()?;
         Ok(revoked)

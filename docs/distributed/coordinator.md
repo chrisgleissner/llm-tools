@@ -129,8 +129,8 @@ worker protocol is `protocol.md`.
   the staged token expires after 30 minutes. A wrong worker ID cannot promote
   it. Rotation keeps the worker ID, generation, opt-ins and mTLS certificate.
 - `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
-  sets a new password from stdin, deletes all sessions and revokes every API token
-  (the number is printed) unless `--keep-api-tokens` is given.
+  sets a new password from stdin, deletes all sessions and the TOTP/recovery-code factor, and revokes every API token
+  (the number is printed) unless `--keep-api-tokens` is given. Enroll TOTP again after signing in; browser password changes preserve TOTP.
 - `bridge-coordinator admin reset-passkeys` (local shell recovery; clears passkeys, the canonical passkey origin, challenges and browser sessions).
 - `bridge-coordinator cert renew [--hostname ...] [--ip ...]` replaces the
   server certificate from the existing CA (names must be within the CA's name
@@ -163,14 +163,14 @@ Public:
 | GET | `/healthz` | `{"status":"ok"}` only. |
 | GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
-| POST | `/api/v1/auth/login` | `{username, password, remember?, totp_code? | recovery_code?}`. When optional TOTP is enabled, password plus exactly one valid TOTP or unused recovery code is required. Recovery codes are consumed once and their use is audited and notified. `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error for invalid password or MFA. |
+| POST | `/api/v1/auth/login` | `{username, password, remember?, totp_code? | recovery_code?}`. When optional TOTP is enabled, password plus exactly one valid TOTP or unused recovery code is required. Password sign-in also requires this second factor in Internet mode; without TOTP there, use passkey sign-in. Recovery codes are consumed once and their use is audited and notified. `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error for invalid password or MFA. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
-| POST | `/auth/password` | `{current, new}`; deletes every session. |
+| POST | `/auth/password` | `{current, new}`; deletes every session but preserves TOTP and recovery codes. |
 | POST | `/auth/totp/enroll` | Browser session only; `{current_password}` starts enrollment and returns a pending Base32 secret and `otpauth://` URI. |
 | POST | `/auth/totp/confirm` | Browser session only; `{code}` confirms possession and returns ten one-time recovery codes once. Only Argon2id hashes are stored. |
 | POST | `/auth/totp/disable` | Browser session only; `{current_password, code}` disables TOTP and deletes stored recovery-code hashes. |
