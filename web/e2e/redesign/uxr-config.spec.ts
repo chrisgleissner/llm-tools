@@ -1,4 +1,4 @@
-// T45 (UXR-037): playwright.config.ts defines the nine matrix projects and CI runs them.
+// T45 (UXR-037): playwright.config.ts defines the nine matrix projects and CI runs them (and keeps the typing-latency test T36 alone).
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import config from "../../playwright.config";
@@ -19,7 +19,11 @@ uxrStatic({ t: "T45", uxr: ["UXR-037"], needs: [] }, "playwright.config.ts defin
   }
   // Two more projects run only the click-path specs (UXR-043 to UXR-046) at the two smallest phone sizes.
   for (const name of ["paths-320x568", "paths-360x640"]) expect(names, `click-path project ${name}`).toContain(name);
-  expect(projects.length, "four existing projects, nine matrix projects and two click-path projects").toBe(15);
+  // T36 typing under a terminal flood runs in a project of its own that every other project depends on, so it is the only test running while it measures.
+  const typing = projects.find((p) => p.name === "typing-flood");
+  expect(String(typing?.testMatch), "typing-flood runs the typing spec only").toContain("uxr-typing");
+  for (const p of projects.filter((q) => q.name !== "typing-flood")) expect(p.dependencies, `${p.name} waits for typing-flood`).toEqual(["typing-flood"]);
+  expect(projects.length, "typing-flood, four existing projects, nine matrix projects and two click-path projects").toBe(16);
 });
 
 uxrStatic({ t: "T45", uxr: ["UXR-037"], needs: [] }, "the CI workflow runs the matrix projects", async () => {
