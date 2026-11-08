@@ -130,12 +130,13 @@ pub fn reset_password(db: &Db, opts: &Options, input: &mut dyn PasswordInput) ->
 }
 
 impl Db {
+    crate::db::offload_impl! {
     /// In one transaction: set the password, delete every session, revoke every API token unless
     /// `keep_api_tokens`, record the reset time, set (`must_change`) or clear the change-required
     /// flag, and write the audit entry. Returns the number of revoked tokens.
     pub fn admin_reset(&self, hash: &str, keep_api_tokens: bool, must_change: bool) -> rusqlite::Result<usize> {
         let principal = self.admin_principal_id()?.unwrap_or_else(|| "admin".into());
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
@@ -182,7 +183,8 @@ impl Db {
     }
 
     fn meta_value(&self, key: &str) -> rusqlite::Result<Option<String>> {
-        self.c().query_row("SELECT value FROM meta WHERE key=?", params![key], |r| r.get(0)).optional()
+        self.r()?.query_row("SELECT value FROM meta WHERE key=?", params![key], |r| r.get(0)).optional()
+    }
     }
 }
 

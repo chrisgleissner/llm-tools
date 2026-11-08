@@ -78,6 +78,16 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         None
     };
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    if let Ok((free, total, incremental)) = db.free_space() {
+        if !incremental && free >= 32 * 1024 * 1024 && free * 4 >= total {
+            eprintln!(
+                "bridge-coordinator: {} MiB of the {} MiB database file is free space that this file cannot give back; \
+                 stop the service and run `bridge-coordinator compact` to shrink it (backups and later growth stay small afterwards)",
+                free >> 20,
+                total >> 20
+            );
+        }
+    }
     validate_internet_runtime(&cfg, &db)?;
     if db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))?.is_some() {
         let principal = db
@@ -174,6 +184,8 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         shutdown: shutdown_rx.clone(),
         web_dir,
     });
+    // Each connection has at most one database call in flight, so a burst can queue `max_connections` callers.
+    state.db.set_max_lock_waiters(state.cfg.max_connections.saturating_add(32));
     let lock = crate::ops::lock_data_dir(data_dir)?;
     let limits = ConnLimits {
         max_connections: state.cfg.max_connections,
@@ -387,10 +399,22 @@ async fn accept_loop(task: ListenerTask) {
     } = task;
     let mut conns: JoinSet<()> = JoinSet::new();
     let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
+    let mut maintenance_run: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = maintenance.tick(), if maintenance_owner => { if let Err(e) = db.maintenance() { eprintln!("maintenance failed: {e}"); } }
+            _ = maintenance.tick(), if maintenance_owner => {
+                // Off the runtime threads, and never two passes at once: a pass over a large backlog
+                // takes the connection mutex statement by statement and must not stop the accept loop.
+                if maintenance_run.as_ref().is_none_or(|h| h.is_finished()) {
+                    let db = db.clone();
+                    maintenance_run = Some(tokio::task::spawn_blocking(move || {
+                        if let Err(e) = db.maintenance() {
+                            eprintln!("maintenance failed: {e}");
+                        }
+                    }));
+                }
+            }
             Some(_) = conns.join_next(), if !conns.is_empty() => {}
             accepted = listener.accept() => {
                 let Ok((tcp, peer)) = accepted else { continue };

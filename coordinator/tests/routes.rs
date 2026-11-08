@@ -135,9 +135,7 @@ async fn browser_api_and_worker_credentials_cannot_cross_route_groups() {
     let mut browser = env.admin().await;
     let worker_token = browser.add_worker("w1").await;
     let (_worker, _) = Fw::connect(&env, &worker_token, "principal-isolation", 0).await;
-    let (created_status, created) = browser.post("/api/v1/tokens", serde_json::json!({"name":"admin-api","scopes":["admin"]})).await;
-    assert_eq!(created_status, 201, "{created}");
-    let api_token = created["secret"].as_str().unwrap();
+    let api_token = env.test_api_token("admin-api", &["admin"]);
 
     let worker_token_on_api = browser
         .send(
@@ -288,15 +286,8 @@ async fn fetch_metadata_blocks_cross_site_cookie_requests_except_console_navigat
         .await;
     refused_with(websocket.expect_err("cross-site WebSocket request must be rejected"), 403);
 
-    let (status, created) = admin
-        .post(
-            "/api/v1/tokens",
-            serde_json::json!({"name":"metadata-check","scopes":["admin"],"expires_days":1}),
-        )
-        .await;
-    assert_eq!(status, 201, "{created}");
     let mut bearer = env.api();
-    bearer.bearer = created["secret"].as_str().map(str::to_string);
+    bearer.bearer = Some(env.test_api_token("metadata-check", &["admin"]));
     let (status, _) = bearer
         .send(
             bearer

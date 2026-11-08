@@ -507,9 +507,131 @@ The operator delegated the remaining open questions: "All other questions answer
 - PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
 - DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
 
+## D29 Coordinator backups and database access (DOG-024)
 
+Cause. On the Pi, `backup` ran for more than 35 minutes and the coordinator answered
+neither HTTPS nor worker TLS handshakes. The old backup opened the database from a second
+process and used the SQLite backup API in steps of 256 pages. SQLite restarts such a
+backup from the first page when another connection commits between two steps. A
+coordinator that receives events commits several times a second, so the copy could not
+finish: on the test fixture (174 MiB, one worker sending an event batch every 50 ms) it
+wrote 8.7 GiB in 60 seconds and never completed. Each step also committed the copy's
+rollback journal with fsyncs, so the restarted copies kept the card busy. The likely
+mechanism of the TLS stall, which was not observed directly: on ext4 a commit by the
+coordinator (`synchronous=FULL`) waits for the dirty data of the same journal
+transaction, and the coordinator runs database calls on two runtime threads behind one
+connection mutex, so a commit that waits on the card stops both threads and with them
+the TLS accept loop. That stall cannot be reproduced on an NVMe host (the slowest
+health request there was 177 ms during the old backup); the livelock and the write
+volume are measured, and the test fails on the old binary because the backup never
+finishes.
 
-## D28 Measured headroom for the consolidated account view (WEB-010)
+Decision. The backup is `VACUUM INTO` from a read snapshot (cannot be restarted, copies
+only pages in use), paced to a write rate cap with a flush every MiB, at nice 19 and idle
+I/O, with a preflight estimate, a budget and progress. Retention: result bodies of
+finished commands are dropped after an hour (read-only) or a day (mutating), finished
+command rows are capped at 5 000, and the hourly pass runs on a blocking thread in
+50-row statements. New databases use incremental auto-vacuum; each hourly pass returns at
+most 8 MiB of free pages; `compact` converts an old database offline. The Python worker
+already does not replicate controller heartbeats or superseded capacity refreshes
+(DF-019/020), so the coordinator stores no plumbing it would never read.
+
+Rejected: continuous WAL shipping (Litestream style) for the pre-upgrade step. It needs a
+long-running replica process and a second storage target on a host with 512 MB of RAM,
+and it holds a read snapshot open that stops WAL checkpoints. The design, if the recovery
+point has to shrink to seconds: a sidecar tails `coordinator.sqlite3-wal` frames after
+`PRAGMA wal_autocheckpoint=0` is replaced by a checkpoint that the sidecar runs, ships
+each new frame range (salt and frame counters identify the generation) to the
+off-device store, and takes a fresh `backup` snapshot per day; restore is the newest
+snapshot plus the frames of its generation. Because the workers re-send replicated
+events, the missing piece is only coordinator-local state, so a recent snapshot with an
+age check (`backup-check`) is what ships now.
+
+Database access off the runtime threads. The coordinator called SQLite synchronously from
+request handlers on its two runtime threads, behind one connection mutex. One slow commit
+(or one holder of SQLite's write lock) therefore stopped both threads: the accept loop,
+TLS handshakes and `/healthz` stopped with them, and a pile of handlers waiting on the
+mutex had no limit. Reproduced with a second connection holding the write lock for 6 s:
+the old code did not run a 300 ms timer for 4.7 s. Every public `Db` method now runs
+through `db::blocking`, which uses `tokio::task::block_in_place` on a multi-thread runtime,
+so the worker hands its core to another thread while the call waits or commits (a
+`macro_rules!` wraps the whole `impl Db`, so no call site changed). The connection
+is handed out first come first served through a queue (`db::Gate`; each waiter sleeps on
+its own condition variable and the releasing caller wakes only the head of the queue). A
+caller waits at most 3 s (`db::set_lock_wait` for tests) and at most `max_connections` + 32
+callers may wait (every connection has one call in flight; 288 by default); beyond either
+the caller gets `SQLITE_BUSY`, which HTTP and the worker
+upgrade report as 503 `database-busy` with `Retry-After`, and the worker channel closes
+with 1011 and reconnects. `/healthz` never touches the database. Rejected: a dedicated
+database thread with a queue (every call site would have to become async, and the
+authentication helpers called from synchronous extractors would cascade). A poisoned
+connection mutex is recovered, and the waiter count is released on every exit path, so
+serving continues when the slow commit ends; `coordinator/tests/db_stall.rs` checks that,
+and the unit tests in `db.rs` (`lock_wait_tests`) check the bounds.
+
+The first version of this bound polled `try_lock` with a short sleep and allowed 48 waiters.
+That was wrong in two ways, found when the login-burst test in `hardening.rs` (60 concurrent
+sign-ins) answered 503 on the Windows runners and `coordinator/tests/db_lock_burst.rs` showed
+the same on Linux: 2 of 60 requests refused with `too many requests are waiting`, peak 49
+waiters, while the longest hold of the connection was 0.23 ms. Nothing slow runs under the
+connection on the login path (the password hash runs in `verify_blocking`, outside it; the
+locked sections are one read, one small write and the audit insert). A burst of N requests
+queues about N callers at once because they all arrive within a millisecond, and polling made
+the queue drain slowly and unfairly (on Windows a sleep lasts about 15 ms; with a 15 ms floor on
+Linux 7 of 60 were refused). Measured after the change: bursts of 60, 256 and 288 requests
+queue a peak of 56, 247 and 260 callers, none is refused, longest hold 0.8 to 3.6 ms. The limit
+now follows `max_connections` (the number of calls that can be in flight), clamped to 480 so the
+waiting threads stay below the 512 of tokio's blocking pool.
+
+Reads on their own connections. A control run of the serving test without any backup failed on the
+hosted Windows runners (event batch commits of 0.8 to 3 s, `/api/v1/auth/state` answering 503), so the
+single connection was the bottleneck even without a backup: a read queued behind a committing write.
+Reads now use up to four read-only connections (`PRAGMA query_only`) to the same WAL file, opened on
+demand (`Db::r`). A read runs from the snapshot committed when its statement began and does not wait for the
+writer or for a backup. Each `Db` method is one or the other: the lists, `admin_get`, `events_list`,
+`worker_get` and the like read only; a method that reads and then maybe writes does its read on a reader and
+takes the writer only for the write (`session_get` deletes an expired session or touches `last_seen`,
+`token_lookup`, `cursor_key`, `known_addr` writes the salt once). Writes keep one connection with the
+first-come queue and the 3 s bound. A read waits (at most 3 s) only when all four read connections are in
+use by other reads, which take microseconds. Measured with `a_slow_commit_...` in `db_stall.rs`, a second
+connection holding SQLite's write lock for 6 s and one write waiting in SQLite's busy handler: before,
+`/api/v1/auth/state` answered 503 after 3.0 s and the workers list waited 1.5 s; after, the auth state,
+workers, missions and events lists answer 200 in 1 to 2 ms. A worker connect, which only checks the token,
+is admitted at once instead of getting 503; its hello (a write) waits. Test expectations that said
+"queued reads get 503" were changed accordingly. Calls that take 500 ms or more, and retention steps that
+hold the connection that long, are written to stderr (`slow database call <name>`); that log stays because
+it names the call that held the writer.
+
+Reads after writes. With reads on their own connections, a read no longer queues behind a write that
+is already under way, so a client could see state older than a write that the coordinator had just made.
+Found on the Windows runners: `unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed`
+polled a read-only command after the worker was seen offline (the in-memory hub changes first) and got
+`sent` because the disconnect's commit was still running; with a 400 ms delay in that commit the test fails
+every time on a plain reader and passes with the change below. Two changes: the disconnect writes the
+worker row and finishes the worker's unanswered reads in one transaction (`Db::worker_gone`), and the
+command read (`command_get`) uses `Db::r_after_writes`, which waits (at most 3 s, 503 `database-busy`
+after that) until the writes that had asked for the writer connection when the read began have finished
+or given up. Other reads, including the worker, mission, event and auth lists, never wait for a writer, so
+they can lag a commit that is still running; the commits that these reads must follow (the worker hello)
+finish before the coordinator answers the worker. Regression test:
+`a_read_command_polled_while_the_disconnect_is_committing_is_seen_finished` in `tests/worker.rs` (fails on a
+plain reader), plus a unit test in `db.rs`.
+
+Backup priority outside Linux. On Linux the backup runs at nice 19 and in the idle I/O class. Windows uses
+background mode (`PROCESS_MODE_BACKGROUND_BEGIN`; the copy then ran at 1.4 to 2 MiB/s). macOS uses nice 19
+only: with the Darwin background class (`PRIO_DARWIN_BG`), which also throttles disk I/O, the copy and its
+integrity check on the macOS ARM64 runner made no progress for over a minute (run 42457434409: copy done in
+27 s, `integrity_check` unfinished after 63 s more) while the coordinator kept writing. The write cap limits
+the copy's I/O there.
+
+The copy's flush interval stays 1 MiB on every platform: a 32 MiB interval on macOS and Windows made the
+copy stop at 60 of 98 MiB on the macOS ARM64 runner (no progress for 80 s).
+
+Remaining limit: a commit that holds the writer connection for longer than the wait still makes
+requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
+card itself are outside what the process can control; the backup no longer causes them.
+
+## D30 Measured headroom for the consolidated account view (WEB-010)
 
 After merging the active-session controls, scoped API-token management, paged audit history and
 passkey metadata, the production build measured 376,680 raw / 101,373 gzip bytes across the
@@ -518,7 +640,7 @@ Keep these screens on the lazy path so first-run and sign-in downloads remain un
 lazy cap to 377,000 raw / 102,000 gzip, under 0.7% raw headroom above the measured bundle. A later
 addition must still fit this explicit limit or record a new measurement and reason.
 
-## D29 Measured budget for passkey account management (PK-006, WEB-010)
+## D31 Measured budget for passkey account management (PK-006, WEB-010)
 
 The Chromium production build with Account-screen passkey registration, rename and removal
 measured 381,268 raw / 103,006 gzip bytes across lazy JavaScript chunks (Playwright
@@ -528,7 +650,7 @@ headroom; do not increase the cap again without another measured reason.
 
 In the code: `web/budget.json`, `web/src/views/account.ts`, and `web/src/passkeys.ts`.
 
-## D30 Passkey records use the stable principal ID (SEC2-019, PK-006)
+## D32 Passkey records use the stable principal ID (SEC2-019, PK-006)
 
 Passkey credentials, canonical origins and ceremonies use the stable principal ID, never the
 administrator's chosen username. The previous implementation mixed both identities, which made a
@@ -541,7 +663,7 @@ changes independent of credential ownership.
 In the code: `coordinator/src/db.rs::MIGRATE_V22`, `coordinator/src/http.rs`, and
 `coordinator/src/server.rs`; regressions are `coordinator/tests/passkeys.rs::schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal` and `coordinator/tests/web_api.rs::passkey_management_requires_fresh_session_and_is_principal_scoped`.
 
-## D31 Distinguish passkey step-up from password step-up (PK-008, PK-009)
+## D33 Distinguish passkey step-up from password step-up (PK-008, PK-009)
 
 Passkey step-up uses a separate five-minute WebAuthn challenge kind bound to the active
 principal and session token hash. Successful assertion rotates the session and stores

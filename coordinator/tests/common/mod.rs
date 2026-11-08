@@ -102,6 +102,38 @@ impl Env {
             bearer: None,
         }
     }
+    /// Seed a short-lived API token directly for tests whose subject is route authentication rather
+    /// than token issuance. Token creation itself requires fresh passkey step-up.
+    pub fn test_api_token(&self, name: &str, scopes: &[&str]) -> String {
+        let secret = "integration-test-secret";
+        let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_string()).collect();
+        let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&self.dir)).unwrap();
+        assert!(db
+            .token_create_scoped(
+                name,
+                &bridge_coordinator::auth::sha256_hex(secret),
+                Some(bridge_coordinator::now() + 3600),
+                &scopes,
+            )
+            .unwrap());
+        secret.to_string()
+    }
+
+    /// Mark the current session as freshly stepped up with a passkey for route tests that exercise
+    /// the operation behind that gate. Ceremony verification is tested separately end to end.
+    pub fn test_passkey_step_up(&self, api: &Api) {
+        let cookie = api.cookie.as_deref().expect("authenticated test session");
+        let token_hash = bridge_coordinator::auth::sha256_hex(cookie);
+        let connection = rusqlite::Connection::open(bridge_coordinator::db_path(&self.dir)).unwrap();
+        let changed = connection
+            .execute(
+                "UPDATE sessions SET fresh_auth_until=?1,fresh_auth_method='passkey' WHERE token_hash=?2 AND expires_at>?3",
+                rusqlite::params![bridge_coordinator::now() + 600, token_hash, bridge_coordinator::now()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "test session must be marked with passkey step-up");
+    }
+
     pub async fn stop(self) {
         tokio::time::timeout(Duration::from_secs(10), self.srv.stop())
             .await

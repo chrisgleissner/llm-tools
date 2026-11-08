@@ -369,6 +369,7 @@ async fn event_list_rejects_unknown_query_parameters() {
 async fn security_notifications_are_durable_scoped_and_dismissible() {
     let env = boot().await;
     let api = env.admin().await;
+    env.test_passkey_step_up(&api);
     let (status, created) = api.post("/api/v1/tokens", json!({"name":"notice-token","scopes":["read"]})).await;
     assert_eq!(status, 201, "{created}");
     let (status, body) = api.get("/api/v1/security/notifications").await;
@@ -392,6 +393,7 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
 async fn security_audit_api_is_admin_only_and_detects_tampering() {
     let env = boot().await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     let (_, token) = admin.post("/api/v1/tokens", json!({"name":"audit-read","scopes":["read"]})).await;
     let denied = admin
         .bare(Method::GET, "/api/v1/audit")
@@ -498,6 +500,7 @@ async fn successful_sign_in_from_a_new_device_creates_a_notice_without_storing_u
 async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial() {
     let env = boot().await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     let (status, created) = admin
         .post(
             "/api/v1/tokens",
@@ -549,6 +552,7 @@ async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial()
 async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
     let env = boot().await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     for name in ["worker-a", "worker-b"] {
         let (status, body) = admin.post("/api/v1/workers", json!({"name":name})).await;
         assert_eq!(status, 201, "{body}");
@@ -797,6 +801,7 @@ async fn passkey_management_requires_fresh_session_and_is_principal_scoped() {
     assert_eq!(status, 404, "foreign passkey must be hidden: {problem}");
     assert_eq!(db.passkeys_for_principal("someone-else").unwrap()[0].user_name, "other device");
 
+    env.test_passkey_step_up(&api);
     let (status, created) = api.post("/api/v1/tokens", json!({"name":"passkey-test","scopes":["admin"]})).await;
     assert_eq!(status, 201, "{created}");
     let mut bearer = env.api();
@@ -973,6 +978,7 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
 async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
     let env = boot().await;
     let api = env.admin().await;
+    env.test_passkey_step_up(&api);
     let (status, created) = api
         .post("/api/v1/tokens", json!({"name":"automation","scopes":["read","operate"],"expires_days":30}))
         .await;
@@ -1043,6 +1049,7 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
 async fn token_last_use_address_uses_only_configured_trusted_proxy_headers() {
     let env = boot_with(|t| t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")).await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     let (status, created) = admin.post("/api/v1/tokens", json!({"name":"address-check","scopes":["read"]})).await;
     assert_eq!(status, 201, "{created}");
     let mut client = env.api();
@@ -1081,6 +1088,7 @@ async fn token_mutation_budget_keys_on_trusted_client_address() {
     })
     .await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     let (_, token) = admin.post("/api/v1/tokens", json!({"name":"automation","scopes":["admin"]})).await;
     let mut client = env.api();
     client.bearer = Some(token["secret"].as_str().unwrap().to_string());
@@ -1111,6 +1119,7 @@ async fn token_mutation_budget_keys_on_trusted_client_address() {
 async fn token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry() {
     let env = boot_with(|t| t.replace("max_token_lifetime_days = 3650", "max_token_lifetime_days = 1")).await;
     let api = env.admin().await;
+    env.test_passkey_step_up(&api);
     let (status, body) = api.post("/api/v1/tokens", json!({"name":"too-long","scopes":["read"],"expires_days":2})).await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["code"], "invalid-request");
@@ -1306,6 +1315,7 @@ async fn passkey_routes_stay_unavailable_on_ip_origins_and_unknown_credentials_f
 async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secret() {
     let env = boot().await;
     let admin = env.admin().await;
+    env.test_passkey_step_up(&admin);
     let (status, created) = admin
         .post("/api/v1/tokens", json!({"name":"mutator","scopes":["admin"],"expires_days":30}))
         .await;
