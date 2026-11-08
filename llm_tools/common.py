@@ -4290,178 +4290,186 @@ def run_pty_capture(
             os.waitpid(pid, 0)
             os.close(fd)
             raise
+    # The master end is owned here from now on; close it exactly once on every path
+    # (normal exit, timeout, autonomy abort, interrupt or an exception below).
     try:
-        if sys.stdout.isatty():
-            winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
-        else:
-            winsize = struct.pack("HHHH", 30, 240, 0, 0)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-    except OSError:
-        pass
-
-    chunks: list[str] = []
-    retained_bytes = 0
-    output_truncated = False
-
-    def append_output(text: str) -> None:
-        nonlocal retained_bytes, output_truncated
-        chunks.append(text)
-        retained_bytes += len(text.encode("utf-8", "replace"))
-        if max_output_bytes <= 0:
-            return
-        while chunks and retained_bytes > max_output_bytes:
-            excess = retained_bytes - max_output_bytes
-            first_bytes = chunks[0].encode("utf-8", "replace")
-            if len(first_bytes) <= excess:
-                retained_bytes -= len(first_bytes)
-                chunks.pop(0)
+        try:
+            if sys.stdout.isatty():
+                winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
             else:
-                trimmed = first_bytes[excess:].decode("utf-8", "replace")
-                chunks[0] = trimmed
-                retained_bytes -= excess
-            output_truncated = True
-    trust_sent = False
-    pending_prompt: str | None = None
-    combined = ""
-    exit_code = 124
-    start = time.monotonic()
-    last_progress = start
-    question_seen_at: float | None = None
-    abort_reason = ""
+                winsize = struct.pack("HHHH", 30, 240, 0, 0)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+        except OSError:
+            pass
 
-    def reap(status: int) -> int | None:
-        if os.WIFEXITED(status):
-            return os.WEXITSTATUS(status)
-        if os.WIFSIGNALED(status):
-            return 128 + os.WTERMSIG(status)
-        return None
+        chunks: list[str] = []
+        retained_bytes = 0
+        output_truncated = False
 
-    def record_abort(reason: str) -> None:
-        nonlocal abort_reason, exit_code
-        abort_reason = reason
-        exit_code = AUTONOMY_ABORT_STATUS
-        line = f"\nllm-scheduler: autonomous abort: {reason}\n"
-        append_output(line)
-        if stream:
-            os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
-
-    eof = False
-    try:
-        while True:
-            now = time.monotonic()
-            if now - start > timeout:
-                break
-            if idle_timeout > 0 and now - last_progress > idle_timeout:
-                record_abort(f"no output progress for {idle_timeout}s")
-                break
-            if question_idle_timeout > 0 and question_seen_at is not None and now - question_seen_at > question_idle_timeout:
-                record_abort(prompt_abort_reason(combined, f"question required a response for {question_idle_timeout}s", auto_confirm=auto_confirm))
-                break
-            ready, _, _ = select.select([fd], [], [], 0.2)
-            if fd in ready:
-                try:
-                    raw = os.read(fd, 65536)
-                except OSError:
-                    raw = b""
-                if not raw:
-                    eof = True
-                    if pending_prompt == "blocking":
-                        # The output ended on the prompt; nothing more will follow.
-                        record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
-                    break
-                text = raw.decode("utf-8", "replace")
-                append_output(text)
-                last_progress = time.monotonic()
-                if stream:
-                    try:
-                        os.write(sys.stdout.fileno(), raw)
-                    except OSError:
-                        stream = False
-                combined = strip_ansi("".join(chunks))
-                pending_prompt = None
-                if auto_confirm and not trust_sent and trust_prompt_at_tail(combined):
-                    pending_prompt = "trust"
-                elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
-                    pending_prompt = "blocking"
-                if pending_prompt is None and detect_prompts:
-                    # Armed only while the output still ends in a question;
-                    # any later output clears it.
-                    question_seen_at = time.monotonic() if ends_with_question(combined) else None
-            if pending_prompt is not None and time.monotonic() - last_progress >= PROMPT_QUIET_SECONDS:
-                if pending_prompt == "trust":
-                    os.write(fd, b"\r")
-                    trust_sent = True
-                    question_seen_at = None
-                    pending_prompt = None
+        def append_output(text: str) -> None:
+            nonlocal retained_bytes, output_truncated
+            chunks.append(text)
+            retained_bytes += len(text.encode("utf-8", "replace"))
+            if max_output_bytes <= 0:
+                return
+            while chunks and retained_bytes > max_output_bytes:
+                excess = retained_bytes - max_output_bytes
+                first_bytes = chunks[0].encode("utf-8", "replace")
+                if len(first_bytes) <= excess:
+                    retained_bytes -= len(first_bytes)
+                    chunks.pop(0)
                 else:
-                    record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                    trimmed = first_bytes[excess:].decode("utf-8", "replace")
+                    chunks[0] = trimmed
+                    retained_bytes -= excess
+                output_truncated = True
+        trust_sent = False
+        pending_prompt: str | None = None
+        combined = ""
+        exit_code = 124
+        start = time.monotonic()
+        last_progress = start
+        question_seen_at: float | None = None
+        abort_reason = ""
+
+        def reap(status: int) -> int | None:
+            if os.WIFEXITED(status):
+                return os.WEXITSTATUS(status)
+            if os.WIFSIGNALED(status):
+                return 128 + os.WTERMSIG(status)
+            return None
+
+        def record_abort(reason: str) -> None:
+            nonlocal abort_reason, exit_code
+            abort_reason = reason
+            exit_code = AUTONOMY_ABORT_STATUS
+            line = f"\nllm-scheduler: autonomous abort: {reason}\n"
+            append_output(line)
+            if stream:
+                os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
+
+        eof = False
+        try:
+            while True:
+                now = time.monotonic()
+                if now - start > timeout:
                     break
-            try:
-                done, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                done, status = pid, 0
-            if done == pid:
-                code = reap(status)
-                if code is not None:
-                    exit_code = code
-                if not eof:
-                    # The child can exit with output still unread in the pty
-                    # master: the loop reads at most one chunk per pass and
-                    # checks for exit afterwards. Collect the rest, otherwise
-                    # the last provider output is missing from the capture.
-                    for raw in drain_pty_master(fd):
-                        append_output(raw.decode("utf-8", "replace"))
-                        if stream:
-                            try:
-                                os.write(sys.stdout.fileno(), raw)
-                            except OSError:
-                                stream = False
-                break
-    except KeyboardInterrupt:
-        exit_code = 130
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                break
-            time.sleep(0.2)
-            try:
-                done, _status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if done == pid:
-                break
-    if exit_code == 124:
-        deadline = time.monotonic() + (5.0 if eof else 0.0)
-        while True:
-            try:
-                done, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if done == pid:
-                code = reap(status)
-                if code is not None:
-                    exit_code = code
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.01)
-    if exit_code in (124, AUTONOMY_ABORT_STATUS):
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                break
-            time.sleep(0.2)
-    text = strip_ansi("".join(chunks))
-    if output_truncated:
-        marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
-        text = marker + text
-    if output_path:
-        write_private_text(output_path, text)
-    if status_path:
-        write_private_text(status_path, str(exit_code))
-    return exit_code, text
+                if idle_timeout > 0 and now - last_progress > idle_timeout:
+                    record_abort(f"no output progress for {idle_timeout}s")
+                    break
+                if question_idle_timeout > 0 and question_seen_at is not None and now - question_seen_at > question_idle_timeout:
+                    record_abort(prompt_abort_reason(combined, f"question required a response for {question_idle_timeout}s", auto_confirm=auto_confirm))
+                    break
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if fd in ready:
+                    try:
+                        raw = os.read(fd, 65536)
+                    except OSError:
+                        raw = b""
+                    if not raw:
+                        eof = True
+                        if pending_prompt == "blocking":
+                            # The output ended on the prompt; nothing more will follow.
+                            record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                        break
+                    text = raw.decode("utf-8", "replace")
+                    append_output(text)
+                    last_progress = time.monotonic()
+                    if stream:
+                        try:
+                            os.write(sys.stdout.fileno(), raw)
+                        except OSError:
+                            stream = False
+                    combined = strip_ansi("".join(chunks))
+                    pending_prompt = None
+                    if auto_confirm and not trust_sent and trust_prompt_at_tail(combined):
+                        pending_prompt = "trust"
+                    elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
+                        pending_prompt = "blocking"
+                    if pending_prompt is None and detect_prompts:
+                        # Armed only while the output still ends in a question;
+                        # any later output clears it.
+                        question_seen_at = time.monotonic() if ends_with_question(combined) else None
+                if pending_prompt is not None and time.monotonic() - last_progress >= PROMPT_QUIET_SECONDS:
+                    if pending_prompt == "trust":
+                        os.write(fd, b"\r")
+                        trust_sent = True
+                        question_seen_at = None
+                        pending_prompt = None
+                    else:
+                        record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
+                        break
+                try:
+                    done, status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    done, status = pid, 0
+                if done == pid:
+                    code = reap(status)
+                    if code is not None:
+                        exit_code = code
+                    if not eof:
+                        # The child can exit with output still unread in the pty
+                        # master: the loop reads at most one chunk per pass and
+                        # checks for exit afterwards. Collect the rest, otherwise
+                        # the last provider output is missing from the capture.
+                        for raw in drain_pty_master(fd):
+                            append_output(raw.decode("utf-8", "replace"))
+                            if stream:
+                                try:
+                                    os.write(sys.stdout.fileno(), raw)
+                                except OSError:
+                                    stream = False
+                    break
+        except KeyboardInterrupt:
+            exit_code = 130
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+                try:
+                    done, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if done == pid:
+                    break
+        if exit_code == 124:
+            deadline = time.monotonic() + (5.0 if eof else 0.0)
+            while True:
+                try:
+                    done, status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if done == pid:
+                    code = reap(status)
+                    if code is not None:
+                        exit_code = code
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        if exit_code in (124, AUTONOMY_ABORT_STATUS):
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+        text = strip_ansi("".join(chunks))
+        if output_truncated:
+            marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
+            text = marker + text
+        if output_path:
+            write_private_text(output_path, text)
+        if status_path:
+            write_private_text(status_path, str(exit_code))
+        return exit_code, text
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def clean_capture_file(path: Path) -> None:

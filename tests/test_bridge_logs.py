@@ -102,6 +102,51 @@ def test_pty_capture_collects_output_still_buffered_when_the_child_has_exited(
     assert "Earlier bytes were discarded" in text
 
 
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc/self/fd")
+@pytest.mark.parametrize(
+    ("script", "kwargs", "runs", "expected_code"),
+    [
+        ("print('ok')", {}, 50, 0),
+        ("import sys; sys.exit(3)", {}, 50, 3),
+        ("import time; print('x', flush=True); time.sleep(30)", {"idle_timeout": 1}, 3, common.AUTONOMY_ABORT_STATUS),
+    ],
+    ids=["clean-exit", "failing-exit", "idle-abort"],
+)
+def test_pty_capture_closes_the_pty_master_on_every_path(
+    tmp_path: Path, script: str, kwargs: dict[str, int], runs: int, expected_code: int
+) -> None:
+    def open_descriptors() -> int:
+        return len(os.listdir("/proc/self/fd"))
+
+    def capture() -> int:
+        code, _text = common.run_pty_capture(
+            [sys.executable, "-c", script], tmp_path, 10, stream=False, auto_confirm=False, **kwargs
+        )
+        return code
+
+    assert capture() == expected_code  # warm-up: imports and lazily opened files
+    before = open_descriptors()
+    for _ in range(runs):
+        assert capture() == expected_code
+    assert open_descriptors() == before
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc/self/fd")
+def test_pty_capture_closes_the_pty_master_when_writing_the_log_fails(tmp_path: Path) -> None:
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(10):
+        with pytest.raises(OSError):
+            common.run_pty_capture(
+                [sys.executable, "-c", "print('ok')"],
+                tmp_path,
+                10,
+                stream=False,
+                auto_confirm=False,
+                output_path=tmp_path / "missing-directory" / "attempt.out",
+            )
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
 def test_run_retention_prunes_raw_logs_but_keeps_digest_event(tmp_path: Path) -> None:
     with BridgeStore(tmp_path / "bridge.sqlite3") as store:
         mission = store.create_mission("mission", "objective", cwd=tmp_path)
