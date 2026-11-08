@@ -31,6 +31,8 @@ export function on(el: Element, type: string, fn: EventListener): void {
 
 // Attributes the user changes by using the element (a menu or details opens, a button toggles a panel). `data-own` marks an element that owns its `hidden` as well.
 const OWN = ["open", "aria-expanded"];
+// Attributes the page sets on an element after it was built (keyboard navigation marks and focuses a row, a working button is busy): a fresh element has none of them and must not take them away.
+const SET_LATER = ["data-kb-row", "tabindex", "aria-busy"];
 const identity = (n: Node): string => (n instanceof Element ? n.tagName + (["data-row-key", "data-entity", "data-action", "id", "class"].map((a) => n.getAttribute(a)).find(Boolean) ?? "") : "#");
 
 /**
@@ -43,7 +45,7 @@ export function morph(old: Node, fresh: Node): void {
     return;
   }
   const own = (name: string): boolean => OWN.includes(name) || (name === "hidden" && old.hasAttribute("data-own"));
-  for (const name of old.getAttributeNames()) if (!fresh.hasAttribute(name) && !own(name)) old.removeAttribute(name);
+  for (const name of old.getAttributeNames()) if (!fresh.hasAttribute(name) && !own(name) && !SET_LATER.includes(name)) old.removeAttribute(name);
   for (const name of fresh.getAttributeNames()) if (!own(name) && old.getAttribute(name) !== fresh.getAttribute(name)) old.setAttribute(name, fresh.getAttribute(name) ?? "");
   for (const [key, value] of Object.entries(liveOf(fresh))) {
     if (key.startsWith("on:")) on(old, key.slice(3), value as EventListener);
@@ -216,6 +218,7 @@ export function setBusy(b: HTMLButtonElement, busy: boolean): void {
     b.setAttribute("aria-busy", "true");
     const ring = icon("ring", 18);
     ring.classList.add("ring");
+    ring.setAttribute("data-keep", "");
     b.prepend(ring);
   } else {
     b.removeAttribute("aria-busy");

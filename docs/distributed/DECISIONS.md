@@ -509,7 +509,7 @@ counts against the lazy caps. Code that leaves the first-load bundle also compre
 chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
 The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
 
-## D29 Merging main into the web redesign: digest and attention, notices, load time and the lazy JavaScript cap (PRD-037, PRD-038, UXR-032, UXR-039)
+## D30 Merging main into the web redesign: digest and attention, notices, load time and the lazy JavaScript cap (PRD-037, PRD-038, UXR-032, UXR-039)
 
 The redesign branch was merged with main after PR #35 (the release, with the DOG-021 mission digest and the coordinator's change notices) and PR #68 (mission delete).
 This entry records what the merge decided.
@@ -540,21 +540,55 @@ click-path projects inside the image (tmux and a venv are installed in the conta
 project (`--project=lighthouse`) because it measures, and two terminal measurements of the mission page that depend on the row height of xterm.js in Firefox (T29 rows above
 the fold, T32 text spacing) are not made there; they fail the same way on 3f3105b.
 
-The lazy JavaScript cap is not met (UXR-039). Measured with `web/e2e/budget.spec.ts` after the merge, with the caps of `web/budget.json` unchanged:
+The lazy JavaScript cap is met without raising it (UXR-039). Main's passkey code and this branch's security notices, delete action and digest handling had taken the route
+JavaScript to 107324 raw and 41438 gzip bytes against the caps of 94000 and 38700. The caps in `web/budget.json` are unchanged. The bytes were cut as follows:
 
-| Measure | Before the merge (D28) | Now | Cap |
-|---|---:|---:|---:|
-| Initial JavaScript raw / gzip | 80464 / 31326 | 81786 / 31457 | 91000 / 31750 |
-| Initial CSS raw / gzip | 33949 / 7550 | 33997 / 7576 | 34000 / 9000 |
-| Terminal chunk raw / gzip | 355631 / 92441 | 355660 / 92450 | 360000 / 93000 |
-| Route JavaScript raw / gzip | 93984 / 36138 | 107343 raw and 41458 gzip bytes | 94000 / 38700 |
-| Route CSS raw / gzip | 18358 / 4869 | 18358 / 4869 | 18400 / 4900 |
+| Measure | Before the merge (D28) | Merge, before the cut | Now | Cap |
+|---|---:|---:|---:|---:|
+| Initial JavaScript raw / gzip | 80464 / 31326 | 81701 / 31392 | 82357 / 31710 | 91000 / 31750 |
+| Initial CSS raw / gzip | 33949 / 7550 | 33997 / 7576 | 33997 / 7576 | 34000 / 9000 |
+| Terminal chunk raw / gzip | 355631 / 92441 | 355660 / 92450 | 355580 / 92423 | 360000 / 93000 |
+| Route JavaScript raw / gzip | 93984 / 36138 | 107324 / 41438 | 93884 / 37826 | 94000 / 38700 |
+| Route CSS raw / gzip | 18358 / 4869 | 18358 / 4869 | 18358 / 4869 | 18400 / 4900 |
 
-Main added about 10.5 KB of route JavaScript (passkey sign-in and registration helpers, the account page's passkey list, address reset and token restrictions, the sign-in
-page's passkey button and canonical-address hint) and this merge added about 2 KB (security notices, mission delete, the digest and event handling of the mission page).
-The route JavaScript had 16 raw bytes of room before the merge, so no part of that can be absorbed. What fits was moved or shortened: the reads that only a lazy
-view needs left the first-load modules, the lists compare whole summaries, two rules of the stylesheet were merged. The caps were not raised; raising them needs a
-decision of the lead. The figures that the caps would have to take for this branch to pass are 107400 raw and 41500 gzip bytes for the route JavaScript.
+- The sources of the lazy pages were reduced by about 12000 raw bytes: shared helpers for error messages, dialogs, field validation, fact lists and button rows; tables instead of
+  repeated branches; the same function for near-identical code. No text, element, attribute or request changed. Gzip fell by only about 1200 bytes, because most of the removed bytes
+  were repetition that gzip had already compressed.
+- The gzip cap was the harder one. Most of its saving came from fewer chunks (every chunk is compressed on its own and starts with its imports): sign-in, setup, forced password change,
+  account, workers, sessions, usage and diagnostics are one lazy chunk (`views/routes.ts`; each route still loads only its own stylesheet), and `passkeys.ts` is part of it instead of a chunk of
+  its own. A visitor who is not signed in now fetches the fleet pages with the sign-in page (about 8 KB gzip more, on a page that no performance budget measures); the mission page and the
+  two pages that T37 measures are unchanged.
+- The mission page and the steer chips pass new events through a document event instead of a tiny shared module, and the mission page awaits the terminal stylesheet next to the terminal
+  chunk import instead of a top-level await in the terminal module. Both removed a chunk that held a few hundred bytes.
+- The event phrase table is generated as one string and leaves out the kinds that the browser derives from the kind name (26 of 84).
+- The initial JavaScript gained 340 gzip bytes from the in-place update of the live lists (D31) and has 40 bytes of room left; the raw route JavaScript has 116 bytes of room left.
+
+Merging a later main again needs no change here as long as it adds no web code.
+
+## D31 Live lists update rows in place (DOG-026)
+
+PR #70 found that the mission page redrew the tasks table several times in the half second after each task action, replacing the buttons, so that a click whose pointer-down and
+pointer-up straddled a redraw never fired (seen on Firefox, 1 run in 20 in `worker.spec.ts`, which then retried the click). An operator loses the same click, so this is a defect
+of the product and not of the test.
+
+Before: the Inbox and the Missions list kept a row whose signature was unchanged but replaced a changed row; the tasks panel, Workers and Sessions rebuilt their whole content on
+each redraw.
+
+Now: `morph(old, fresh)` and `patch(parent, children)` in `web/src/dom.ts` make an element equal to a freshly built one without replacing it. A child is kept when its identity is the same
+(`data-row-key`, `data-entity`, `data-action`, `id`, else its class); its attributes, text and listeners are patched. `h()` and `button()` register listeners through `on()`, which keeps
+one dispatcher per event type on the element and lets `morph` hand it the function built for the new data, so a kept button acts on the latest revision of its task and not on the one
+it was built with. A handler must not close over an element of the row it was built for (the Retry button and the row's details toggle take their element from the event). Things the user
+changes by using the control are not overwritten: an open menu popover (`data-keep`), `open` and `aria-expanded`, and the open state of a row's details (`data-own`, `data-leaf`).
+`reconcile` skips a row whose signature is unchanged and patches a changed one; the mission tasks panel, Workers, Sessions and the fleet pages call `patch`.
+
+Why a guard that postpones the redraw while the pointer is pressed was not used: it would leave stale text on a row the pointer rests on (the pill after Pause), and the focused
+element would still be replaced by a redraw that follows.
+
+Not covered: the buttons of the mission header are rebuilt when the header data changes; they are not a list, and the header changes only on a change of the mission state.
+
+Guarded by `web/e2e/live-lists.spec.ts` (Tasks, Inbox, Missions, Workers, Sessions; chromium-desktop and firefox-desktop) and by `web/e2e/link-traffic.spec.ts` (the tasks panel is redrawn
+once for a change of its data). With the identity of every node replaced by a new value, nine of the ten tests of `live-lists.spec.ts` fail; the Missions test on firefox-desktop still
+passes on revert and is the weakest of the set.
 
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 

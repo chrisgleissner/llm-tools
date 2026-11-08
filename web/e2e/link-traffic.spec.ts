@@ -74,31 +74,49 @@ test("a changed digest of the open mission reads its tasks once and shows the ne
 
 // A button that is replaced between the mouse-down and the mouse-up of a click never receives the click (seen on Firefox).
 // After a task action the coordinator relays several messages: the reply, a change notice per event and the changed digest.
-// The tasks panel must be redrawn once for the one change of its data, and not again for notices that bring the same tasks.
-test("the tasks panel is redrawn only when the task data changed", async ({ page }) => {
+// The tasks panel patches the rows it has: after a change of one task no row element and no button is replaced, the changed row
+// shows the new state in the element it had, and notices that bring the same tasks change nothing in the DOM.
+test("the tasks panel keeps its row and button elements when the task data changes", async ({ page }) => {
   const mock = await mockApp(page, IN);
+  mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", "QUEUED"]);
   await page.goto(MISSION_PATH);
-  await expect(page.locator('[data-entity^="task:"]').first()).toBeAttached();
+  const row = (n: number) => page.locator('[data-entity^="task:"]', { hasText: `Task number ${n}` });
+  await expect(row(3)).toContainText("Queued");
   await page.waitForTimeout(600);
   await page.evaluate(() => {
+    const w = window as unknown as { __rows: Element[]; __added: number; __mutations: number };
     const box = document.querySelector(".task-list-box") as HTMLElement;
-    const w = window as unknown as { __redraws: number };
-    w.__redraws = 0;
-    new MutationObserver((records) => { w.__redraws += records.filter((r) => r.addedNodes.length > 0).length; }).observe(box, { childList: true });
+    // Remember every row and every button of the list; count the row elements and buttons that are added afterwards.
+    w.__rows = [...box.querySelectorAll('[data-entity^="task:"], button')];
+    w.__added = 0;
+    w.__mutations = 0;
+    new MutationObserver((records) => {
+      for (const r of records) {
+        w.__mutations += 1;
+        for (const n of r.addedNodes) if (n instanceof Element && (n.matches('[data-entity^="task:"], button') || n.querySelector('[data-entity^="task:"], button'))) w.__added += 1;
+      }
+    }).observe(box, { childList: true, subtree: true, attributes: true, characterData: true });
   });
-  const redraws = () => page.evaluate(() => (window as unknown as { __redraws: number }).__redraws);
-  mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", "QUEUED"]);
-  mock.pushEvent({ kind: "task-status", task_id: 2, mission_id: RUNNING, data: { from: "RUNNING", to: "PAUSED" } });
-  await expect(page.locator('[data-entity^="task:"]', { hasText: "Task number 2" })).toHaveCount(1);
-  expect(await redraws(), "one redraw for the one change").toBe(1);
+  const state = () => page.evaluate(() => {
+    const w = window as unknown as { __rows: Element[]; __added: number; __mutations: number };
+    const box = document.querySelector(".task-list-box") as HTMLElement;
+    const now = [...box.querySelectorAll('[data-entity^="task:"], button')];
+    return { added: w.__added, mutations: w.__mutations, kept: w.__rows.filter((el) => now.includes(el)).length, before: w.__rows.length };
+  });
+  // Task 3 starts running: its row says so, in the same element.
+  mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", "RUNNING"]);
+  mock.pushEvent({ kind: "task-status", task_id: 3, mission_id: RUNNING, data: { from: "QUEUED", to: "READY" } });
+  await expect(row(3)).toContainText("Running");
+  let seen = await state();
+  expect(seen.added, "no row element or button was added again").toBe(0);
+  expect(seen.kept, "every row and button that was there is still there").toBe(seen.before);
+  // Notices that bring the same tasks change nothing at all.
+  const settled = seen.mutations;
   for (let i = 0; i < 4; i += 1) {
-    mock.pushEvent({ kind: "task-status", task_id: 2, mission_id: RUNNING, data: { from: "RUNNING", to: "PAUSED" } });
-    mock.patchMission(RUNNING, { updated_at: new Date(Date.now() + i * 1000).toISOString() });
+    mock.pushEvent({ kind: "task-status", task_id: 3, mission_id: RUNNING, data: { from: "QUEUED", to: "READY" } });
     await page.waitForTimeout(350);
   }
-  const before = mock.requestCounts().tasks;
-  await page.waitForTimeout(500);
-  expect(mock.requestCounts().tasks, "the notices made the page read the tasks again").toBeGreaterThan(0);
-  expect(await redraws(), "notices that bring the same tasks must not replace the rows or their buttons").toBe(1);
-  expect(before).toBeGreaterThan(0);
+  seen = await state();
+  expect(seen.mutations, "notices with unchanged tasks changed the DOM").toBe(settled);
+  expect(seen.kept).toBe(seen.before);
 });

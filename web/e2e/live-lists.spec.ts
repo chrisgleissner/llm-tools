@@ -6,6 +6,7 @@
 // with a change in the data of the list), and releases it after at least six redraws. The control must still react.
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { showTab } from "./redesign/harness";
 import { mockApp, MISSION_PATH, MISSIONS, type Mock, type MockOptions } from "./mock";
 
 const IN: MockOptions = { auth: "in", digest: true };
@@ -40,6 +41,7 @@ test("Mission tasks: Resume is clicked although the task list is refreshed betwe
   const mock = await mockApp(page, IN);
   mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", "QUEUED"]);
   await page.goto(MISSION_PATH);
+  await showTab(page, "Tasks"); // behind a tab on a phone
   const resume = page.locator('[data-entity^="task:"] [data-action="resume"]');
   await expect(resume).toHaveCount(1);
   const reads = mock.requestCounts().tasks;
