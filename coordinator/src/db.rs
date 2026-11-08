@@ -208,6 +208,7 @@ pub struct Session {
     pub expires_at: i64,
     pub idle_secs: i64,
     pub fresh_auth_until: i64,
+    pub fresh_auth_method: String,
 }
 
 #[derive(Debug, Clone)]
@@ -291,7 +292,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 24;
 pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
@@ -371,6 +372,23 @@ const MIGRATE_V21: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_until INTE
 const MIGRATE_V22_PASSKEYS: &str = "UPDATE passkeys SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
 const MIGRATE_V22_POLICY: &str = "UPDATE auth_policy SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
 const MIGRATE_V22_CHALLENGES: &str = "DELETE FROM webauthn_challenges WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+/// Version 23 adds a distinct kind for session-bound passkey step-up ceremonies. The rows are
+/// short-lived, but preserve valid login/registration ceremonies across this schema upgrade.
+const MIGRATE_V23_CHALLENGES: &str = "
+DROP INDEX IF EXISTS webauthn_challenges_expiry;
+ALTER TABLE webauthn_challenges RENAME TO webauthn_challenges_old;
+CREATE TABLE webauthn_challenges(
+  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, binding TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('registration','authentication','step-up')),
+  state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  CHECK(expires_at > created_at AND expires_at <= created_at + 300));
+INSERT INTO webauthn_challenges SELECT * FROM webauthn_challenges_old;
+DROP TABLE webauthn_challenges_old;
+CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires_at);
+";
+/// Version 24 distinguishes passkey step-up from password/TOTP step-up. Existing freshness
+/// markers intentionally do not satisfy passkey-only token creation.
+const MIGRATE_V24_SESSION_AUTH_METHOD: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_method TEXT NOT NULL DEFAULT '';";
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -658,6 +676,32 @@ impl Db {
             }
             conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 22; COMMIT;"))?;
         }
+        if version < 23 {
+            let has_challenges: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='webauthn_challenges')",
+                [],
+                |row| row.get(0),
+            )?;
+            let migration = if has_challenges { MIGRATE_V23_CHALLENGES } else { "" };
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 23; COMMIT;"))?;
+        }
+        if version < 24 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            let has_auth_method = has_sessions
+                && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='fresh_auth_method')",
+                    [],
+                    |row| row.get(0),
+                )?;
+            let migration = if has_sessions && !has_auth_method {
+                MIGRATE_V24_SESSION_AUTH_METHOD
+            } else {
+                ""
+            };
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 24; COMMIT;"))?;
+        }
         conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -678,7 +722,7 @@ impl Db {
         if id.is_empty()
             || row.principal_id.is_empty()
             || row.binding.is_empty()
-            || !matches!(row.kind.as_str(), "registration" | "authentication")
+            || !matches!(row.kind.as_str(), "registration" | "authentication" | "step-up")
             || row.expires_at <= now
             || row.expires_at > now + 300
         {
@@ -1065,12 +1109,12 @@ impl Db {
     }
     /// Rotate a session's bearer secret, CSRF token, and public ID while marking fresh
     /// authentication for a bounded interval. The previous credentials stop working atomically.
-    pub fn session_step_up_rotate(&self, principal_id: &str, old_hash: &str, new_hash: &str, csrf: &str, fresh_until: i64) -> R<bool> {
+    pub fn session_step_up_rotate(&self, principal_id: &str, old_hash: &str, new_hash: &str, csrf: &str, fresh_until: i64, auth_method: &str) -> R<bool> {
         let session_id = crate::auth::random_token();
         let changed = self.c().execute(
-            "UPDATE sessions SET token_hash=?1,csrf=?2,session_id=?3,fresh_auth_until=?4
-             WHERE principal_id=?5 AND token_hash=?6 AND expires_at>?7",
-            params![new_hash, csrf, session_id, fresh_until, principal_id, old_hash, crate::now()],
+            "UPDATE sessions SET token_hash=?1,csrf=?2,session_id=?3,fresh_auth_until=?4,fresh_auth_method=?5
+             WHERE principal_id=?6 AND token_hash=?7 AND expires_at>?8",
+            params![new_hash, csrf, session_id, fresh_until, auth_method, principal_id, old_hash, crate::now()],
         )?;
         Ok(changed == 1)
     }
@@ -1128,14 +1172,14 @@ impl Db {
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
         let c = self.c();
-        let row: Option<(String, i64, i64, bool, String, i64)> = c
+        let row: Option<(String, i64, i64, bool, String, i64, String)> = c
             .query_row(
-                "SELECT csrf, last_seen, expires_at, remember,principal_id,fresh_auth_until FROM sessions WHERE token_hash=?",
+                "SELECT csrf, last_seen, expires_at, remember,principal_id,fresh_auth_until,fresh_auth_method FROM sessions WHERE token_hash=?",
                 params![token_hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
             .optional()?;
-        let Some((csrf, last_seen, expires_at, remember, principal_id, fresh_auth_until)) = row else {
+        let Some((csrf, last_seen, expires_at, remember, principal_id, fresh_auth_until, fresh_auth_method)) = row else {
             return Ok(None);
         };
         let (idle_secs, _) = session_policy(remember);
@@ -1154,6 +1198,7 @@ impl Db {
             expires_at,
             idle_secs,
             fresh_auth_until,
+            fresh_auth_method,
         }))
     }
     pub fn session_delete(&self, token_hash: &str) -> R<()> {

@@ -540,3 +540,22 @@ changes independent of credential ownership.
 
 In the code: `coordinator/src/db.rs::MIGRATE_V22`, `coordinator/src/http.rs`, and
 `coordinator/src/server.rs`; regressions are `coordinator/tests/passkeys.rs::schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal` and `coordinator/tests/web_api.rs::passkey_management_requires_fresh_session_and_is_principal_scoped`.
+
+## D31 Distinguish passkey step-up from password step-up (PK-008, PK-009)
+
+Passkey step-up uses a separate five-minute WebAuthn challenge kind bound to the active
+principal and session token hash. Successful assertion rotates the session and stores
+`fresh_auth_method = "passkey"`; password/TOTP step-up stores `"password"`. API-token
+creation checks both the ten-minute freshness deadline and this method, so an old session,
+password-only reauthentication, or an administrator bearer token cannot mint another bearer
+credential. Migration 23 expands the challenge-kind constraint while preserving valid pending
+ceremonies; migration 24 adds a deny-by-default method marker to sessions. This explicit marker
+avoids inferring the authentication factor from a request path or from the mere presence of a
+freshness timestamp.
+
+In the code: `coordinator/src/db.rs::MIGRATE_V23_CHALLENGES`,
+`coordinator/src/db.rs::MIGRATE_V24_SESSION_AUTH_METHOD`, and
+`coordinator/src/http.rs::fresh_passkey_step_up`; covered by
+`coordinator/tests/passkeys.rs::migrations_add_passkey_tables_and_challenge_is_session_bound_single_use`,
+`coordinator/tests/web_api.rs::step_up_rotates_session_credentials_and_gates_api_token_lifecycle`,
+and the Chromium virtual-authenticator flow in `web/e2e/passkey-login.spec.ts`.

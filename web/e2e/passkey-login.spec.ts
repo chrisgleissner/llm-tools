@@ -1,4 +1,4 @@
-import { expect, stepUpViaUi, test, PASSWORD } from "./fixtures";
+import { expect, test, PASSWORD } from "./fixtures";
 import { mockApp } from "./mock";
 import { supportsPasskeysOnHost } from "../src/passkeys";
 
@@ -222,11 +222,39 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await expect(page.getByText("A sign-in came from a new device.")).toBeVisible();
 
   await page.goto(`${localUrl}/account`);
+  await page.getByLabel("Token name").fill("passkey-step-up-test");
+  await page.getByRole("button", { name: "Create token" }).click();
+  const tokenStepUpDialog = page.getByRole("dialog", { name: "Use a passkey to continue" });
+  await expect(tokenStepUpDialog).toBeVisible();
+  await expect(tokenStepUpDialog.getByLabel("Current password")).toBeHidden();
+  await tokenStepUpDialog.getByRole("button", { name: "Use a passkey instead" }).click();
+  await expect(tokenStepUpDialog).toHaveCount(0);
+  await expect(page.getByText("Token passkey-step-up-test created.")).toBeVisible();
+
+  await page.evaluate(async () => {
+    const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
+    const response = await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      body: "{}",
+    });
+    if (!response.ok) throw new Error(`sign-out failed: ${response.status}`);
+  });
+  await page.goto(`${localUrl}/login`);
+  await page.getByLabel("Username", { exact: true }).fill("admin");
+  await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await page.goto(`${localUrl}/account`);
+
   const passkeys = page.getByRole("list", { name: "Registered passkeys" });
   const rename = passkeys.getByLabel("New name for Virtual authenticator");
   await rename.fill("Primary device");
   await passkeys.getByRole("button", { name: "Rename" }).click();
-  await stepUpViaUi(page);
+  const stepUpDialog = page.getByRole("dialog", { name: "Verify it is you" });
+  await expect(stepUpDialog).toBeVisible();
+  await stepUpDialog.getByRole("button", { name: "Use a passkey instead" }).click();
+  await expect(stepUpDialog).toHaveCount(0);
   await expect(passkeys).toContainText("Primary device");
 
   await page.getByLabel("New passkey name").fill("Travel device");

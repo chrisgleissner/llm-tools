@@ -331,6 +331,7 @@ pub enum Principal {
         expires_at: i64,
         idle_secs: i64,
         fresh_auth_until: i64,
+        fresh_auth_method: String,
     },
     Token {
         name: String,
@@ -393,6 +394,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
             expires_at: s.expires_at,
             idle_secs: s.idle_secs,
             fresh_auth_until: s.fresh_auth_until,
+            fresh_auth_method: s.fresh_auth_method,
         }),
         None => Err(unauthorized()),
     }
@@ -690,6 +692,21 @@ fn fresh_session_step_up(principal: &Principal) -> Result<(), ApiError> {
             StatusCode::FORBIDDEN,
             "step-up-required",
             "verify your credentials again before this sensitive action",
+        )),
+    }
+}
+
+fn fresh_passkey_step_up(principal: &Principal) -> Result<(), ApiError> {
+    match principal {
+        Principal::Session {
+            fresh_auth_until,
+            fresh_auth_method,
+            ..
+        } if *fresh_auth_until > crate::now() && fresh_auth_method == "passkey" => Ok(()),
+        _ => Err(err(
+            StatusCode::FORBIDDEN,
+            "passkey-step-up-required",
+            "creating an API token requires a fresh passkey assertion",
         )),
     }
 }
@@ -1127,7 +1144,7 @@ async fn step_up(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) ->
     let fresh_until = crate::now() + 10 * 60;
     if !st
         .db
-        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until)?
+        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until, "password")?
     {
         return Err(unauthorized());
     }
@@ -1234,6 +1251,107 @@ struct RegisterFinishBody {
 struct AssertFinishBody {
     challenge_id: String,
     credential: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+async fn passkey_step_up_start(State(st): State<St>, Remote(ip): Remote, Authed(p, _): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey step-up requires a browser session"));
+    };
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &[])?;
+    let records = st.db.passkeys_for_principal(&principal_id)?;
+    let credentials = records
+        .iter()
+        .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
+        .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
+    if credentials.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-credential", "no passkeys are registered"));
+    }
+    let wa = crate::passkeys::verifier(&origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let (options, state) = crate::passkeys::begin_authentication(&wa, &credentials)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "could not start passkey step-up"))?;
+    let challenge =
+        crate::passkeys::new_challenge(crate::now()).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not generate challenge"))?;
+    let stored = crate::passkeys::StoredCeremony {
+        origin,
+        credential_name: None,
+        state,
+    };
+    let row = crate::db::WebauthnChallengeRow {
+        principal_id: principal_id.clone(),
+        binding: token_hash,
+        kind: "step-up".into(),
+        state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
+        expires_at: challenge.expires_at,
+    };
+    st.db.webauthn_challenge_put(&challenge.id, &row)?;
+    st.db.audit(&principal_id, "passkey.step-up.start", "session-bound challenge issued", &ip);
+    Ok(json_ok(StatusCode::OK, json!({"challenge_id":challenge.id,"options":options})))
+}
+
+async fn passkey_step_up_finish(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session {
+        principal_id,
+        token_hash: old_hash,
+        remember,
+        ..
+    } = p
+    else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey step-up requires a browser session"));
+    };
+    check_address_mutation_limit(&st, &ip)?;
+    check_address_mutation_limit(&st, &ip)?;
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    let body: AssertFinishBody =
+        serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &principal_id, &old_hash, "step-up")? else {
+        return Err(err(
+            StatusCode::GONE,
+            "challenge-expired",
+            "challenge is expired, consumed or bound to another session",
+        ));
+    };
+    let stored: crate::passkeys::StoredCeremony =
+        serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    let credential_id = match verify_and_record_passkey_assertion(&st, &principal_id, &origin, &stored, &body.credential) {
+        Ok(credential_id) => credential_id,
+        Err(error) => {
+            st.db.audit(&principal_id, "passkey.step-up.failure", "assertion could not be verified", &ip);
+            return Err(error);
+        }
+    };
+    let (token, csrf) = (auth::random_token(), auth::random_token());
+    let fresh_until = crate::now() + 10 * 60;
+    if !st
+        .db
+        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until, "passkey")?
+    {
+        return Err(unauthorized());
+    }
+    st.db.audit(
+        &principal_id,
+        "session.step-up.passkey",
+        &format!("credential_id={credential_id}; fresh authentication valid for 10 minutes"),
+        &ip,
+    );
+    let mut response = json_ok(StatusCode::OK, json!({"csrf_token":csrf,"fresh_auth_until":timestamp(Some(fresh_until))}));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, remember.then_some(crate::db::SESSION_ABSOLUTE_SECS as u64))
+            .parse()
+            .expect("session cookie"),
+    );
+    Ok(response)
 }
 
 #[derive(serde::Deserialize)]
@@ -1704,16 +1822,46 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     };
     let stored: crate::passkeys::StoredCeremony =
         serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    let credential_id = verify_and_record_passkey_assertion(&st, &principal_id, &origin, &stored, &body.credential)?;
+    remember_login_device(&st, &username, &headers)?;
+    let (token, csrf) = (auth::random_token(), auth::random_token());
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        false,
+    )?;
+    st.db
+        .audit(&username, "passkey.authentication.success", &format!("credential_id={credential_id}"), &ip);
+    let mut r = json_ok(StatusCode::OK, json!({"csrf_token":csrf}));
+    r.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie(&token, None).parse().expect("session cookie"));
+    r.headers_mut().append(
+        header::SET_COOKIE,
+        "__Host-bridge_passkey=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+            .parse()
+            .expect("static cookie"),
+    );
+    Ok(r)
+}
+
+fn verify_and_record_passkey_assertion(
+    st: &St,
+    principal_id: &str,
+    origin: &str,
+    stored: &crate::passkeys::StoredCeremony,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+) -> Result<String, ApiError> {
     if origin != stored.origin {
         return Err(err(StatusCode::FORBIDDEN, "bad-origin", "ceremony origin changed"));
     }
     let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
-    let mut records = st.db.passkeys_for_principal(&principal_id)?;
+    let mut records = st.db.passkeys_for_principal(principal_id)?;
     let credentials = records
         .iter()
         .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
         .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
-    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential, &credentials)
+    let result = crate::passkeys::finish_authentication(&wa, &stored.state, assertion, &credentials)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "webauthn-error", "passkey assertion could not be verified"))?;
     if !result.user_verified() {
         return Err(err(StatusCode::UNAUTHORIZED, "user-verification-required", "passkey did not verify the user"));
@@ -1734,31 +1882,9 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     records[index].backup_eligible = result.backup_eligible();
     records[index].backed_up = result.backup_state();
     records[index].sign_count = result.counter();
+    let credential_id = records[index].credential_id.clone();
     st.db.passkey_update(&records[index])?;
-    remember_login_device(&st, &username, &headers)?;
-    let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_for(
-        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
-        &auth::sha256_hex(&token),
-        &csrf,
-        false,
-    )?;
-    st.db.audit(
-        &username,
-        "passkey.authentication.success",
-        &format!("credential_id={}", records[index].credential_id),
-        &ip,
-    );
-    let mut r = json_ok(StatusCode::OK, json!({"csrf_token":csrf}));
-    r.headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(&token, None).parse().expect("session cookie"));
-    r.headers_mut().append(
-        header::SET_COOKIE,
-        "__Host-bridge_passkey=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
-            .parse()
-            .expect("static cookie"),
-    );
-    Ok(r)
+    Ok(credential_id)
 }
 
 /// Session mutations and public passkey ceremonies have no token-specific budget. Share the
@@ -1937,7 +2063,7 @@ async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<Ha
 }
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
-    fresh_session_step_up(&p)?;
+    fresh_passkey_step_up(&p)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs", "allowed_workers"])?;
     let name = str_field(&m, "name")?;
@@ -4027,6 +4153,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/sessions", &["GET"], Access::Session, ""),
     ("/api/v1/auth/sessions/{id}", &["DELETE"], Access::Session, ""),
     ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/step-up/start", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/step-up/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
@@ -4285,6 +4413,11 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
             "/api/v1/auth/passkeys/re-enroll",
             post(passkey_reenroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
         )
+        .route(
+            "/api/v1/auth/passkeys/step-up/start",
+            post(passkey_step_up_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
+        .route("/api/v1/auth/passkeys/step-up/finish", post(passkey_step_up_finish))
         .route(
             "/api/v1/auth/passkeys/assertion/start",
             post(passkey_assert_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),

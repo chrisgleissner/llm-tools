@@ -188,7 +188,7 @@ async fn step_up_rotates_session_credentials_and_gates_api_token_lifecycle() {
     assert_eq!(problem["code"], "step-up-required");
     let (status, problem) = api.post("/api/v1/tokens", json!({"name":"before-step-up"})).await;
     assert_eq!(status, 403, "{problem}");
-    assert_eq!(problem["code"], "step-up-required");
+    assert_eq!(problem["code"], "passkey-step-up-required");
     assert_eq!(env.srv.state.db.api_tokens_list().unwrap().len(), 0);
 
     let (status, problem) = api.step_up("wrong password", None, None).await;
@@ -206,6 +206,8 @@ async fn step_up_rotates_session_credentials_and_gates_api_token_lifecycle() {
     assert_ne!(new_cookie, old_cookie);
     assert_ne!(new_csrf, old_csrf);
     assert!(result["fresh_auth_until"].as_str().unwrap().ends_with('Z'));
+    let fresh_hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_deref().unwrap());
+    assert_eq!(env.srv.state.db.session_get(&fresh_hash).unwrap().unwrap().fresh_auth_method, "password");
 
     let mut old_api = env.api();
     old_api.cookie = Some(old_cookie);
@@ -241,18 +243,20 @@ async fn step_up_rotates_session_credentials_and_gates_api_token_lifecycle() {
             &bridge_coordinator::auth::sha256_hex(&expired_cookie),
             &expired_csrf,
             bridge_coordinator::now() - 1,
+            "password",
         )
         .unwrap());
     api.cookie = Some(expired_cookie);
     api.csrf = Some(expired_csrf.clone());
     let (status, expired) = api.post("/api/v1/tokens", json!({"name":"expired-step-up"})).await;
     assert_eq!(status, 403, "{expired}");
-    assert_eq!(expired["code"], "step-up-required");
+    assert_eq!(expired["code"], "passkey-step-up-required");
 
     assert_eq!(api.step_up(PASSWORD, None, None).await.0, 200);
-    let (status, created) = api.post("/api/v1/tokens", json!({"name":"after-step-up"})).await;
-    assert_eq!(status, 201, "{created}");
-    assert_eq!(api.send(api.rb(Method::DELETE, "/api/v1/tokens/after-step-up")).await.0, 200);
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"after-password-step-up"})).await;
+    assert_eq!(status, 403, "password-only step-up must not mint API tokens: {created}");
+    assert_eq!(created["code"], "passkey-step-up-required");
+    assert!(env.srv.state.db.api_tokens_list().unwrap().is_empty());
     let audit = env.srv.state.db.audit_list(100).unwrap();
     let serialized = serde_json::to_string(&audit).unwrap();
     for secret in [PASSWORD, &old_csrf, &expired_csrf] {
@@ -770,6 +774,7 @@ async fn passkey_management_requires_fresh_session_and_is_principal_scoped() {
             &bridge_coordinator::auth::sha256_hex(&expired_cookie),
             &expired_csrf,
             bridge_coordinator::now() - 1,
+            "password",
         )
         .unwrap());
     api.cookie = Some(expired_cookie);
@@ -1200,6 +1205,31 @@ async fn passkey_registration_start_is_bound_to_https_named_origin_and_session()
         )
         .await;
     assert_eq!(status, 403, "an unapproved origin cannot start registration");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_step_up_is_session_bound_and_requires_a_registered_credential() {
+    let env = boot().await;
+    let mut api = env.admin_unstepped().await;
+    // Passkeys require a DNS origin; localhost is covered by the test CA while the
+    // coordinator listener itself remains loopback-only.
+    api.base = format!("https://localhost:{}", env.addr.port());
+    let (status, body) = api.post("/api/v1/auth/passkeys/step-up/start", json!({})).await;
+    assert_eq!(status, 404, "no registered passkey must not produce a step-up challenge: {body}");
+    assert_eq!(body["code"], "unknown-credential");
+
+    let token = bridge_coordinator::auth::random_token();
+    env.srv
+        .state
+        .db
+        .token_create("session-only-check", &bridge_coordinator::auth::sha256_hex(&token), None)
+        .unwrap();
+    let mut bearer = env.api();
+    bearer.bearer = Some(token);
+    let (status, body) = bearer.post("/api/v1/auth/passkeys/step-up/start", json!({})).await;
+    assert_eq!(status, 403, "API tokens must not be accepted for browser passkey step-up: {body}");
+    assert_eq!(body["code"], "session-required");
     env.stop().await;
 }
 

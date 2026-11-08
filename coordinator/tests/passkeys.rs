@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 22);
+    assert_eq!(SCHEMA_VERSION, 24);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -61,6 +61,23 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .webauthn_challenge_take("challenge-2", "admin", "session-a", "registration")
         .unwrap()
         .is_none());
+
+    let step_up = WebauthnChallengeRow {
+        principal_id: "admin".into(),
+        binding: "session-hash".into(),
+        kind: "step-up".into(),
+        state: "{}".into(),
+        expires_at: bridge_coordinator::now() + 300,
+    };
+    db.webauthn_challenge_put("challenge-step-up", &step_up).unwrap();
+    assert!(db
+        .webauthn_challenge_take("challenge-step-up", "admin", "another-session", "step-up")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.webauthn_challenge_take("challenge-step-up", "admin", "session-hash", "step-up").unwrap(),
+        Some(step_up)
+    );
     drop(db);
     remove_database(&path);
 }
@@ -119,7 +136,11 @@ fn schema_20_migration_adds_a_disabled_by_default_fresh_auth_marker() {
     }
     let db = Db::open(&path).unwrap();
     assert!(!db.session_is_freshly_authenticated("legacy-hash").unwrap());
-    assert!(db.session_get("legacy-hash").unwrap().is_some());
+    let legacy_session = db.session_get("legacy-hash").unwrap().unwrap();
+    assert!(
+        legacy_session.fresh_auth_method.is_empty(),
+        "old freshness cannot be reinterpreted as passkey step-up"
+    );
     let version: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))

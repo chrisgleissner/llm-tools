@@ -200,6 +200,15 @@ export async function finishPasskeySignIn(challenge_id: string, credential: unkn
   window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
+export async function beginPasskeyStepUp(): Promise<PasskeyAssertionStart> {
+  return request<PasskeyAssertionStart>("POST", "/api/v1/auth/passkeys/step-up/start", {}, false);
+}
+
+export async function finishPasskeyStepUp(challenge_id: string, credential: unknown): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/step-up/finish", { challenge_id, credential });
+  setCsrf(r.csrf_token);
+}
+
 export const setup = (setup_token: string, username: string, password: string) =>
   request<{ username: string }>("POST", "/api/v1/auth/setup", { setup_token, username, password }, true);
 

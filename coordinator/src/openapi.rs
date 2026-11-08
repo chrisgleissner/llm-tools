@@ -113,6 +113,18 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/auth/passkeys/step-up/start" && method == "POST" {
+        return json!({
+            "type":"object","required":["challenge_id","options"],"additionalProperties":false,
+            "properties":{"challenge_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},"options":{"type":"object","required":["publicKey"],"properties":{"publicKey":{"type":"object"}}}}
+        });
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        return json!({
+            "type":"object","required":["csrf_token","fresh_auth_until"],"additionalProperties":false,
+            "properties":{"csrf_token":{"type":"string","minLength":32,"maxLength":128},"fresh_auth_until":{"type":"string","format":"date-time"}}
+        });
+    }
     if path == "/api/v1/auth/passkeys" && method == "GET" {
         return json!({
             "type":"object","required":["passkeys"],"additionalProperties":false,
@@ -216,6 +228,15 @@ fn response_schema(path: &str, method: &str) -> Value {
 }
 
 fn request_schema(path: &str, method: &str) -> Option<Value> {
+    if path == "/api/v1/auth/passkeys/step-up/start" && method == "POST" {
+        return Some(json!({"type":"object","additionalProperties":false,"maxProperties":0}));
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        return Some(json!({
+            "type":"object","additionalProperties":false,"required":["challenge_id","credential"],
+            "properties":{"challenge_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},"credential":{"type":"object"}}
+        }));
+    }
     if path == "/api/v1/auth/passkeys/{id}" && method == "PATCH" {
         return Some(json!({
             "type":"object","additionalProperties":false,"required":["name"],
@@ -606,6 +627,16 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         op["x-fresh-auth"] = json!({"required":true,"max_age_seconds":600,"credentials":["password","totp","recovery-code"]});
         op["responses"]["403"]["description"] = json!("Fresh browser-session authentication is required; bearer tokens are not accepted.");
     }
+    if path == "/api/v1/tokens" && method == "POST" {
+        op["x-fresh-auth"]["credentials"] = json!(["passkey"]);
+        op["responses"]["403"]["description"] =
+            json!("A fresh passkey assertion in a browser session is required; password-only step-up and bearer tokens are refused.");
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        op["x-fresh-auth"] = json!({"grants":true,"max_age_seconds":600,"credentials":["passkey"]});
+        op["responses"]["200"]["description"] =
+            json!("Passkey assertion verified; session cookie, CSRF token and public session ID rotate. Fresh authentication lasts 10 minutes.");
+    }
     if let Some(schema) = request_schema(path, method) {
         op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":schema}}});
     }
@@ -968,6 +999,16 @@ mod tests {
         assert!(ROUTES.iter().any(|(path, methods, access, _)| {
             *path == "/api/v1/auth/passkeys/{id}" && methods.contains(&"PATCH") && methods.contains(&"DELETE") && *access == Access::Session
         }));
+        for path in ["/api/v1/auth/passkeys/step-up/start", "/api/v1/auth/passkeys/step-up/finish"] {
+            let operation = &doc["paths"][path]["post"];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]} ]));
+            assert_eq!(operation["x-principal-type"], "browser-session");
+            assert!(ROUTES
+                .iter()
+                .any(|(route, methods, access, _)| *route == path && methods.contains(&"POST") && *access == Access::Session));
+        }
+        assert_eq!(doc["paths"]["/api/v1/auth/passkeys/step-up/finish"]["post"]["x-fresh-auth"]["grants"], true);
+        assert_eq!(doc["paths"]["/api/v1/tokens"]["post"]["x-fresh-auth"]["credentials"], json!(["passkey"]));
     }
 
     #[test]

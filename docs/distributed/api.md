@@ -196,8 +196,10 @@ curl --cacert ca.pem -H "Authorization: Bearer $OPERATE_TOKEN" \
 List API tokens with an administrator session or a token that has `admin`. Token
 creation and revocation require a fresh administrator browser session with CSRF
 and exact Origin checks; bearer tokens cannot create or revoke tokens. Sensitive
-actions use the ten-minute step-up flow described in `coordinator.md`. The create
-response includes the secret once; the list response contains metadata only:
+actions use the ten-minute step-up flow described in `coordinator.md`. Creating a
+token specifically requires a fresh passkey assertion; password/TOTP step-up is not
+enough for minting a new bearer credential. The create response includes the secret
+once; the list response contains metadata only:
 
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -206,7 +208,7 @@ curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 Create and revoke tokens from Account settings in the console, which completes
-the fresh-authentication and CSRF steps before sending the mutation.
+the passkey step-up, CSRF and Origin checks before sending the create mutation.
 
 Errors use `application/problem+json`. The stable `type` URI and `code` identify
 the existing coordinator error code; `status` is the HTTP status. List APIs use
@@ -456,6 +458,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `DELETE /api/v1/auth/sessions/{id}` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
+| `POST /api/v1/auth/passkeys/step-up/start` |
+| `POST /api/v1/auth/passkeys/step-up/finish` |
 | `POST /api/v1/auth/passkeys/re-enroll` |
 | `GET /api/v1/workers` |
 | `POST /api/v1/workers` |
