@@ -2,7 +2,7 @@
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
 `feat/distributed-bridge` (pull request #30). Its original 169 specification IDs and operator
-addenda 2 to 7 remain verified. The unified register now has 433 IDs, including tracking
+addenda 2 to 7 remain verified. The unified register now has 434 IDs, including tracking
 requirements, the physical Pi work, the follow-up groups (`API`, `SEC2`, `PK`, `UX`, `REV`, `DOG`, `PAR`)
 the release-readiness group `PRD` and the redesign group `UXR`; current in-progress and blocked rows are listed below.
 CI run 42181869238 on c81ccde is green on every job,
@@ -70,13 +70,13 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 258 |
-| Incomplete `[~]` | 79 |
-| Blocked `[!]` | 6 |
-| Not started `[ ]` | 90 |
-| **Total** | **433** |
+| Verified `[x]` | 261 |
+| Incomplete `[~]` | 77 |
+| Blocked `[!]` | 5 |
+| Not started `[ ]` | 91 |
+| **Total** | **434** |
 
-The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.
+The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Three of the verified rows (DOG-023, PI-WEAR-009, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 23:45 rather than by new evidence; each row says so.
 ## 3. Test results and coverage
 
 CI run 42181869238 on c81ccde:
