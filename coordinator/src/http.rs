@@ -3737,10 +3737,11 @@ async fn security_headers(mut r: Response) -> Response {
     let h = r.headers_mut();
     // Static pages keep their tailored CSP, but every response must be non-cacheable because
     // responses can contain session state or security decisions.
-    for (k, v) in [("content-security-policy", "default-src 'none'; form-action 'none'; frame-ancestors 'none'")] {
-        if !h.contains_key(k) {
-            h.insert(k, v.parse().expect("static header"));
-        }
+    if !h.contains_key("content-security-policy") {
+        h.insert(
+            "content-security-policy",
+            "default-src 'none'; form-action 'none'; frame-ancestors 'none'".parse().expect("static header"),
+        );
     }
     h.insert("cache-control", "no-store".parse().expect("static header"));
     for (k, v) in [
