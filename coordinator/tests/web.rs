@@ -27,6 +27,18 @@ async fn get(env: &Env, path: &str) -> (u16, reqwest::header::HeaderMap, String)
     (r.status().as_u16(), r.headers().clone(), r.text().await.unwrap())
 }
 
+fn assert_security_headers(h: &reqwest::header::HeaderMap, path: &str) {
+    assert_eq!(h["x-content-type-options"], "nosniff", "{path}");
+    assert_eq!(h["referrer-policy"], "no-referrer", "{path}");
+    assert_eq!(h["x-frame-options"], "DENY", "{path}");
+    assert_eq!(h["strict-transport-security"], "max-age=63072000", "{path}");
+    assert_eq!(h["cross-origin-opener-policy"], "same-origin", "{path}");
+    assert_eq!(h["cross-origin-resource-policy"], "same-origin", "{path}");
+    assert_eq!(h["cross-origin-embedder-policy"], "require-corp", "{path}");
+    assert!(h["permissions-policy"].to_str().unwrap().contains("camera=()"), "{path}");
+    assert_eq!(h["cache-control"], "no-store", "{path}");
+}
+
 #[tokio::test]
 async fn serves_index_and_assets_publicly_with_security_headers() {
     let (env, web) = boot_web().await;
@@ -39,23 +51,19 @@ async fn serves_index_and_assets_publicly_with_security_headers() {
     // xterm.js injects <style> elements, so only style-src may allow inline styles; scripts never.
     assert!(!csp.replace("style-src 'self' 'unsafe-inline';", "").contains("unsafe-inline"));
     assert!(csp.contains(&format!("wss://127.0.0.1:{}", env.addr.port())));
-    assert_eq!(h["x-content-type-options"], "nosniff");
-    assert_eq!(h["referrer-policy"], "no-referrer");
-    assert_eq!(h["x-frame-options"], "DENY");
-    assert_eq!(h["strict-transport-security"], "max-age=63072000");
-    assert_eq!(h["cross-origin-opener-policy"], "same-origin");
-    assert_eq!(h["cross-origin-resource-policy"], "same-origin");
-    assert_eq!(h["cross-origin-embedder-policy"], "require-corp");
-    assert!(h["permissions-policy"].to_str().unwrap().contains("camera=()"));
-    assert_eq!(h["cache-control"], "no-cache");
+    assert_security_headers(&h, "/");
 
     let (st, h, body) = get(&env, "/app-ABCD1234.js").await;
     assert_eq!((st, body.as_str()), (200, "console.log(1)"));
     assert_eq!(h["content-type"], "text/javascript; charset=utf-8");
-    assert!(h["cache-control"].to_str().unwrap().contains("immutable"));
+    assert_security_headers(&h, "/app-ABCD1234.js");
     let (st, h, _) = get(&env, "/assets/app.css").await;
     assert_eq!(st, 200);
     assert_eq!(h["content-type"], "text/css; charset=utf-8");
+    assert_security_headers(&h, "/assets/app.css");
+    let (st, h, _) = get(&env, "/missing.js").await;
+    assert_eq!(st, 404);
+    assert_security_headers(&h, "/missing.js");
     env.stop().await;
     let _ = std::fs::remove_dir_all(web);
 }

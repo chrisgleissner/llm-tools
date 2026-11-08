@@ -356,11 +356,11 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
-| `--native` | `mission.start` params or `mission.create` body `native_tui`. |
+| `--native` | Maps to `mission.start` params or `mission.create` body `native_tui`. |
 | `--prompt` | `task.add`/`task.amend` or `mission.create` typed `prompt` field; local file read if `--prompt-file`. |
 | `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
-| `--providers` | `mission.start` params/body or `mission.create` body `providers`. |
-| `--routes` | `mission.start` params/body or `mission.create` body `routes`. |
+| `--providers` | Maps to `mission.start` params/body or `mission.create` body `providers`. |
+| `--routes` | Maps to `mission.start` params/body or `mission.create` body `routes`. |
 | `--teams` | `mission.create` body `teams`; mission edit maps to `mission.settings.patch`. |
 | `--token-spend` | `mission.create` body `token_spend`; mission edit maps to `mission.settings.patch`. |
 | `--trust-folder` | `mission.create` body `trust_folder`; worker only accepts a cwd inside its enrolled real-path roots. |
@@ -427,10 +427,10 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
 | `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
 | `--yes` | Confirmation for `cancel`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. |
-| `-f` | Short form of `--follow` for `events`. |
-| `-j` | Short form of `--json`. |
-| `-m` | Short form of `--mission`. |
-| `-t` | Short form of `--task`. |
+| `-f` | Alias, short form of `--follow` for `events`. |
+| `-j` | Alias, short form of `--json`. |
+| `-m` | Alias, short form of `--mission`. |
+| `-t` | Alias, short form of `--task`. |
 | `--help` | Local argparse help; no API call. |
 | `-h` | Alias for `--help`; local argparse help, no API call. |
 

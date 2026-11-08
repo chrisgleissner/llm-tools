@@ -69,6 +69,29 @@ def _decision_routes(rows: list[tuple[str, str]]) -> set[tuple[str, str]]:
 def _assert_decisions_are_present(rows: list[tuple[str, str]], kind: str) -> None:
     missing = [name for name, decision in rows if not decision.strip() or decision.strip() in {"-", "TBD", "TODO", "N/A"}]
     assert not missing, f"every CLI {kind} needs a parity decision; blank or placeholder decisions: {missing}"
+    unclassified = [
+        name
+        for name, decision in rows
+        if not any(
+            marker in decision.lower()
+            for marker in (
+                "typed", "resource", "rest", "operation", "maps to", "mapping", "exclusion", "local", "alias", "short form",
+                "body", "field", "internal", "never remote", "client-side",
+            )
+        )
+    ]
+    assert not unclassified, f"every CLI {kind} decision must identify a mapping or exclusion: {unclassified}"
+
+
+def test_parity_decision_requires_mapping_or_exclusion_language() -> None:
+    _assert_decisions_are_present([("mission list", "Typed operation `mission.list` maps to GET /api/v1/missions.")], "leaf")
+    _assert_decisions_are_present([("view", "Exclusion: opens a local artifact; no REST operation.")], "leaf")
+    try:
+        _assert_decisions_are_present([("new command", "Covered by the API.")], "leaf")
+    except AssertionError as exc:
+        assert "new command" in str(exc)
+    else:
+        raise AssertionError("an unclassified parity statement must fail")
 
 
 def test_cli_commands_and_options_are_listed_in_parity_table() -> None:

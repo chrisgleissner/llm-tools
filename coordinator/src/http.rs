@@ -3691,15 +3691,14 @@ async fn security_headers(mut r: Response) -> Response {
         r = err(StatusCode::BAD_REQUEST, "invalid-request", "a request path or parameter has an invalid format").into_response();
     }
     let h = r.headers_mut();
-    // The static handler sets its own Content-Security-Policy and cache policy.
-    for (k, v) in [
-        ("cache-control", "no-store"),
-        ("content-security-policy", "default-src 'none'; form-action 'none'; frame-ancestors 'none'"),
-    ] {
+    // Static pages keep their tailored CSP, but every response must be non-cacheable because
+    // responses can contain session state or security decisions.
+    for (k, v) in [("content-security-policy", "default-src 'none'; form-action 'none'; frame-ancestors 'none'")] {
         if !h.contains_key(k) {
             h.insert(k, v.parse().expect("static header"));
         }
     }
+    h.insert("cache-control", "no-store".parse().expect("static header"));
     for (k, v) in [
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
@@ -4057,6 +4056,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
     };
     app.layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
+        .layer(axum::middleware::from_fn(reject_method_override))
         .layer(axum::middleware::from_fn(fetch_metadata_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
@@ -4076,6 +4076,14 @@ fn listener_group_allows(group: crate::config::ListenerGroup, path: &str) -> boo
 async fn listener_group_gate(State(group): State<crate::config::ListenerGroup>, req: Request, next: axum::middleware::Next) -> Response {
     if !listener_group_allows(group, req.uri().path()) {
         return err(StatusCode::NOT_FOUND, "route-not-found", "route is not available on this listener").into_response();
+    }
+    next.run(req).await
+}
+
+async fn reject_method_override(req: Request, next: axum::middleware::Next) -> Response {
+    const OVERRIDE_HEADERS: [&str; 3] = ["x-http-method-override", "x-method-override", "x-http-method"];
+    if OVERRIDE_HEADERS.iter().any(|name| req.headers().contains_key(*name)) {
+        return err(StatusCode::BAD_REQUEST, "invalid-request", "method override headers are not supported").into_response();
     }
     next.run(req).await
 }

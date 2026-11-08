@@ -223,6 +223,25 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
     let head = session.rb(Method::HEAD, "/api/v1/missions").send().await.unwrap();
     assert_eq!(head.status().as_u16(), 200);
     assert!(head.bytes().await.unwrap().is_empty());
+    for header in ["x-http-method-override", "x-method-override", "x-http-method"] {
+        let before_tokens = env.srv.state.db.api_tokens_list().unwrap().len();
+        let token_override = session
+            .rb(Method::POST, "/api/v1/tokens")
+            .header(header, "GET")
+            .json(&serde_json::json!({"name":"override-must-not-create"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(token_override.status().as_u16(), 400, "{header}");
+        assert_eq!(token_override.headers()["content-type"], "application/problem+json", "{header}");
+        let problem: serde_json::Value = token_override.json().await.unwrap();
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request", "{header}");
+        assert_eq!(
+            env.srv.state.db.api_tokens_list().unwrap().len(),
+            before_tokens,
+            "{header} must not mutate state"
+        );
+    }
     env.stop().await;
 }
 
