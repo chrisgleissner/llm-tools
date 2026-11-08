@@ -1,6 +1,6 @@
 import * as api from "../api";
 import { absTime, button, copyButton, field, h, isoTime, relFromMs } from "../dom";
-import { apiMsg, facts } from "../kit-b";
+import { apiMsg, btn, facts } from "../kit-b";
 import { detectPasskeySupport, supportsPasskeysOnHost } from "../passkeys";
 import { menu } from "../menu";
 import { passkeyProviderName } from "../passkey-provider";
@@ -63,7 +63,7 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
       hint("The secret appears once. Save it in your password manager; it cannot be shown again."),
       failure,
     ),
-    h("div", { class: "actions end" }, h("button", { type: "button", class: "btn", onclick: close }, "Cancel"), create),
+    h("div", { class: "actions end" }, btn("Cancel", close), create),
   );
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -138,7 +138,7 @@ function tokenManagement(): HTMLElement {
   };
   const showSecret = (created: api.ApiTokenCreated): void => {
     const copy = copyButton(created.secret, "token");
-    const body = h("div", { class: "token-secret", "aria-live": "polite" }, h("p", {}, `Copy this secret for ${created.token.name}. It will not be shown again.`), h("div", { class: "secret" }, h("code", {}, created.secret), copy), h("div", { class: "actions end" }, h("button", { type: "button", class: "btn primary", onclick: () => dlg.close() }, "Done")));
+    const body = h("div", { class: "token-secret", "aria-live": "polite" }, h("p", {}, `Copy this secret for ${created.token.name}. It will not be shown again.`), h("div", { class: "secret" }, h("code", {}, created.secret), copy), h("div", { class: "actions end" }, btn("Done", () => dlg.close(), "btn primary")));
     const dlg = onceDialog({ id: "token-secret", title: "Token created", body, warning: "This secret is shown once. If you close this window without saving it, revoke the token and create a new one." });
     copy.focus();
     status.textContent = `Token ${created.token.name} created.`;
@@ -221,7 +221,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       ["Signs out", exp && `${relFromMs(exp.getTime())} (${absTime(exp).slice(11)}) at the latest`],
       ["Idle limit", s && `${minutes(s.idle_timeout_secs)} without activity`],
     ]),
-    h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "account-signout", onclick: opts.signOut }, "Sign out")),
+    h("div", { class: "actions" }, btn("Sign out", opts.signOut, "btn", { id: "account-signout" })),
   );
   const answers = answerLine({
     what: `Signed in as ${me?.username ?? "this account"}${s ? (s.remember ? " on a remembered device" : " for this browser session") : ""}.`,

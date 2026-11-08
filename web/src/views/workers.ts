@@ -1,5 +1,6 @@
 import * as api from "../api";
 import { button, copyButton, copyText, emptyState, field, h, hooks, idChip, keepFocus, statePill } from "../dom";
+import { btn } from "../kit-b";
 import { menu } from "../menu";
 import { refresh, store, subscribe, workerDerived } from "../store";
 import { announce, confirmDialog, openPanel } from "../ui";
@@ -10,7 +11,7 @@ const reload = (): void => void refresh().catch(() => {});
 
 function enrolDialog(name: string, token: string): void {
   const cmd = `llm-bridge worker enroll --name ${name} --coordinator wss://${location.host} --token-file - --ca-file ca.pem\nllm-bridge worker run`;
-  const done = h("button", { type: "button", class: "btn primary", id: "enrol-done", onclick: () => dlg.close() }, "Done");
+  const done = btn("Done", () => dlg.close(), "btn primary", { id: "enrol-done" });
   const body = h(
     "div",
     {},
@@ -53,7 +54,7 @@ function addDialog(): void {
       } else error.textContent = apiMessage(err, "Unexpected error. Try again.");
     }
   };
-  const form = h("form", { novalidate: true, onsubmit }, el("div", "dialog-body", name.wrap, error), el("div", "actions end", h("button", { type: "button", class: "btn", onclick: () => dlg.close() }, "Cancel"), submit));
+  const form = h("form", { novalidate: true, onsubmit }, el("div", "dialog-body", name.wrap, error), el("div", "actions end", btn("Cancel", () => dlg.close()), submit));
   const dlg = openPanel({ title: "Add a worker", id: "add-worker", body: form });
   name.input.focus();
 }
