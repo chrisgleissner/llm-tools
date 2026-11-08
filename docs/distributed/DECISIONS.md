@@ -426,7 +426,7 @@ image with that one change made and then restored).
 |---|---|---|---|---|
 | 1 | Inbox order | Failures from the last 24 hours rank first, then approval, then input. Older failures are one row after the input rows, "N older failures", with a Show button (and Hide) that lists them below that row. The heading count includes them. | "D28.1: failures of the last 24 hours come first..." and "D28.1: failures older than 24 hours are one row..." | the older-failures group removed; approval and input ranks swapped; the preview not following a visible row |
 | 2 | Capacity chip | Neutral while the provider is ready. While `usage.snapshot` says the provider is not ready, the chip has the attention tone and "resets 12:25" in its text. At 320 px the scope, the meter and the visible percentage give way ("Claude resets 12:25", 12 px, 6 px padding); the percentage stays in the accessible text and the title. | "D28.2: a chip is neutral..." and "D28.2: the waiting chip... fits the header at 320 px"; T35 and T22 still pass | `waiting: false` in `chipsFrom` |
-| 3 | Stop beside Reject, Undo for Pause | Stop has no danger outline while Reject is in the same header and stays visible. Pause answers with "Mission paused." and an Undo button; the toast expires after 8 s (spec 6.4 has the exception) and Undo sends `mission.resume`. | "D28.3: Stop has no danger outline..." and "D28.3: Pause answers with an Undo toast..." | Stop always `danger`; the toast with an action sticky again |
+| 3 | Stop beside Reject, Undo for Pause | Stop has no danger outline while a Reject button is shown in the same header (from 30 rem; below it Reject is in the menu and Stop keeps its outline) and stays visible. Pause answers with "Mission paused." and an Undo button; the toast expires after 8 s (spec 6.4 has the exception) and Undo sends `mission.resume`. | "D28.3: Stop has no danger outline..." and "D28.3: Pause answers with an Undo toast..." | Stop always `danger`; the toast with an action sticky again |
 | 4 | Phone action bar | Replaced by the overseer, because UXR-007 needs Pause and Stop always visible. The primary label is "Approve" (the accessible name keeps "Approve task 2"). Pause and Stop show icon and label in 44 px buttons; padding is 8 px so Take control, Pause, Stop and the menu fit one row at 353 and 360 px. At 320 px (below 21 rem) Pause and Stop are icon only with their names for screen readers, because Take control, Pause, Stop and the menu need 315 px and 296 px are available. Stop is never moved into the menu. | "D28.4: the primary action reads 'Approve'..." and "D28.4: on a phone Pause and Stop are 44 px buttons..." | the label back to "Approve task 2"; the icon-only rule at every phone width |
 | 5 | Key bar | On a phone it is hidden until the client holds control, at every height (it was hidden only up to 640 px). T38 changes with it: hidden before control, six keys plus "..." after. | "D28.5: on a phone the key bar is hidden until control..." and T38 | the old height condition in `phone.css` |
 | 6 | Reconnect banner age | The banner says "Showing data as of 12:00" and adds "(15s ago)" once the data is 10 s old. `shell.spec.ts` and T28 wait for it; T28 uses the fake clock because the fixed clock never reaches 10 s. | `shell.spec.ts` "a reconnect shorter than the debounce..." and T28 | `AGE_AFTER_MS = 0` |
@@ -439,7 +439,7 @@ lead registers them on the release branch from this table):
 | UXR-047 | R1: a phone opens the live session also while a task awaits approval | The product already opened on Session (`let tab = ... "session"`); the Tasks tab in the screenshots came from the screen definitions. A test now asserts the selected tab, the live pane and 14 rows with Approve in reach. | "R1: a mission that awaits approval opens on the Session tab on a phone..." | default tab "tasks" |
 | UXR-048 | R2: one place for the primary action | The header offers Approve, Reject and Retry for the task it is about; that task's row and the evidence block have no copy. A row of another task keeps its inline action and its menu; with several approvals the header says "Review N tasks" and each row keeps Approve and Reject. The evidence block has no buttons. | "R2: Approve and Reject are offered once..." and "R2: with several tasks awaiting approval..." | `subject` always undefined |
 | UXR-049 | R3: one number everywhere | The heading "Needs you (n)" uses the same figure as the badge, the tab title and the answer line; "+" appears only while some active mission is unread. | "R3: ... one number" and "R3: when every mission has been read..." | the heading using the row count |
-| UXR-050 | R4: the summary is not an instruction | The third part of the Inbox answer line names the kinds: "1 failed, 1 awaits approval". On phones the line keeps room for two lines from the start, so a late status does not move the rows (CLS). | "R4: the Inbox summary names the kinds..."; T47 F2 and T36 | the text "Retry or open" |
+| UXR-050 | R4: the summary is not an instruction | The third part of the Inbox answer line names the kinds: "1 failed, 1 awaits approval". On phones taller than 30 rem the line keeps room for two lines from the start, so a late status does not move the rows (CLS); a landscape phone keeps one line so the first row stays above the fold (T18). | "R4: the Inbox summary names the kinds..."; T47 F2 and T36 | the text "Retry or open" |
 | UXR-051 | R5: the pill column | The column is 8.5 rem in Needs you, 6.5 rem in Running and 11 rem elsewhere, so the title starts 40 px closer at 1440 px in Needs you and no pill reaches a title. | "R5: at 1440 px an Inbox title starts close to its pill..." | 11 rem in Needs you |
 | UXR-052 | R6: the phone search button | No fill and no border at rest, like the account button. | "R6: on a phone the search button has no fill and no border..." | the old border colour |
 
@@ -463,13 +463,19 @@ Budget (bytes, raw / gzip, caps in `web/budget.json` not raised):
 
 | Measure | Before (72930c5) | Now | Cap |
 |---|---:|---:|---:|
-| Initial JavaScript | 79509 / 30905 | 80440 / 31313 | 91000 / 31750 |
-| Initial CSS | 33525 / 7451 | 33927 / 7547 | 34000 / 9000 |
-| Initial total | 113034 / 38356 | 114367 / 38860 | 124000 / 40000 |
+| Initial JavaScript | 79509 / 30905 | 80464 / 31326 | 91000 / 31750 |
+| Initial CSS | 33525 / 7451 | 33949 / 7550 | 34000 / 9000 |
+| Initial total | 113034 / 38356 | 114413 / 38876 | 124000 / 40000 |
 | Terminal chunk | 355631 / 92442 | 355631 / 92441 | 360000 / 93000 |
-| Route JavaScript | 93987 / 35975 | 93965 / 36098 | 94000 / 38700 |
+| Route JavaScript | 93987 / 35975 | 93984 / 36138 | 94000 / 38700 |
 | Route CSS | 18296 / 4848 | 18358 / 4869 | 18400 / 4900 |
 
 The route JavaScript had 13 raw bytes left. The additions (the Undo option of a toast, the header's subject, the Approve label) were paid for by
 folding the Stop and Cancel confirmations into one function, merging the two Retry branches of the header, one helper for the task
-Retry, Resume and Pause calls, and dropping the evidence block's second pair of Approve and Reject buttons. The initial CSS has 73 bytes left.
+Retry, Resume and Pause calls, and dropping the evidence block's second pair of Approve and Reject buttons. The route JavaScript has 16 raw bytes left and the initial CSS 51.
+
+Baselines: regenerated in `mcr.microsoft.com/playwright:v1.64.1-noble` with `--update-snapshots=all` for `screenshots.spec.ts`; images that were
+pixel-identical or differed by fewer than 50 pixels were restored, which leaves 233 changed files (light and dark, desktop and phone) plus the new
+`inbox-older-failures` screen. 47 of them differ only in the header (the waiting chip). The login and setup screens are among the rest: the committed
+images still showed "What does this do?", which the source replaced with "What does remembering do?" earlier, and the 0.2% comparison tolerance had hidden it.
+Looked at in light and dark: contact sheets of the Inbox, mission, session, Sessions and Missions screens on phone and desktop, header crops of the images that differ only in the chip, and the login screens.
