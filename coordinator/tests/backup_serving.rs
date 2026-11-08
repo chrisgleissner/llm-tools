@@ -340,7 +340,10 @@ async fn scenario(control: bool, out_file: Option<PathBuf>) {
     };
     let live_mb = env_u64("BACKUP_TEST_MB", 100);
     let bloat_mb = env_u64("BACKUP_TEST_BLOAT_MB", 60);
-    let limit = Duration::from_secs(env_u64("BACKUP_TEST_SECS", 90));
+    // Hosted macOS and Windows runners were seen copying at about 1 MiB/s under the worker's writes
+    // (the 108 MiB copy needed more than 90 s), so those platforms get a longer default limit.
+    let default_limit = if cfg!(target_os = "linux") { 90 } else { 300 };
+    let limit = Duration::from_secs(env_u64("BACKUP_TEST_SECS", default_limit));
     let dir = std::env::var_os("BACKUP_TEST_KEEP").map(PathBuf::from).unwrap_or_else(tmp_dir);
     std::fs::create_dir_all(&dir).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
