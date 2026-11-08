@@ -407,3 +407,29 @@ under 4x CPU throttling exceeds 4 000 ms or the form takes more than 5 000 ms to
 deliberately loose (about 25 times the measured values) so that a slower or busier CI runner does not fail the test;
 they catch order-of-magnitude regressions, not small ones. The measured values are in the table above and are also
 written to `web/test-results/load-metrics.json` and uploaded by the CI `web` job.
+
+## Backup while serving (DOG-024, x86-64 host, NVMe, not a Pi)
+
+`cargo test --release --test backup_serving -- --nocapture` generates a database
+(events, finished commands with 6 KB results, audit rows and free pages), starts the real
+`serve` process, keeps a fake worker sending an event batch every 50 ms and polls
+`/healthz` and `/api/v1/auth/state` four times a second while `bridge-coordinator backup`
+runs as a second process. Environment: `BACKUP_TEST_MB` (data in MiB, default 100),
+`BACKUP_TEST_BLOAT_MB` (free pages, default 60), `BACKUP_TEST_BIN` (binary to run, for
+example one built before the change), `BACKUP_TEST_FLAGS`, `BACKUP_TEST_CONTROL=1` (same
+traffic, no backup), `BACKUP_TEST_OUT` (file for the figures). Point `TMPDIR` at a disk,
+not at a tmpfs.
+
+| Run | Database file | Result |
+| --- | --- | --- |
+| Binary before the fix, 100 MiB data + 60 MiB free pages | 174 MiB | backup not finished after 60 s, 8,667 MiB written by the backup process; slowest `/healthz` 177 ms, `/auth/state` 175 ms, event batch 212 ms |
+| Fixed binary, same data, `--max-mb-s 40` | 174 MiB | backup 1.3 s, copy 50 MiB, 50 MiB written; slowest `/healthz` 36 ms, `/auth/state` 114 ms, event batch 85 ms |
+| Fixed binary, 400 MiB data + 200 MiB free pages, default options | 698 MiB (470 MiB in use) | backup 44 s (copy 445 MiB, written at 10.9 MiB/s on average against a 6 MiB/s cap, pacing is per statement step), `integrity_check` 0.4 s; slowest `/healthz` 131 ms, `/auth/state` 308 ms, event batch 248 ms |
+| Same, control without backup | 698 MiB | slowest `/healthz` 113 ms, `/auth/state` 118 ms, event batch 221 ms |
+
+The control run shows the database's own retention work after start (the fixture holds
+53,000 finished commands with bulky results) as the main source of the larger figures.
+The test requires no polled request at or over 1 s and the backup to finish within 90 s.
+On the old binary it fails because the backup does not finish. Pi Zero 2 W figures are an
+extrapolation (install.md, Backup and restore) until measured on the board.
+

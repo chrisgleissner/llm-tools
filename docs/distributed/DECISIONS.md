@@ -447,3 +447,46 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 
+## D27 Coordinator backups: snapshot copy, bounded retention, no WAL shipping yet (DOG-024)
+
+Cause. On the Pi, `backup` ran for more than 35 minutes and the coordinator answered
+neither HTTPS nor worker TLS handshakes. The old backup opened the database from a second
+process and used the SQLite backup API in steps of 256 pages. SQLite restarts such a
+backup from the first page when another connection commits between two steps. A
+coordinator that receives events commits several times a second, so the copy could not
+finish: on the test fixture (174 MiB, one worker sending an event batch every 50 ms) it
+wrote 8.7 GiB in 60 seconds and never completed. Each step also committed the copy's
+rollback journal with fsyncs, so the restarted copies kept the card busy. The likely
+mechanism of the TLS stall, which was not observed directly: on ext4 a commit by the
+coordinator (`synchronous=FULL`) waits for the dirty data of the same journal
+transaction, and the coordinator runs database calls on two runtime threads behind one
+connection mutex, so a commit that waits on the card stops both threads and with them
+the TLS accept loop. That stall cannot be reproduced on an NVMe host (the slowest
+health request there was 177 ms during the old backup); the livelock and the write
+volume are measured, and the test fails on the old binary because the backup never
+finishes.
+
+Decision. The backup is `VACUUM INTO` from a read snapshot (cannot be restarted, copies
+only pages in use), paced to a write rate cap with a flush every MiB, at nice 19 and idle
+I/O, with a preflight estimate, a budget and progress. Retention: result bodies of
+finished commands are dropped after an hour (read-only) or a day (mutating), finished
+command rows are capped at 5 000, and the hourly pass runs on a blocking thread in
+50-row statements. New databases use incremental auto-vacuum; each hourly pass returns at
+most 8 MiB of free pages; `compact` converts an old database offline. The Python worker
+already does not replicate controller heartbeats or superseded capacity refreshes
+(DF-019/020), so the coordinator stores no plumbing it would never read.
+
+Rejected: continuous WAL shipping (Litestream style) for the pre-upgrade step. It needs a
+long-running replica process and a second storage target on a host with 512 MB of RAM,
+and it holds a read snapshot open that stops WAL checkpoints. The design, if the recovery
+point has to shrink to seconds: a sidecar tails `coordinator.sqlite3-wal` frames after
+`PRAGMA wal_autocheckpoint=0` is replaced by a checkpoint that the sidecar runs, ships
+each new frame range (salt and frame counters identify the generation) to the
+off-device store, and takes a fresh `backup` snapshot per day; restore is the newest
+snapshot plus the frames of its generation. Because the workers re-send replicated
+events, the missing piece is only coordinator-local state, so a recent snapshot with an
+age check (`backup-check`) is what ships now.
+
+Open: the coordinator still calls the database synchronously on its two runtime threads.
+A slow commit stops request handling for its duration whatever the cause. Moving database
+calls to a blocking pool is a larger change than this fix and is not done here.

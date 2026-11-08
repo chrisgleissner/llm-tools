@@ -68,7 +68,7 @@ docker compose exec coordinator bridge-coordinator token create laptop --scope r
 docker compose exec coordinator bridge-coordinator admin reset-password          # prompts twice; over SSH use llm-bridge-coordinator (Locked out or forgot the password)
 docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt    # non-interactive: the new password is read from stdin
 docker compose exec coordinator bridge-coordinator cert renew             # new server certificate; names must be within the CA's name constraints (see "Trusting the certificate")
-docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3
+docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3   # online; low priority, prints size, progress and ETA
 docker compose stop && docker compose run --rm coordinator restore --input /data/backup-2026-11-05.sqlite3 && docker compose start
 ```
 
@@ -308,11 +308,102 @@ the new `ca.pem` in every browser and re-enrol every worker. Workers trust the s
 
 ## Backup and restore
 
-`bridge-coordinator backup --data-dir DIR --output FILE` copies the database with
-the SQLite online backup API while the server runs. The file is mode 0600, an
-existing file is never overwritten, and `integrity_check` must pass before the file
-appears. It contains workers (token hashes), the administrator password hash,
-sessions, API token hashes, the event index and the audit log.
+`bridge-coordinator backup --data-dir DIR --output FILE` writes a compacted, consistent
+copy of the database while the server runs. The file is mode 0600, an existing file is
+never overwritten, and `integrity_check` must pass on the copy before the file appears
+under its final name. It contains workers (token hashes), the administrator password
+hash, sessions, API token hashes, the event index and the audit log.
+
+How the backup avoids stopping the coordinator (DOG-024):
+
+- The copy is made with `VACUUM INTO` from one read snapshot. Writers are not blocked by
+  it and are not able to restart it, and only pages in use are copied: free pages left by
+  deleted rows are skipped, so a database file of 700 MiB with 230 MiB of free pages
+  produces a copy of about 450 MiB. (The earlier method used the SQLite backup API in
+  steps from a second process. Every commit by the running coordinator restarted that
+  copy from the first page, so on a coordinator that was receiving events the backup
+  never finished and rewrote the file again and again, 8.7 GiB written in 60 seconds
+  for a 174 MiB database in the measurement below.)
+- The process lowers its own priority to nice 19 and the idle I/O class where Linux
+  provides them (inside a container as well) and prints what took effect. Idle I/O is
+  ignored by the `mq-deadline` and `none` schedulers, which SD and NVMe drivers use, so
+  the copy is also paced: its write rate is capped (`--max-mb-s`, default 6, 0 removes
+  the cap) and dirty data is flushed after every MiB. On ext4 a commit of the running
+  coordinator waits for the dirty data of the same journal transaction, so this flush
+  limit is what keeps that wait short. The copy is written without a journal and without
+  per-page syncs, and is synced once at the end.
+- It reports before it starts: database size, pages in use, free pages, the write rate
+  measured in the output directory (4 MiB written and synced; `--assume-mb-s N` replaces
+  the measurement), and the estimated duration. It prints progress, rate and time left
+  every 5 seconds.
+- It refuses to start when the estimate exceeds the budget (`--budget-minutes`, default
+  15) unless `--force` is given. It also refuses when the output directory has too little
+  free space. A failed or interrupted backup leaves no final file; the hidden
+  `.NAME.partial-PID` file is removed on failure and is not a usable backup.
+- `compact` (server stopped) rebuilds the live database the same way, keeping the old
+  file as `coordinator.sqlite3.before-compact-<UTC>`. Use it once on a database that grew
+  large before retention and incremental vacuum existed (the coordinator prints a hint at
+  start when a quarter of the file is free space).
+
+Measured, on x86-64 (`coordinator/tests/backup_serving.rs`, the data directory on ext4
+NVMe, the coordinator and a worker that sends an event batch every 50 ms running
+beside it, `/healthz` and `/api/v1/auth/state` polled four times a second):
+
+| Case | Database file | Backup | Slowest `/healthz` | Slowest `/api/v1/auth/state` |
+| --- | --- | --- | --- | --- |
+| Before the change, default options | 174 MiB (100 MiB in use) | not finished after 60 s, 8,667 MiB written, killed | 177 ms | 175 ms |
+| After, `--max-mb-s 40` | 174 MiB | 1.3 s, copy 50 MiB, 50 MiB written | 36 ms | 114 ms |
+| After, default options (6 MiB/s cap) | 698 MiB (470 MiB in use) | 44 s, copy 445 MiB, `integrity_check` 0.4 s | 131 ms | 308 ms |
+| Same database and traffic, no backup | 698 MiB | none | 113 ms | 118 ms |
+
+The old method does not stall requests on NVMe; the Pi's stall is the same defect on
+slow storage (see `DECISIONS.md`, D27). Pi Zero 2 W estimate: the default pace is
+6 MiB/s, so a copy of 450 MiB takes about 75 s plus an `integrity_check` that reads the
+copy back from the card, 30 to 60 s at 8 to 15 MiB/s, which is 2 to 3 minutes. This
+assumes a card that sustains 8 MiB/s of synced writes and 15 MiB/s of reads; a slower
+card makes the preflight estimate exceed the budget and the command refuses instead of
+running for half an hour. The figures to confirm on the board are the size of
+`coordinator.sqlite3` and the duration printed by `backup`.
+
+Pre-upgrade backup. A full backup before every upgrade is not needed, because workers
+keep the authoritative copy of their events and replay them after a restore (the
+coordinator restores to an older state and the workers re-send what it lacks). What the
+coordinator alone holds is the administrator, tokens, enrolled workers, the audit log and
+the command journal (a command submitted after the snapshot and not yet delivered is
+lost with a restore). So the pre-upgrade step is a recent snapshot plus an age check, not a new full copy:
+
+```sh
+# nightly, as the bridge user (cron or a systemd timer):
+bridge-coordinator backup --data-dir DIR --output /backup/coordinator-$(date +%F).sqlite3
+# in the upgrade procedure, before replacing the binary:
+bridge-coordinator backup-check --backup-dir /backup --max-age-hours 24 \
+  || bridge-coordinator backup --data-dir DIR --output /backup/pre-upgrade-$(date +%F-%H%M).sqlite3
+```
+
+`backup-check` finds the newest finished `*.sqlite3` file (partial files are hidden and
+ignored), opens it, runs `quick_check` (`--full`: `integrity_check`), compares its schema
+version with the binary and fails when it is older than the limit. The upgrade then loses
+at most the age of the snapshot of coordinator-local changes, and no replicated events.
+Choose `--max-age-hours` as the amount of that state you accept to lose.
+Continuous WAL shipping (Litestream style) would reduce that to seconds; it is not
+implemented, and the design is in `DECISIONS.md` D27.
+
+Off-device copy. `scripts/coordinator_offsite_backup.py` runs the backup on the device
+over ssh, fetches the finished file with resume, checks its SHA-256 and runs
+`PRAGMA integrity_check` on the fetched copy here (not on the device), compresses it with
+zstd (gzip with a warning if zstd is missing) and optionally encrypts it with gpg. Every
+stage keeps what it has: a transfer that breaks leaves `.coordinator-STAMP.sqlite3.fetch`,
+a rejected file is kept as `*.rejected`, a failed compression keeps the verified copy, and
+the exit status names the stage (2 device backup, 3 transfer, 4 verification, 5
+compression or encryption). Rerun the printed command with `--resume STAMP` to continue.
+Old archives are pruned only after a complete run. Example for the container install:
+
+```sh
+python3 scripts/coordinator_offsite_backup.py --host chris@pi --dest ~/pi-backups \
+  --backup-command 'cd /opt/llm-bridge && docker compose exec -T coordinator bridge-coordinator backup --output /data/offsite-{stamp}.sqlite3' \
+  --remote-file /var/lib/docker/volumes/llm-bridge_bridge-data/_data/offsite-{stamp}.sqlite3 \
+  --remove-remote --gpg-passphrase-file ~/.config/pi-backup-key
+```
 
 The backup does not contain these files. Back them up separately, readable only by
 you, and treat them as secrets (except `ca.pem` and `server.pem`):
@@ -502,7 +593,8 @@ directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
   forward-only: an older binary refuses a database with a newer version and does not
   modify it. To roll back, stop the service, install the old binary and restore the
   backup taken before the upgrade.
-- Order: take a backup (database and key files), upgrade the coordinator first, check
+- Order: take a backup (database and key files; `backup-check` accepts a snapshot younger
+  than the limit you choose, see Backup and restore), upgrade the coordinator first, check
   `health` and the diagnostics page, then upgrade workers one at a time. A worker that
   reconnects after the coordinator upgrade replays its event cursor, so no events are
   lost while workers still run the old version.

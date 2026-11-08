@@ -28,6 +28,27 @@ pub const fn session_policy(remember: bool) -> (i64, i64) {
 /// moves an idle expiry by at most 4%.
 pub const TOUCH_EVERY_SECS: i64 = 300;
 pub const COMPLETED_COMMAND_KEEP_SECS: i64 = 7 * 86_400;
+/// A finished command keeps its result body for this long. Read-only commands (status, list) return
+/// several KB each and nobody reads the body after the requesting client has polled it once.
+pub const READ_RESULT_KEEP_SECS: i64 = 3600;
+/// Result bodies of finished mutating commands are kept for a day, then reduced to the outcome.
+pub const MUTATING_RESULT_KEEP_SECS: i64 = 86_400;
+/// Results at or below this size stay whole until the row is deleted.
+const RESULT_STUB_ABOVE_BYTES: i64 = 1024;
+/// At most this many finished commands are kept, newest first, whatever their age.
+pub const MAX_DONE_COMMANDS: i64 = 5_000;
+/// Rows deleted or rewritten per statement in the maintenance pass. The connection mutex is
+/// released between statements so a large backlog never holds off the request handlers.
+const MAINTENANCE_BATCH: i64 = 50;
+/// Pause between maintenance statements; request handlers take the connection mutex in this gap.
+const MAINTENANCE_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+/// Free pages returned per statement (512 KiB at the 4 KiB page size).
+const VACUUM_CHUNK_PAGES: i64 = 128;
+/// Free pages returned to the file per maintenance pass when the database uses incremental
+/// auto-vacuum (about 8 MiB at the 4 KiB page size).
+pub const INCREMENTAL_VACUUM_PAGES: i64 = 2_048;
+/// The write-ahead log file is cut back to this size after a checkpoint has emptied it.
+const WAL_SIZE_LIMIT: i64 = 16 * 1024 * 1024;
 pub const MAX_OPEN_COMMANDS_PER_WORKER: i64 = 256;
 /// The journal is global durable state; count limits alone let large requests pin unbounded RAM
 /// during reconnect replay and consume the worker's finite disk. Keep both individual and total
@@ -364,7 +385,15 @@ impl Db {
     pub fn open(path: &Path) -> R<Db> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Incremental auto-vacuum has to be chosen before the first table exists; an existing
+        // database keeps its mode until `bridge-coordinator compact` (or a restore of a backup,
+        // which is written compacted with the mode set) rebuilds it.
+        let new_database: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if new_database == 0 {
+            conn.pragma_update(None, "auto_vacuum", 2)?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // No temporary files outside the data directory (read-only root file systems).
@@ -1562,22 +1591,111 @@ impl Db {
         rows
     }
 
+    /// Run `sql` (which must take `?1` = a cut-off and `?2` = the batch size) until a pass touches fewer
+    /// rows than the batch. The connection mutex is held for one statement at a time.
+    fn in_batches(&self, sql: &str, cutoff: i64) -> R<usize> {
+        let mut total = 0;
+        loop {
+            let n = self.c().execute(sql, params![cutoff, MAINTENANCE_BATCH])?;
+            total += n;
+            if (n as i64) < MAINTENANCE_BATCH {
+                return Ok(total);
+            }
+            std::thread::sleep(MAINTENANCE_PAUSE);
+        }
+    }
+
+    /// Retention and housekeeping, run hourly (and once at start). Every statement is bounded: rows
+    /// are removed or rewritten a batch at a time and the connection mutex is released in between, so
+    /// a large backlog (for example after a replication flood) is worked off without stalling requests.
     pub fn maintenance(&self) -> R<()> {
         let now = crate::now();
-        let c = self.c();
-        c.execute(
-            "DELETE FROM sessions WHERE expires_at <= ?1 OR last_seen <= ?2 - CASE remember WHEN 1 THEN ?3 ELSE ?4 END",
-            params![now, now, SESSION_IDLE_SECS, SESSION_IDLE_SECS_SHORT],
+        {
+            let c = self.c();
+            c.execute(
+                "DELETE FROM sessions WHERE expires_at <= ?1 OR last_seen <= ?2 - CASE remember WHEN 1 THEN ?3 ELSE ?4 END",
+                params![now, now, SESSION_IDLE_SECS, SESSION_IDLE_SECS_SHORT],
+            )?;
+            c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
+            c.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", params![now])?;
+            c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
+        }
+        self.in_batches(
+            "DELETE FROM commands WHERE rowid IN (SELECT rowid FROM commands WHERE state='done' AND updated_at < ?1 LIMIT ?2)",
+            now - COMPLETED_COMMAND_KEEP_SECS,
         )?;
-        c.execute(
-            "DELETE FROM commands WHERE state='done' AND updated_at < ?",
-            params![now - COMPLETED_COMMAND_KEEP_SECS],
-        )?;
-        c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
-        c.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", params![now])?;
-        c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
-        c.execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
+        // Result bodies: the request/outcome row stays, the body does not. A read-only result is dropped
+        // after an hour and a mutating one after a day; short results stay until the row is deleted.
+        let stub = "UPDATE commands SET result=json_object('outcome', json_extract(result,'$.outcome'), 'body_dropped', 1) \
+                    WHERE rowid IN (SELECT rowid FROM commands WHERE state='done' AND mutating=?3 AND updated_at < ?1 \
+                    AND length(result) > ?4 AND json_extract(result,'$.body_dropped') IS NULL LIMIT ?2)";
+        for (mutating, keep) in [(0_i64, READ_RESULT_KEEP_SECS), (1, MUTATING_RESULT_KEEP_SECS)] {
+            loop {
+                let n = self
+                    .c()
+                    .execute(stub, params![now - keep, MAINTENANCE_BATCH, mutating, RESULT_STUB_ABOVE_BYTES])?;
+                if (n as i64) < MAINTENANCE_BATCH {
+                    break;
+                }
+                std::thread::sleep(MAINTENANCE_PAUSE);
+            }
+        }
+        // Row cap on finished commands, oldest first.
+        loop {
+            let c = self.c();
+            let done: i64 = c.query_row("SELECT COUNT(*) FROM commands WHERE state='done'", [], |r| r.get(0))?;
+            let excess = (done - MAX_DONE_COMMANDS).min(MAINTENANCE_BATCH);
+            if excess <= 0 {
+                break;
+            }
+            c.execute(
+                "DELETE FROM commands WHERE rowid IN (SELECT rowid FROM commands WHERE state='done' ORDER BY updated_at, rowid LIMIT ?1)",
+                params![excess],
+            )?;
+            drop(c);
+            std::thread::sleep(MAINTENANCE_PAUSE);
+        }
+        self.c()
+            .execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
+        self.shrink()
+    }
+
+    /// Return a bounded number of free pages to the file (databases created with incremental
+    /// auto-vacuum only) and fold the write-ahead log back. Nothing here runs a full VACUUM.
+    fn shrink(&self) -> R<()> {
+        let mode: i64 = self.c().query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if mode == 2 {
+            let mut left = INCREMENTAL_VACUUM_PAGES;
+            while left > 0 {
+                let c = self.c();
+                let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+                if free == 0 {
+                    break;
+                }
+                // Each step of this pragma frees one page, so the statement is stepped to its end. The
+                // mutex is held for one small chunk at a time.
+                let mut st = c.prepare(&format!("PRAGMA incremental_vacuum({VACUUM_CHUNK_PAGES})"))?;
+                let mut rows = st.query([])?;
+                while rows.next()?.is_some() {}
+                drop(rows);
+                drop(st);
+                drop(c);
+                left -= VACUUM_CHUNK_PAGES;
+                std::thread::sleep(MAINTENANCE_PAUSE);
+            }
+        }
+        self.c().query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
         Ok(())
+    }
+
+    /// Free pages that the file still holds and whether it can give them back without a rebuild.
+    pub fn free_space(&self) -> R<(i64, i64, bool)> {
+        let c = self.c();
+        let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let total: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let mode: i64 = c.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        Ok((free * size, total * size, mode == 2))
     }
 
     pub fn diagnostics(&self) -> R<Value> {

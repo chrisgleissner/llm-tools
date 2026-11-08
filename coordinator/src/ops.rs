@@ -306,7 +306,9 @@ fn integrity_ok(path: &Path) -> Result<i64, String> {
     c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())
 }
 
-/// Copy `src` into a new 0600 file `tmp` with the SQLite online backup API.
+/// Copy `src` into a new 0600 file `tmp` with the SQLite online backup API. Used by `restore`, where
+/// nothing else writes to either file: the copy needs no journal and no per-step fsync, because the
+/// file is synced once at the end and a failed copy is deleted.
 fn copy_database(src: &Path, tmp: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(tmp);
     crate::private_options(0o600)
@@ -318,13 +320,16 @@ fn copy_database(src: &Path, tmp: &Path) -> Result<(), String> {
         let from = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(|e| e.to_string())?;
         from.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
         let mut to = Connection::open(tmp).map_err(|e| e.to_string())?;
+        to.pragma_update(None, "journal_mode", "OFF").map_err(|e| e.to_string())?;
+        to.pragma_update(None, "synchronous", "OFF").map_err(|e| e.to_string())?;
         {
             let b = Backup::new(&from, &mut to).map_err(|e| e.to_string())?;
-            b.run_to_completion(256, Duration::from_millis(5), None).map_err(|e| e.to_string())?;
+            b.run_to_completion(1024, Duration::ZERO, None).map_err(|e| e.to_string())?;
         }
         // The copy is a self-contained file: no WAL sidecars.
         to.pragma_update(None, "journal_mode", "DELETE").map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
+        drop(to);
+        sync_file(tmp)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(tmp);
@@ -332,8 +337,283 @@ fn copy_database(src: &Path, tmp: &Path) -> Result<(), String> {
     result
 }
 
+fn sync_file(path: &Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("cannot sync {}: {e}", path.display()))
+}
+
+/// Wall-clock budget `backup` accepts without `--force`.
+pub const BACKUP_DEFAULT_BUDGET: Duration = Duration::from_secs(15 * 60);
+/// Write rate a backup keeps to unless told otherwise. A microSD card in a Pi Zero 2 W sustains about
+/// 10 to 20 MiB/s of synced writes; the coordinator's own commits need the rest, and an idle I/O class
+/// is ignored by the `mq-deadline` and `none` schedulers that card and NVMe drivers use.
+pub const BACKUP_DEFAULT_MAX_BYTES_PER_SEC: u64 = 6 * 1024 * 1024;
+/// Dirty data a backup may leave in the page cache. On ext4 an fsync by another process (every
+/// coordinator commit) also waits for this data, so the bound is what the commit has to wait for.
+const BACKUP_DIRTY_LIMIT: u64 = 1024 * 1024;
+const PROBE_BYTES: usize = 4 * 1024 * 1024;
+const MIB: f64 = 1024.0 * 1024.0;
+
+#[derive(Clone, Debug)]
+pub struct BackupOptions {
+    /// Start although the estimate exceeds `budget`.
+    pub force: bool,
+    pub budget: Duration,
+    /// Cap on the rate at which the copy is written; 0 removes the cap.
+    pub max_bytes_per_sec: u64,
+    /// Use this write rate for the estimate instead of measuring one in the output directory.
+    pub assume_bytes_per_sec: Option<u64>,
+    /// Print the preflight figures and progress lines to stderr.
+    pub verbose: bool,
+}
+
+impl Default for BackupOptions {
+    fn default() -> Self {
+        BackupOptions {
+            force: false,
+            budget: BACKUP_DEFAULT_BUDGET,
+            max_bytes_per_sec: BACKUP_DEFAULT_MAX_BYTES_PER_SEC,
+            assume_bytes_per_sec: None,
+            verbose: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BackupReport {
+    /// Database file plus write-ahead log.
+    pub source_bytes: u64,
+    /// Pages in use (the compacted copy is about this size).
+    pub live_bytes: u64,
+    pub free_bytes: u64,
+    pub output_bytes: u64,
+    pub estimate: Duration,
+    pub copy: Duration,
+    pub check: Duration,
+    pub schema_version: i64,
+}
+
+impl BackupReport {
+    pub fn summary(&self) -> String {
+        format!(
+            "database {:.1} MiB ({:.1} MiB in use, {:.1} MiB free pages); copy {:.1} MiB written in {:.1} s, integrity_check {:.1} s",
+            self.source_bytes as f64 / MIB,
+            self.live_bytes as f64 / MIB,
+            self.free_bytes as f64 / MIB,
+            self.output_bytes as f64 / MIB,
+            self.copy.as_secs_f64(),
+            self.check.as_secs_f64()
+        )
+    }
+}
+
+struct DbStats {
+    page_size: u64,
+    page_count: u64,
+    freelist: u64,
+    wal_bytes: u64,
+}
+
+fn db_stats(src: &Path) -> Result<DbStats, String> {
+    let c = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .or_else(|_| Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_WRITE))
+        .map_err(|e| format!("cannot open {}: {e}", src.display()))?;
+    let n = |sql: &str| -> Result<u64, String> { c.query_row(sql, [], |r| r.get::<_, i64>(0)).map(|v| v as u64).map_err(|e| e.to_string()) };
+    Ok(DbStats {
+        page_size: n("PRAGMA page_size")?,
+        page_count: n("PRAGMA page_count")?,
+        freelist: n("PRAGMA freelist_count")?,
+        wal_bytes: std::fs::metadata(format!("{}-wal", src.display())).map(|m| m.len()).unwrap_or(0),
+    })
+}
+
+/// Estimated wall-clock time of a backup: the copy at the slower of the measured write rate and the
+/// rate cap, plus an integrity check that reads the copy back at twice that rate.
+pub fn estimate_backup(live_bytes: u64, write_bytes_per_sec: u64, max_bytes_per_sec: u64) -> Duration {
+    let write = write_bytes_per_sec.max(1);
+    let rate = if max_bytes_per_sec > 0 { write.min(max_bytes_per_sec) } else { write };
+    let copy = live_bytes as f64 / rate as f64;
+    Duration::from_secs_f64(copy * 1.5)
+}
+
+/// Write `PROBE_BYTES` to a scratch file next to the output and fsync it: the rate the device gives
+/// a synced sequential write right now. Also proves the directory is writable before any work starts.
+fn measure_write_rate(dir: &Path, stem: &str) -> Result<u64, String> {
+    use std::io::Write;
+    let probe = dir.join(format!(".{stem}.probe-{}", std::process::id()));
+    let chunk = vec![0x5a_u8; 64 * 1024];
+    let started = std::time::Instant::now();
+    let outcome = (|| {
+        let mut f = crate::private_options(0o600).write(true).create_new(true).open(&probe)?;
+        for _ in 0..PROBE_BYTES / chunk.len() {
+            f.write_all(&chunk)?;
+        }
+        f.sync_all()
+    })();
+    let _ = std::fs::remove_file(&probe);
+    outcome.map_err(|e| format!("cannot write in {}: {e}", dir.display()))?;
+    Ok((PROBE_BYTES as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64)
+}
+
+fn free_disk_bytes(dir: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is a valid NUL-terminated string and `st` is a properly sized, writable statvfs.
+        if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        Some(st.f_bavail as u64 * st.f_frsize as u64)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// `1h05m09s` or `3m07s`.
+pub fn format_age(d: Duration) -> String {
+    fmt_duration(d)
+}
+
+fn fmt_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}h{:02}m{:02}s", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
+    }
+}
+
+/// Lower this thread's CPU priority to nice 19 and its I/O class to idle, where the platform has them.
+/// Returns a description of what took effect. It is called by the command line, not by [`backup`], so
+/// a test or embedding process never changes its own priority (a non-root process cannot raise it again).
+pub fn lower_priority() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: both calls take plain integers; a failure only means the priority is unchanged.
+        let nice = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } == 0;
+        const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+        const IOPRIO_CLASS_IDLE: libc::c_long = 3 << 13;
+        let io = unsafe { libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0 as libc::c_long, IOPRIO_CLASS_IDLE) } == 0;
+        match (nice, io) {
+            (true, true) => "nice 19, I/O class idle".into(),
+            (true, false) => "nice 19 (I/O class idle not available)".into(),
+            (false, true) => "I/O class idle (nice not available)".into(),
+            (false, false) => "normal priority (neither nice nor the idle I/O class is available)".into(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "normal priority (not supported on this platform)".into()
+    }
+}
+
+/// Paces and reports `VACUUM INTO`. SQLite calls this every few thousand virtual-machine steps while
+/// the statement runs. Every 5 ms of wall time it compares the size of the output with what the rate
+/// cap allows and sleeps for the difference, forces the output to disk after every
+/// `BACKUP_DIRTY_LIMIT` bytes, and prints a progress line every 5 s.
+struct Pace {
+    started: std::time::Instant,
+    checked: std::time::Instant,
+    reported: std::time::Instant,
+    out: PathBuf,
+    sync: Option<std::fs::File>,
+    synced_len: u64,
+    max_bytes_per_sec: u64,
+    live_bytes: u64,
+    verbose: bool,
+}
+
+impl Pace {
+    fn tick(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.checked) < Duration::from_millis(5) {
+            return;
+        }
+        let len = std::fs::metadata(&self.out).map(|m| m.len()).unwrap_or(0);
+        if len >= self.synced_len + BACKUP_DIRTY_LIMIT {
+            if let Some(f) = &self.sync {
+                let _ = f.sync_data();
+            }
+            self.synced_len = len;
+        }
+        if self.max_bytes_per_sec > 0 {
+            let allowed_at = Duration::from_secs_f64(len as f64 / self.max_bytes_per_sec as f64);
+            let elapsed = now.duration_since(self.started);
+            if allowed_at > elapsed {
+                std::thread::sleep((allowed_at - elapsed).min(Duration::from_millis(250)));
+            }
+        }
+        self.checked = std::time::Instant::now();
+        if self.verbose && self.checked.duration_since(self.reported) >= Duration::from_secs(5) {
+            self.reported = self.checked;
+            let done = (len as f64 / self.live_bytes.max(1) as f64).min(0.99);
+            let secs = self.checked.duration_since(self.started).as_secs_f64().max(0.001);
+            let rate = len as f64 / secs;
+            let eta = if len > 0 { (self.live_bytes.saturating_sub(len)) as f64 / rate } else { 0.0 };
+            eprintln!(
+                "backup: {:>3.0}%  {:.1} of about {:.1} MiB  {:.1} MiB/s  about {} left",
+                done * 100.0,
+                len as f64 / MIB,
+                self.live_bytes as f64 / MIB,
+                rate / MIB,
+                fmt_duration(Duration::from_secs_f64(eta))
+            );
+        }
+    }
+}
+
+/// Write a compacted, consistent copy of `src` to `tmp` (which already exists, empty, mode 0600) with
+/// `VACUUM INTO`. The statement reads one snapshot of the database, so concurrent writers neither
+/// restart it nor wait for it, and it writes only pages in use, in one pass. The copy has incremental
+/// auto-vacuum set, so a database restored from it can give free pages back later.
+fn vacuum_into(src: &Path, tmp: &Path, pace: Pace) -> Result<(), String> {
+    // Read-write only because SQLite refuses `PRAGMA auto_vacuum` on a read-only handle; the statement
+    // itself only reads this database.
+    let mut from = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(|e| format!("cannot open {}: {e}", src.display()))?;
+    from.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+    // A small cache makes the output pager write as it goes instead of holding megabytes until the end.
+    from.pragma_update(None, "cache_size", -1024).map_err(|e| e.to_string())?;
+    from.pragma_update(None, "auto_vacuum", 2).map_err(|e| e.to_string())?;
+    let mut pace = pace;
+    pace.sync = std::fs::File::open(tmp).ok();
+    from.progress_handler(
+        100,
+        Some(move || {
+            pace.tick();
+            false
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    let target = tmp.to_str().ok_or("the backup path is not valid UTF-8")?;
+    from.execute("VACUUM INTO ?1", [target]).map_err(|e| format!("copy failed: {e}"))?;
+    Ok(())
+}
+
+/// Online backup of the coordinator database to `output` (0600, never overwrites) with default
+/// options and no progress output.
+pub fn backup(dir: &Path, output: &Path) -> Result<BackupReport, String> {
+    backup_with(dir, output, &BackupOptions::default())
+}
+
 /// Online backup of the coordinator database to `output` (0600, never overwrites).
-pub fn backup(dir: &Path, output: &Path) -> Result<(), String> {
+///
+/// The copy is made by `VACUUM INTO` from a read snapshot, so the serving process is never blocked and
+/// the backup is never restarted by its writes; free pages are not copied. The write rate is capped
+/// (`max_bytes_per_sec`), dirty data is flushed in small amounts, and progress and an ETA are reported.
+/// The run is refused before it starts when the estimate exceeds the budget, unless forced. The copy
+/// is verified with `PRAGMA integrity_check` before it appears under its final name.
+pub fn backup_with(dir: &Path, output: &Path, opts: &BackupOptions) -> Result<BackupReport, String> {
+    let say = |text: String| {
+        if opts.verbose {
+            eprintln!("{text}");
+        }
+    };
     let src = db_path(dir);
     if !src.exists() {
         return Err(format!("no database at {}", src.display()));
@@ -341,20 +621,202 @@ pub fn backup(dir: &Path, output: &Path) -> Result<(), String> {
     if output.exists() {
         return Err(format!("{} already exists; refusing to overwrite", output.display()));
     }
-    let tmp = output.with_file_name(format!(
-        ".{}.partial-{}",
-        output.file_name().and_then(|n| n.to_str()).unwrap_or("backup"),
-        std::process::id()
+    let parent = match output.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let stats = db_stats(&src)?;
+    let live_bytes = (stats.page_count - stats.freelist.min(stats.page_count)) * stats.page_size;
+    let report_base = |output_bytes, estimate, copy, check, schema_version| BackupReport {
+        source_bytes: stats.page_count * stats.page_size + stats.wal_bytes,
+        live_bytes,
+        free_bytes: stats.freelist * stats.page_size,
+        output_bytes,
+        estimate,
+        copy,
+        check,
+        schema_version,
+    };
+    let name = output.file_name().and_then(|n| n.to_str()).unwrap_or("backup").to_string();
+    let write_rate = match opts.assume_bytes_per_sec {
+        Some(r) => r,
+        None => measure_write_rate(&parent, &name)?,
+    };
+    let estimate = estimate_backup(live_bytes, write_rate, opts.max_bytes_per_sec);
+    say(format!(
+        "backup: database {:.1} MiB in use ({:.1} MiB of free pages are not copied, write-ahead log {:.1} MiB); \
+         writes {}at {:.1} MiB/s; estimated {} including the integrity check, budget {}",
+        live_bytes as f64 / MIB,
+        (stats.freelist * stats.page_size) as f64 / MIB,
+        stats.wal_bytes as f64 / MIB,
+        if opts.max_bytes_per_sec > 0 { "capped " } else { "uncapped " },
+        write_rate.min(if opts.max_bytes_per_sec > 0 { opts.max_bytes_per_sec } else { u64::MAX }) as f64 / MIB,
+        fmt_duration(estimate),
+        fmt_duration(opts.budget)
     ));
-    copy_database(&src, &tmp)?;
-    if let Err(e) = integrity_ok(&tmp) {
+    if let Some(free) = free_disk_bytes(&parent) {
+        let need = live_bytes + live_bytes / 20 + 1024 * 1024;
+        if free < need {
+            return Err(format!(
+                "not enough free space in {}: the backup needs about {:.1} MiB and {:.1} MiB are free",
+                parent.display(),
+                need as f64 / MIB,
+                free as f64 / MIB
+            ));
+        }
+    }
+    if estimate > opts.budget && !opts.force {
+        return Err(format!(
+            "the estimated time {} exceeds the budget {}. The database holds {:.1} MiB in use; \
+             reduce it first (`bridge-coordinator compact` after stopping the service), raise `--budget-minutes`, \
+             give a measured rate with `--assume-mb-s`, or pass `--force`",
+            fmt_duration(estimate),
+            fmt_duration(opts.budget),
+            live_bytes as f64 / MIB
+        ));
+    }
+    let tmp = parent.join(format!(".{name}.partial-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    crate::private_options(0o600)
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    let started = std::time::Instant::now();
+    let pace = Pace {
+        started,
+        checked: started,
+        reported: started,
+        out: tmp.clone(),
+        sync: None,
+        synced_len: 0,
+        max_bytes_per_sec: opts.max_bytes_per_sec,
+        live_bytes,
+        verbose: opts.verbose,
+    };
+    let copied = vacuum_into(&src, &tmp, pace).and_then(|()| {
+        sync_file(&tmp)?;
+        // VACUUM INTO writes the source's journal mode into the header; the copy is a self-contained file.
+        let c = Connection::open(&tmp).map_err(|e| e.to_string())?;
+        c.pragma_update(None, "journal_mode", "DELETE").map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    if let Err(e) = copied {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    let copy = started.elapsed();
+    let output_bytes = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    say(format!(
+        "backup: copied {:.1} MiB in {}; verifying with integrity_check",
+        output_bytes as f64 / MIB,
+        fmt_duration(copy)
+    ));
+    let check_started = std::time::Instant::now();
+    let schema_version = match integrity_ok(&tmp) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let check = check_started.elapsed();
     // hard_link fails when the target appeared meanwhile, so a concurrent file is never replaced.
     let linked = std::fs::hard_link(&tmp, output);
     let _ = std::fs::remove_file(&tmp);
-    linked.map_err(|e| format!("cannot create {}: {e}", output.display()))
+    linked.map_err(|e| format!("cannot create {}: {e}", output.display()))?;
+    if let Ok(d) = std::fs::File::open(&parent) {
+        let _ = d.sync_all();
+    }
+    Ok(report_base(output_bytes, estimate, copy, check, schema_version))
+}
+
+/// Newest finished backup in `dir` (`*.sqlite3`, not a `.partial` file), checked and compared with
+/// `max_age`. `full` runs `integrity_check`; otherwise `quick_check`.
+pub struct SnapshotStatus {
+    pub path: PathBuf,
+    pub age: Duration,
+    pub bytes: u64,
+    pub schema_version: i64,
+}
+
+pub fn check_snapshot(dir: &Path, max_age: Duration, full: bool) -> Result<SnapshotStatus, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let mut newest: Option<(std::time::SystemTime, PathBuf, u64)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file.starts_with('.') || !file.ends_with(".sqlite3") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if meta.is_file() && newest.as_ref().is_none_or(|(t, _, _)| modified > *t) {
+            newest = Some((modified, path, meta.len()));
+        }
+    }
+    let (modified, path, bytes) = newest.ok_or_else(|| format!("no finished backup (*.sqlite3) in {}; run `backup --output FILE`", dir.display()))?;
+    let age = std::time::SystemTime::now().duration_since(modified).unwrap_or_default();
+    let c = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("{}: {e}", path.display()))?;
+    let pragma = if full { "PRAGMA integrity_check" } else { "PRAGMA quick_check" };
+    let verdict: String = c.query_row(pragma, [], |r| r.get(0)).map_err(|e| format!("{}: {e}", path.display()))?;
+    if verdict != "ok" {
+        return Err(format!("{}: {pragma} failed: {verdict}", path.display()));
+    }
+    let schema_version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if schema_version > db::SCHEMA_VERSION {
+        return Err(format!(
+            "{} has schema version {schema_version}; this binary supports up to {}",
+            path.display(),
+            db::SCHEMA_VERSION
+        ));
+    }
+    if age > max_age {
+        return Err(format!(
+            "the newest backup, {}, is {} old; the limit is {}. Take a new one with `backup --output FILE` before upgrading",
+            path.display(),
+            fmt_duration(age),
+            fmt_duration(max_age)
+        ));
+    }
+    Ok(SnapshotStatus {
+        path,
+        age,
+        bytes,
+        schema_version,
+    })
+}
+
+/// Rebuild the database file compactly with incremental auto-vacuum, the same pass a backup makes.
+/// Refuses while a server holds the data directory lock. The previous file is kept as
+/// `coordinator.sqlite3.before-compact-<UTC>`. Returns `(kept file, size before, size after)`.
+pub fn compact(dir: &Path, opts: &BackupOptions) -> Result<(PathBuf, u64, u64), String> {
+    if !dir.join("config.toml").exists() {
+        return Err(format!("{} is not an initialised data directory (run `init`)", dir.display()));
+    }
+    let _lock = lock_data_dir(dir).map_err(|e| format!("{e}; stop the coordinator before compacting"))?;
+    let live = db_path(dir);
+    if !live.exists() {
+        return Err(format!("no database at {}", live.display()));
+    }
+    let before = std::fs::metadata(&live).map(|m| m.len()).unwrap_or(0);
+    let staged_name = dir.join(format!("{}.compact-{}", crate::DB_FILE, std::process::id()));
+    let _ = std::fs::remove_file(&staged_name);
+    let staged_output = staged_name.clone();
+    // Reuse the backup path (budget, pacing, integrity check) writing into the data directory.
+    let _ = std::fs::remove_file(&staged_output);
+    backup_with(dir, &staged_output, opts)?;
+    let kept = dir.join(format!("{}.before-compact-{}", crate::DB_FILE, crate::utc_stamp()));
+    if let Ok(c) = Connection::open(&live) {
+        let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
+    std::fs::rename(&live, &kept).map_err(|e| format!("cannot keep the old database: {e}"))?;
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", live.display()));
+    }
+    std::fs::rename(&staged_output, &live).map_err(|e| format!("cannot install the compacted database: {e}"))?;
+    let after = std::fs::metadata(&live).map(|m| m.len()).unwrap_or(0);
+    Ok((kept, before, after))
 }
 
 /// Replace the database with `input`. Refuses while a server holds the data directory lock.

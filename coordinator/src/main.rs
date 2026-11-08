@@ -17,7 +17,16 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   check-config                  (validate config.toml and the BRIDGE_COORDINATOR_* variables; lists every
                                  error with key, value and fix; exit 0 valid, 1 not; --web-dir as for serve)
   health                        (HTTPS GET /healthz with the local CA; exit 0 healthy, 1 not)
-  backup --output FILE | restore --input FILE   (restore needs the server stopped)
+  backup --output FILE [--force] [--budget-minutes N] [--max-mb-s N] [--assume-mb-s N]
+                                (online, consistent, compacted copy made at nice 19 / idle I/O and a capped
+                                 write rate; prints size, progress and ETA; refuses when the estimate exceeds
+                                 the budget (default 15 minutes) unless --force; verified with integrity_check)
+  backup-check --backup-dir DIR [--max-age-hours N] [--full]
+                                (newest *.sqlite3 in DIR: opens, passes quick_check (--full: integrity_check)
+                                 and is at most N hours old, default 24; exit 0 fresh, 1 not)
+  restore --input FILE          (needs the server stopped)
+  compact                       (needs the server stopped; rebuilds the database file without free pages and
+                                 with incremental auto-vacuum; same options as backup; keeps the old file)
   setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
   worker add NAME [--client-cert-file FILE --client-key-file FILE] | worker rotate-token NAME | worker revoke NAME
@@ -54,6 +63,13 @@ struct Args {
     web_dir: Option<PathBuf>,
     output: Option<PathBuf>,
     input: Option<PathBuf>,
+    backup_dir: Option<PathBuf>,
+    force: bool,
+    full: bool,
+    budget_minutes: Option<u64>,
+    max_age_hours: Option<u64>,
+    max_mb_s: Option<u64>,
+    assume_mb_s: Option<u64>,
     bind: Option<String>,
     expires_days: Option<u32>,
     scopes: Vec<String>,
@@ -75,6 +91,13 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         web_dir: None,
         output: None,
         input: None,
+        backup_dir: None,
+        force: false,
+        full: false,
+        budget_minutes: None,
+        max_age_hours: None,
+        max_mb_s: None,
+        assume_mb_s: None,
         bind: None,
         expires_days: None,
         scopes: vec![],
@@ -97,6 +120,13 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             "--web-dir" => a.web_dir = Some(value("--web-dir")?.into()),
             "--output" => a.output = Some(value("--output")?.into()),
             "--input" => a.input = Some(value("--input")?.into()),
+            "--backup-dir" => a.backup_dir = Some(value("--backup-dir")?.into()),
+            "--force" => a.force = true,
+            "--full" => a.full = true,
+            "--budget-minutes" => a.budget_minutes = Some(whole(&value("--budget-minutes")?, "--budget-minutes")?),
+            "--max-age-hours" => a.max_age_hours = Some(whole(&value("--max-age-hours")?, "--max-age-hours")?),
+            "--max-mb-s" => a.max_mb_s = Some(whole(&value("--max-mb-s")?, "--max-mb-s")?),
+            "--assume-mb-s" => a.assume_mb_s = Some(whole(&value("--assume-mb-s")?, "--assume-mb-s")?),
             "--bind" => a.bind = Some(value("--bind")?),
             "--expires-days" => {
                 let v = value("--expires-days")?;
@@ -114,6 +144,26 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         }
     }
     Ok(a)
+}
+
+fn whole(v: &str, flag: &str) -> Result<u64, String> {
+    v.parse().map_err(|_| format!("{flag} must be a whole number, not {v:?}"))
+}
+
+fn backup_options(args: &Args) -> ops::BackupOptions {
+    let mut o = ops::BackupOptions {
+        force: args.force,
+        verbose: true,
+        ..Default::default()
+    };
+    if let Some(m) = args.budget_minutes {
+        o.budget = std::time::Duration::from_secs(m * 60);
+    }
+    if let Some(m) = args.max_mb_s {
+        o.max_bytes_per_sec = m * 1024 * 1024;
+    }
+    o.assume_bytes_per_sec = args.assume_mb_s.map(|m| m.max(1) * 1024 * 1024);
+    o
 }
 
 fn open_db(dir: &std::path::Path) -> Result<Db, String> {
@@ -166,10 +216,34 @@ async fn run(args: Args) -> Result<(), String> {
         }
         ["backup"] => {
             let out = args.output.as_ref().ok_or("--output is required")?;
-            ops::backup(&dir, out)?;
+            eprintln!("backup: running at {}", ops::lower_priority());
+            let report = ops::backup_with(&dir, out, &backup_options(&args))?;
+            println!("backup written to {}: {}", out.display(), report.summary());
+            println!("the files listed in docs/distributed/install.md are not part of it");
+            Ok(())
+        }
+        ["backup-check"] => {
+            let backup_dir = args.backup_dir.as_ref().ok_or("--backup-dir is required")?;
+            let max_age = std::time::Duration::from_secs(args.max_age_hours.unwrap_or(24) * 3600);
+            let s = ops::check_snapshot(backup_dir, max_age, args.full)?;
             println!(
-                "backup written to {} (the files listed in docs/distributed/install.md are not part of it)",
-                out.display()
+                "newest backup {} is {} old, {:.1} MiB, schema version {}; {} passed",
+                s.path.display(),
+                ops::format_age(s.age),
+                s.bytes as f64 / (1024.0 * 1024.0),
+                s.schema_version,
+                if args.full { "integrity_check" } else { "quick_check" }
+            );
+            Ok(())
+        }
+        ["compact"] => {
+            eprintln!("compact: running at {}", ops::lower_priority());
+            let (kept, before, after) = ops::compact(&dir, &backup_options(&args))?;
+            println!(
+                "compacted: {:.1} MiB -> {:.1} MiB; the previous database is kept as {} (delete it when the service runs well)",
+                before as f64 / (1024.0 * 1024.0),
+                after as f64 / (1024.0 * 1024.0),
+                kept.display()
             );
             Ok(())
         }
