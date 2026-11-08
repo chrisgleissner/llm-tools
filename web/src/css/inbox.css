@@ -35,9 +35,11 @@
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .row-reason { flex: 1 1 7rem; min-inline-size: 0; }
 .row-reason + .row-reason, .row-reason.one { flex-basis: 100%; }
-.row-reason.one, .tail { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; } /* an approval: the reason and its summary on one line, the rest in the tooltip and the dialog */
-/* what an approval rests on (verifier result, size of the change) is a box of its own in the same line, so its late arrival does not widen the text block of the reason or of the mission answer (LCP, T37) */
-.tail { display: inline-block; max-width: 22rem; vertical-align: top; }
+.row-reason.one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; } /* an approval: the reason and its summary on one line, the rest in the tooltip and the dialog */
+/* With what an approval rests on (verifier result, size of the change) the line is two boxes side by side, each cut at its own end, so the late arrival of the second does not widen the text block of the reason (LCP, T37) */
+.row-reason.one:has(.tail) { display: flex; overflow: visible; }
+.row-reason.one > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tail { max-width: 22rem; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
 .row-cells { flex-wrap: nowrap; gap: var(--sp-3); }

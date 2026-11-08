@@ -212,6 +212,8 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
   const categories = await page.evaluate(async () => (await fetch("/api/v1/security/notifications").then((r) => r.json()) as { notifications: Array<{ category: string }> }).notifications.map((item) => item.category));
   expect(categories).toContain("new_sign_in_device");
+  // The notices are behind the header button that carries their count.
+  await page.getByRole("button", { name: /^Security notifications, \d+$/ }).click();
   await expect(page.getByText("A sign-in came from a new device.")).toBeVisible();
   await cdp.detach();
 });
