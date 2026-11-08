@@ -227,7 +227,9 @@ impl Api {
         (status, body)
     }
     /// Add a worker through the API and return its token.
-    pub async fn add_worker(&self, name: &str) -> String {
+    pub async fn add_worker(&mut self, name: &str) -> String {
+        let (step_up_status, step_up_body) = self.step_up(PASSWORD, None, None).await;
+        assert_eq!(step_up_status, 200, "{step_up_body}");
         let (st, b) = self.post("/api/v1/workers", json!({"name": name})).await;
         assert_eq!(st, 201, "{b}");
         b["token"].as_str().unwrap().to_string()

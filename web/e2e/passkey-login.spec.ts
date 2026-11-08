@@ -1,4 +1,4 @@
-import { expect, test, PASSWORD } from "./fixtures";
+import { expect, stepUpViaUi, test, PASSWORD } from "./fixtures";
 import { mockApp } from "./mock";
 import { supportsPasskeysOnHost } from "../src/passkeys";
 
@@ -146,11 +146,18 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await page.getByRole("button", { name: "Create administrator" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 
-  const registration = await page.evaluate(async () => {
+  const registration = await page.evaluate(async (password) => {
     const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
-    const started = await fetch("/api/v1/auth/passkeys/registration/start", {
+    const stepped = await fetch("/api/v1/auth/step-up", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      body: JSON.stringify({ password }),
+    });
+    if (!stepped.ok) throw new Error(`step-up failed: ${stepped.status} ${await stepped.text()}`);
+    const fresh = await stepped.json() as { csrf_token: string };
+    const started = await fetch("/api/v1/auth/passkeys/registration/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": fresh.csrf_token },
       body: JSON.stringify({ name: "Virtual authenticator" }),
     });
     if (!started.ok) throw new Error(`registration start failed: ${started.status} ${await started.text()}`);
@@ -190,11 +197,11 @@ test("Chromium virtual authenticator completes registration and passwordless sig
     };
     const finished = await fetch("/api/v1/auth/passkeys/registration/finish", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token },
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": fresh.csrf_token },
       body: JSON.stringify(payload),
     });
     return { status: finished.status, body: await finished.text() };
-  });
+  }, PASSWORD);
   expect(registration.status, registration.body).toBe(201);
 
   await page.evaluate(async () => {
@@ -213,5 +220,20 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   const categories = await page.evaluate(async () => (await fetch("/api/v1/security/notifications").then((r) => r.json()) as { notifications: Array<{ category: string }> }).notifications.map((item) => item.category));
   expect(categories).toContain("new_sign_in_device");
   await expect(page.getByText("A sign-in came from a new device.")).toBeVisible();
+
+  await page.goto(`${localUrl}/account`);
+  const passkeys = page.getByRole("list", { name: "Registered passkeys" });
+  const rename = passkeys.getByLabel("New name for Virtual authenticator");
+  await rename.fill("Primary device");
+  await passkeys.getByRole("button", { name: "Rename" }).click();
+  await stepUpViaUi(page);
+  await expect(passkeys).toContainText("Primary device");
+
+  await page.getByLabel("New passkey name").fill("Travel device");
+  await page.getByRole("button", { name: "Add passkey" }).click();
+  await expect(passkeys).toContainText("Travel device");
+  page.once("dialog", (dialog) => dialog.accept());
+  await passkeys.getByRole("button", { name: "Remove Travel device" }).click();
+  await expect(passkeys).not.toContainText("Travel device");
   await cdp.detach();
 });

@@ -1,6 +1,7 @@
 import * as api from "../api";
 import { field, h, relFromMs, timeEl } from "../dom";
 import { passkeyProviderName } from "../passkey-provider";
+import { creationOptions, serializeRegistration } from "../passkeys";
 import { withStepUp } from "../step-up";
 import { minutes } from "./login";
 import { passwordForm } from "./password-form";
@@ -209,23 +210,78 @@ function passkeyList(): HTMLElement {
   const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-list-title" });
   const rows = h("ul", { class: "token-list", "aria-label": "Registered passkeys" });
   const status = h("p", { role: "status", "aria-live": "polite" }, "Loading passkeys…");
-  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows);
-  void api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys")
-    .then(({ passkeys }) => {
+  const addName = h("input", { type: "text", maxlength: 64, required: true, autocomplete: "off", "aria-label": "New passkey name", placeholder: "e.g. Laptop" });
+  const add = h("button", { type: "submit", class: "btn primary" }, "Add passkey");
+  const addForm = h("form", { class: "token-create", "aria-label": "Register another passkey" }, h("h3", {}, "Add another passkey"), addName, add, h("p", { class: "hint" }, "Passkeys add another sign-in option. Password sign-in follows the coordinator's MFA policy."));
+  const refresh = async (): Promise<void> => {
+    try {
+      const { passkeys } = await api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys");
       status.textContent = "";
       if (!passkeys.length) {
         rows.replaceChildren(h("li", { class: "muted" }, "No passkeys registered."));
-        return;
+      } else {
+        rows.replaceChildren(...passkeys.map((passkey) => {
+          const renameName = h("input", { type: "text", maxlength: 64, required: true, value: passkey.name, "aria-label": `New name for ${passkey.name}` });
+          const rename = h("button", { class: "btn small", type: "submit" }, "Rename");
+          const renameForm = h("form", { class: "actions" }, renameName, rename);
+          renameForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            rename.disabled = true;
+            try {
+              await withStepUp(() => api.patch(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}`, { name: renameName.value.trim() }));
+              status.textContent = `Passkey renamed to ${renameName.value.trim()}.`;
+              await refresh();
+            } catch (error) {
+              status.textContent = error instanceof api.ApiError ? error.message : "Could not rename this passkey.";
+              rename.disabled = false;
+            }
+          });
+          const remove = h("button", { class: "btn small danger", type: "button", "aria-label": `Remove ${passkey.name}` }, "Remove");
+          remove.addEventListener("click", async () => {
+            if (!window.confirm(`Remove ${passkey.name}? The coordinator will protect the last available sign-in method.`)) return;
+            remove.disabled = true;
+            try {
+              await withStepUp(() => api.del(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}`));
+              status.textContent = `Passkey ${passkey.name} removed.`;
+              await refresh();
+            } catch (error) {
+              status.textContent = error instanceof api.ApiError ? error.message : "Could not remove this passkey.";
+              remove.disabled = false;
+            }
+          });
+          return h("li", {},
+            h("strong", {}, passkey.name),
+            h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
+            h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
+            h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
+            h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
+            renameForm, remove,
+          );
+        }));
       }
-      rows.replaceChildren(...passkeys.map((passkey) => h("li", {},
-        h("strong", {}, passkey.name),
-        h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
-        h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
-        h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
-        h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
-      )));
-    })
-    .catch((error) => { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; });
+    } catch (error) { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; }
+  };
+  addForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = addName.value.trim();
+    if (!name || !navigator.credentials?.create) { status.textContent = "Passkey registration is unavailable in this browser."; return; }
+    add.disabled = true;
+    try {
+      await withStepUp(async () => {
+        const start = await api.post<{ challenge_id: string; options: { publicKey: Record<string, unknown> } }>("/api/v1/auth/passkeys/registration/start", { name });
+        const credential = await navigator.credentials.create({ publicKey: creationOptions(start.options) });
+        if (!credential) throw new Error("Passkey registration was cancelled.");
+        await api.post("/api/v1/auth/passkeys/registration/finish", { challenge_id: start.challenge_id, credential: serializeRegistration(credential) });
+      });
+      addName.value = "";
+      status.textContent = `Passkey ${name} registered.`;
+      await refresh();
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : error instanceof Error ? error.message : "Could not register this passkey.";
+    } finally { add.disabled = false; }
+  });
+  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows, addForm);
+  void refresh();
   return section;
 }
 

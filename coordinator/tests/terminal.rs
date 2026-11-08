@@ -77,7 +77,7 @@ async fn open_session(env: &Env, api: &Api, fw: &mut Fw, token: &str, mode: &str
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_both_directions_with_validation() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut s = open_session(&env, &api, &mut fw, &token, "write").await;
@@ -141,7 +141,7 @@ async fn wait_sessions(env: &Env, n: usize) {
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_end_closes_browser_with_reason() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut s = open_session(&env, &api, &mut fw, &token, "view").await;
@@ -162,7 +162,7 @@ async fn worker_end_closes_browser_with_reason() {
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_status_is_relayed() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut browser = browser(&env, &api, "worker=w1&mission=nope").await;
@@ -185,7 +185,7 @@ async fn refused_status_is_relayed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_or_unknown_worker_gets_error_frame() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let _ = api.add_worker("w1").await; // enrolled but never connected
     for worker in ["w1", "ghost"] {
         let mut b = browser(&env, &api, &format!("worker={worker}&mission=m1")).await;
@@ -200,7 +200,7 @@ async fn offline_or_unknown_worker_gets_error_frame() {
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_upgrade_is_authenticated_and_origin_checked() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
@@ -261,7 +261,7 @@ async fn browser_upgrade_is_authenticated_and_origin_checked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_attach_rules() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let t1 = api.add_worker("w1").await;
     let t2 = api.add_worker("w2").await;
     let (mut fw1, _) = Fw::connect(&env, &t1, "wid1", 0).await;
@@ -296,7 +296,7 @@ async fn worker_attach_rules() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lagging_viewer_is_closed_with_1013() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut s = open_session(&env, &api, &mut fw, &token, "view").await;
@@ -340,7 +340,7 @@ async fn lagging_viewer_is_closed_with_1013() {
 #[tokio::test(flavor = "multi_thread")]
 async fn session_caps() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let mut fws = Vec::new();
     for n in 1..=5 {
         let name = format!("w{n}");
@@ -394,7 +394,7 @@ async fn silent_browser_terminal_is_closed_after_idle_timeout() {
             .replace("ws_idle_timeout_secs = 90", "ws_idle_timeout_secs = 2")
     })
     .await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut s = open_session(&env, &api, &mut fw, &token, "view").await;

@@ -42,7 +42,7 @@ fn audit_count(env: &Env, action: &str) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tombstone_removes_the_replica_and_blocks_a_late_replication_of_the_mission() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     fw.send(
@@ -92,7 +92,7 @@ async fn a_tombstone_removes_the_replica_and_blocks_a_late_replication_of_the_mi
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tombstone_for_a_mission_the_coordinator_never_saw_is_accepted() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     fw.send("events", json!({"after": 0, "through": 0, "events": [], "deleted_missions": ["never-seen"]}))
@@ -106,7 +106,7 @@ async fn a_tombstone_for_a_mission_the_coordinator_never_saw_is_accepted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_deleted_missions_are_rejected_without_changing_anything() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let too_many: Vec<String> = (0..101).map(|n| format!("m{n}")).collect();
@@ -129,7 +129,7 @@ async fn malformed_deleted_missions_are_rejected_without_changing_anything() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tombstones_are_bounded_by_age_and_count_and_a_hello_that_lists_the_mission_clears_one() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let _token = api.add_worker("w1").await;
     let db = &env.srv.state.db;
 
@@ -184,7 +184,7 @@ async fn answer(fw: &mut Fw, outcome: &str, result: Value, error: Value) -> Valu
 #[tokio::test(flavor = "multi_thread")]
 async fn the_delete_resource_needs_a_confirmation_and_the_replica_goes_when_the_worker_reports_the_deletion() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
     fw.send(

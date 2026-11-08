@@ -38,10 +38,29 @@ def test_container_release_emits_sbom_signature_and_provenance() -> None:
     workflow = (ROOT / ".github" / "workflows" / "container-release.yml").read_text()
     assert '      - "*.*.*"' in workflow
     assert "container/build.sh --push" in workflow
-    assert "cosign sign --yes" in workflow
+    assert "cosign sign --yes \"$IMAGE@$DIGEST\"" in workflow
+    assert "packages: write" in workflow
+    assert "id-token: write" in workflow
+    assert "attestations: write" in workflow
     assert "actions/attest-build-provenance@" in workflow
-    assert "cyclonedx-json=container.cdx.json" in workflow
-    assert "coordinator-container-cyclonedx" in workflow
+    assert "subject-name: ${{ steps.build.outputs.image }}" in workflow
+    assert "subject-digest: ${{ steps.build.outputs.digest }}" in workflow
+    assert "push-to-registry: true" in workflow
+    assert '"$RUNNER_TEMP/syft $IMAGE@$DIGEST -o cyclonedx-json=container.cdx.json"' in workflow
+    assert "sha256sum --check" in workflow
+    assert "coordinator-container-cyclonedx-${{ github.ref_name }}" in workflow
+    assert "if-no-files-found: error" in workflow
+
+
+def test_install_document_verifies_the_same_digest_and_expected_release_workflow() -> None:
+    install = (ROOT / "docs" / "distributed" / "install.md").read_text()
+    assert 'cosign verify "$IMAGE@sha256:DIGEST"' in install
+    assert "container-release.yml@refs/tags/.*" in install
+    assert "--certificate-oidc-issuer=https://token.actions.githubusercontent.com" in install
+    assert 'gh attestation verify "oci://$IMAGE@sha256:DIGEST"' in install
+    assert "--signer-workflow OWNER/REPO/.github/workflows/container-release.yml" in install
+    assert "gh run download RUN_ID -n coordinator-container-cyclonedx-VERSION" in install
+    assert "release job generates it from the immutable image digest" in install
 
 
 def test_release_workflow_tag_filter_matches_plain_semver_tags() -> None:

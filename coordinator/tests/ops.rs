@@ -133,7 +133,7 @@ async fn health_checks_the_configured_bind_with_the_local_ca() {
 #[tokio::test(flavor = "multi_thread")]
 async fn backup_and_restore_round_trip() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     api.add_worker("w1").await;
     let out = env.dir.join("backup.sqlite3");
     ops::backup(&env.dir, &out).unwrap(); // online: the server is running

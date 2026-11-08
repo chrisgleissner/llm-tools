@@ -132,7 +132,7 @@ async fn every_route_requires_credentials_except_the_public_ones() {
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_api_and_worker_credentials_cannot_cross_route_groups() {
     let env = boot().await;
-    let browser = env.admin().await;
+    let mut browser = env.admin().await;
     let worker_token = browser.add_worker("w1").await;
     let (_worker, _) = Fw::connect(&env, &worker_token, "principal-isolation", 0).await;
     let (created_status, created) = browser.post("/api/v1/tokens", serde_json::json!({"name":"admin-api","scopes":["admin"]})).await;
@@ -424,7 +424,7 @@ async fn every_authenticated_route_enforces_its_declared_token_scope() {
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_worker_token_is_refused_on_both_worker_endpoints() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (st, _) = api.send(api.rb(Method::DELETE, "/api/v1/workers/w1")).await;
     assert_eq!(st, 200);

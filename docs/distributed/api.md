@@ -193,22 +193,20 @@ curl --cacert ca.pem -H "Authorization: Bearer $OPERATE_TOKEN" \
   "$COORDINATOR/api/v1/commands"
 ```
 
-Manage API tokens with an administrator session (the browser adds CSRF and Origin
-checks) or a token that has `admin`. The create response includes the secret
-once; the list response contains metadata only:
+List API tokens with an administrator session or a token that has `admin`. Token
+creation and revocation require a fresh administrator browser session with CSRF
+and exact Origin checks; bearer tokens cannot create or revoke tokens. Sensitive
+actions use the ten-minute step-up flow described in `coordinator.md`. The create
+response includes the secret once; the list response contains metadata only:
 
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90,"allowed_cidrs":["192.0.2.0/24"],"allowed_workers":["build-1"]}' \
   "$COORDINATOR/api/v1/tokens"
 
-curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$COORDINATOR/api/v1/tokens"
-
-curl --cacert ca.pem -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$COORDINATOR/api/v1/tokens/automation"
 ```
+
+Create and revoke tokens from Account settings in the console, which completes
+the fresh-authentication and CSRF steps before sending the mutation.
 
 Errors use `application/problem+json`. The stable `type` URI and `code` identify
 the existing coordinator error code; `status` is the HTTP status. List APIs use

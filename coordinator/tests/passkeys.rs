@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 21);
+    assert_eq!(SCHEMA_VERSION, 22);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -61,6 +61,37 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .webauthn_challenge_take("challenge-2", "admin", "session-a", "registration")
         .unwrap()
         .is_none());
+    drop(db);
+    remove_database(&path);
+}
+
+#[test]
+fn schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal() {
+    let path = db_path();
+    {
+        let db = Db::open(&path).unwrap();
+        assert!(db.admin_create("operator", "password-hash").unwrap());
+        let row = bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "legacy-key".into(),
+            principal_id: "operator".into(),
+            credential: "{}".into(),
+            user_name: "phone".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        };
+        db.passkey_put_at_origin(&row, "https://bridge.example.test").unwrap();
+    }
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.passkeys_for_principal("operator").unwrap().len(), 0);
+    assert_eq!(db.passkeys_for_principal("admin").unwrap()[0].credential_id, "legacy-key");
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://bridge.example.test"));
     drop(db);
     remove_database(&path);
 }

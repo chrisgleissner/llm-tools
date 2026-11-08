@@ -291,7 +291,10 @@ async fn admin_bearer_tokens_cannot_substitute_for_browser_step_up() {
     ] {
         let (status, problem) = bearer.send(bearer.rb(method.clone(), path).json(&body)).await;
         assert_eq!(status, 403, "{method} {path}: {problem}");
-        assert_eq!(problem["code"], "step-up-required", "{method} {path}: {problem}");
+        assert_eq!(
+            problem["code"], "session-required",
+            "{method} {path}: bearer principals cannot step up ({problem})"
+        );
     }
     assert!(env.srv.state.db.api_tokens_list().unwrap().iter().any(|row| row.name == "automation-admin"));
     assert!(!env.srv.state.db.api_tokens_list().unwrap().iter().any(|row| row.name == "minted"));
@@ -303,7 +306,7 @@ async fn admin_bearer_tokens_cannot_substitute_for_browser_step_up() {
 #[tokio::test(flavor = "multi_thread")]
 async fn command_rejects_control_characters_in_mission_identifiers() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (_worker, _) = Fw::connect(&env, &token, "control-id-worker", 0).await;
     let (status, problem) = api
@@ -332,7 +335,7 @@ async fn command_rejects_control_characters_in_mission_identifiers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn task_mutation_rejects_unknown_json_fields() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (_worker, _) = Fw::connect(&env, &token, "unknown-field-worker", 0).await;
     let (status, problem) = api
@@ -711,6 +714,101 @@ async fn passkey_list_returns_only_declared_management_metadata() {
     assert!(!body.to_string().contains("private-credential-json-must-not-leak"));
     let (status, _) = api.get("/api/v1/auth/passkeys").await;
     assert_eq!(status, 200);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_management_requires_fresh_session_and_is_principal_scoped() {
+    let env = boot().await;
+    let setup = std::fs::read_to_string(env.dir.join("setup-token")).unwrap();
+    let mut api = env.api();
+    let (setup_status, setup_body) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/setup")
+                .json(&json!({"setup_token":setup.trim(),"username":"operator","password":PASSWORD})),
+        )
+        .await;
+    assert_eq!(setup_status, 201, "{setup_body}");
+    assert_eq!(api.login("operator", PASSWORD).await, 200);
+    let db = &env.srv.state.db;
+    for (id, principal, name) in [("my-passkey", "admin", "phone"), ("other-passkey", "someone-else", "other device")] {
+        db.passkey_put(&bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: id.into(),
+            principal_id: principal.into(),
+            credential: format!("private-{id}"),
+            user_name: name.into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        })
+        .unwrap();
+    }
+
+    let (status, problem) = api
+        .send(api.rb(Method::PATCH, "/api/v1/auth/passkeys/my-passkey").json(&json!({"name":"renamed"})))
+        .await;
+    assert_eq!(status, 403, "unstepped rename must fail: {problem}");
+    assert_eq!(problem["code"], "step-up-required");
+    let (status, problem) = api.send(api.rb(Method::DELETE, "/api/v1/auth/passkeys/my-passkey")).await;
+    assert_eq!(status, 403, "unstepped removal must fail: {problem}");
+
+    api.step_up(PASSWORD, None, None).await;
+    let (status, listed) = api.get("/api/v1/auth/passkeys").await;
+    assert_eq!(status, 200, "principal id must be independent of the administrator's username: {listed}");
+    assert_eq!(listed["passkeys"][0]["id"], "my-passkey");
+    let expired_cookie = bridge_coordinator::auth::random_token();
+    let expired_csrf = bridge_coordinator::auth::random_token();
+    let current_hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_deref().unwrap());
+    assert!(db
+        .session_step_up_rotate(
+            "admin",
+            &current_hash,
+            &bridge_coordinator::auth::sha256_hex(&expired_cookie),
+            &expired_csrf,
+            bridge_coordinator::now() - 1,
+        )
+        .unwrap());
+    api.cookie = Some(expired_cookie);
+    api.csrf = Some(expired_csrf);
+    let (status, problem) = api
+        .send(api.rb(Method::PATCH, "/api/v1/auth/passkeys/my-passkey").json(&json!({"name":"expired"})))
+        .await;
+    assert_eq!(status, 403, "expired fresh-auth marker must fail: {problem}");
+    assert_eq!(problem["code"], "step-up-required");
+
+    api.step_up(PASSWORD, None, None).await;
+    let (status, result) = api
+        .send(api.rb(Method::PATCH, "/api/v1/auth/passkeys/my-passkey").json(&json!({"name":"renamed phone"})))
+        .await;
+    assert_eq!(status, 200, "fresh session may rename its own passkey: {result}");
+    assert_eq!(db.passkeys_for_principal("admin").unwrap()[0].user_name, "renamed phone");
+    let (status, problem) = api
+        .send(api.rb(Method::PATCH, "/api/v1/auth/passkeys/other-passkey").json(&json!({"name":"stolen"})))
+        .await;
+    assert_eq!(status, 404, "foreign passkey must be hidden: {problem}");
+    assert_eq!(db.passkeys_for_principal("someone-else").unwrap()[0].user_name, "other device");
+
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"passkey-test","scopes":["admin"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let mut bearer = env.api();
+    bearer.bearer = Some(created["secret"].as_str().unwrap().to_owned());
+    let (status, problem) = bearer.send(bearer.rb(Method::DELETE, "/api/v1/auth/passkeys/my-passkey")).await;
+    assert_eq!(status, 403, "a bearer token cannot manage passkeys: {problem}");
+    assert_eq!(problem["code"], "session-required", "token principals cannot perform browser-session step-up");
+
+    let (status, result) = api.send(api.rb(Method::DELETE, "/api/v1/auth/passkeys/my-passkey")).await;
+    assert_eq!(status, 200, "fresh session may remove its own passkey: {result}");
+    assert_eq!(result["password_sign_in_available"], true);
+    assert!(db.passkeys_for_principal("admin").unwrap().is_empty());
+    assert_eq!(db.passkeys_for_principal("someone-else").unwrap().len(), 1);
+    let audit = serde_json::to_string(&db.audit_list(100).unwrap()).unwrap();
+    for private in [PASSWORD, "private-my-passkey", "private-other-passkey"] {
+        assert!(!audit.contains(private), "audit must not contain credential material");
+    }
     env.stop().await;
 }
 
@@ -1561,7 +1659,7 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
 #[tokio::test(flavor = "multi_thread")]
 async fn task_revision_etag_and_if_match_enforce_preconditions() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut worker, _) = Fw::connect_settled(&env, &token, "etag-worker", 0).await;
     let read_api = Api {
@@ -1623,7 +1721,7 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut worker, _) = Fw::connect(&env, &token, "uncertain-worker", 0).await;
     let request_api = Api {
@@ -1679,7 +1777,7 @@ async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut worker, _) = Fw::connect_settled(&env, &token, "cursor-worker", 0).await;
 
@@ -1849,7 +1947,7 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn command_resource_redacts_private_request_and_event_fields() {
     let env = boot().await;
-    let admin = env.admin().await;
+    let mut admin = env.admin().await;
     admin.add_worker("w1").await;
     let request = json!({
         "schema_version": 1,
@@ -1924,7 +2022,7 @@ async fn command_resource_redacts_private_request_and_event_fields() {
 #[tokio::test(flavor = "multi_thread")]
 async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let ws = Fw::raw(&env, &token).await.unwrap();
     let mut fw = Fw {

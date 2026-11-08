@@ -137,6 +137,9 @@ test.describe("sign-in", () => {
     await expect(list).not.toContainText("00112233-4455-6677-8899-aabbccddeeff");
     await expect(list).toContainText("Synced passkey");
     await expect(list).not.toContainText("private-credential");
+    await expect(list.getByLabel("New name for Phone")).toHaveValue("Phone");
+    await expect(list.getByRole("button", { name: "Remove Phone" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add passkey" })).toBeVisible();
   });
 
   test("passkey re-enrolment requires a password and explicit reset confirmation", async ({ page, coord }) => {

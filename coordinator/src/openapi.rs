@@ -215,6 +215,16 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
 }
 
+fn request_schema(path: &str, method: &str) -> Option<Value> {
+    if path == "/api/v1/auth/passkeys/{id}" && method == "PATCH" {
+        return Some(json!({
+            "type":"object","additionalProperties":false,"required":["name"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[^\\u0000-\\u001f\\u007f]+$"}}
+        }));
+    }
+    None
+}
+
 fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     let mut op = json!({
         "operationId": operation_id(path, method),
@@ -557,6 +567,22 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     } else {
         op["security"] = json!([]);
     }
+    let fresh_step_up = (path == "/api/v1/auth/passkeys/{id}" && matches!(method, "PATCH" | "DELETE"))
+        || matches!(path, "/api/v1/auth/passkeys/registration/start" | "/api/v1/auth/passkeys/registration/finish")
+        || (path == "/api/v1/tokens" && method == "POST")
+        || (path == "/api/v1/tokens/{name}" && method == "DELETE")
+        || (path == "/api/v1/workers" && method == "POST")
+        || (path == "/api/v1/workers/{name}" && method == "DELETE")
+        || (path == "/api/v1/workers/{name}/restore" && method == "POST")
+        || (path == "/api/v1/missions" && method == "POST")
+        || (path == "/api/v1/missions/{id}/suspend-until-credits" && method == "POST");
+    if fresh_step_up {
+        op["x-fresh-auth"] = json!({"required":true,"max_age_seconds":600,"credentials":["password","totp","recovery-code"]});
+        op["responses"]["403"]["description"] = json!("Fresh browser-session authentication is required; bearer tokens are not accepted.");
+    }
+    if let Some(schema) = request_schema(path, method) {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":schema}}});
+    }
     op
 }
 
@@ -876,6 +902,57 @@ mod tests {
             assert_eq!(schema["properties"]["sessions"]["items"]["properties"][field]["format"], "date-time");
         }
         assert!(schema["properties"]["sessions"]["items"]["properties"]["id"]["pattern"].is_string());
+    }
+
+    #[test]
+    fn passkey_management_is_session_only_and_requires_fresh_authentication() {
+        let doc = openapi_value();
+        for method in ["patch", "delete"] {
+            let operation = &doc["paths"]["/api/v1/auth/passkeys/{id}"][method];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]}]));
+            assert_eq!(operation["x-principal-type"], "browser-session");
+            assert_eq!(operation["x-fresh-auth"]["required"], true);
+            assert_eq!(operation["x-fresh-auth"]["max_age_seconds"], 600);
+        }
+        let patch = &doc["paths"]["/api/v1/auth/passkeys/{id}"]["patch"];
+        assert_eq!(
+            patch["requestBody"]["content"]["application/json"]["schema"]["properties"]["name"]["maxLength"],
+            64
+        );
+        assert!(ROUTES.iter().any(|(path, methods, access, _)| {
+            *path == "/api/v1/auth/passkeys/{id}" && methods.contains(&"PATCH") && methods.contains(&"DELETE") && *access == Access::Session
+        }));
+    }
+
+    #[test]
+    fn fresh_auth_mutations_are_cookie_only_in_the_scope_matrix() {
+        let doc = openapi_value();
+        let fresh = [
+            ("/api/v1/tokens", "post"),
+            ("/api/v1/tokens/{name}", "delete"),
+            ("/api/v1/workers", "post"),
+            ("/api/v1/workers/{name}", "delete"),
+            ("/api/v1/workers/{name}/restore", "post"),
+            ("/api/v1/missions", "post"),
+            ("/api/v1/missions/{id}/suspend-until-credits", "post"),
+            ("/api/v1/auth/passkeys/registration/start", "post"),
+            ("/api/v1/auth/passkeys/registration/finish", "post"),
+            ("/api/v1/auth/passkeys/{id}", "patch"),
+            ("/api/v1/auth/passkeys/{id}", "delete"),
+        ];
+        for (path, method) in fresh {
+            let operation = &doc["paths"][path][method];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]}]), "{method} {path}");
+            assert_eq!(operation["x-principal-type"], "browser-session", "{method} {path}");
+            assert_eq!(operation["x-fresh-auth"]["required"], true, "{method} {path}");
+            assert_eq!(operation["x-fresh-auth"]["max_age_seconds"], 600, "{method} {path}");
+            assert!(
+                ROUTES.iter().any(|(route, methods, access, _)| {
+                    *route == path && methods.iter().any(|candidate| candidate.eq_ignore_ascii_case(method)) && *access == Access::Session
+                }),
+                "{method} {path} route scope must reject bearer tokens"
+            );
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ fn submit(id: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_authentication() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     // no token, wrong token
     for headers in [vec![], vec![("authorization", "Bearer nope")], vec![("authorization", "Basic abc")]] {
         let err = env.ws("/api/v1/worker/connect", &headers).await.expect_err("rejected");
@@ -176,7 +176,7 @@ async fn worker_only_listener_requires_a_matching_ca_issued_client_certificate()
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_disconnect_clears_active_peer_address_but_keeps_enrolment() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     assert_eq!(api.get("/api/v1/workers/w1").await.1["remote_address"], "127.0.0.1");
@@ -201,7 +201,7 @@ async fn worker_disconnect_clears_active_peer_address_but_keeps_enrolment() {
 #[tokio::test(flavor = "multi_thread")]
 async fn event_batch_updates_mission_inventory_and_caught_up_status() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
 
@@ -271,7 +271,7 @@ async fn event_batch_updates_mission_inventory_and_caught_up_status() {
 #[tokio::test(flavor = "multi_thread")]
 async fn command_round_trip() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
 
@@ -334,7 +334,7 @@ async fn command_round_trip() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redelivery_after_reconnect_and_generation() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     // capabilities are only known after a first hello
     assert_eq!(api.post("/api/v1/commands", submit("early")).await.0, 422);
@@ -418,7 +418,7 @@ async fn redelivery_after_reconnect_and_generation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pong_after_an_events_batch_confirms_the_batch_and_follows_its_nack() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let ev = |ids: &[u64]| ids.iter().map(|i| json!({"id": i, "kind": "test", "mission_id": "m1"})).collect::<Vec<_>>();
@@ -451,7 +451,7 @@ async fn a_pong_after_an_events_batch_confirms_the_batch_and_follows_its_nack() 
 #[tokio::test(flavor = "multi_thread")]
 async fn event_cursor_accept_and_nack() {
     let env = boot_with(|t| t.replace("max_events_per_worker = 50000", "max_events_per_worker = 4")).await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, w) = Fw::connect(&env, &token, "wid1", 0).await;
     assert_eq!(w["payload"]["event_cursor"], 0);
@@ -486,7 +486,7 @@ async fn event_cursor_accept_and_nack() {
 #[tokio::test(flavor = "multi_thread")]
 async fn request_id_idempotence_and_refusals() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
     let (s1, e1) = api.post("/api/v1/commands", submit("same")).await;
@@ -553,7 +553,7 @@ async fn request_id_idempotence_and_refusals() {
 #[tokio::test(flavor = "multi_thread")]
 async fn frame_limits_and_malformed_messages() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
 
     // before hello: non-hello and garbage get an error and the socket stays usable
@@ -629,7 +629,7 @@ async fn frame_limits_and_malformed_messages() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_broadcast() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let origin = env.origin();
     let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
@@ -663,7 +663,7 @@ async fn stream_broadcast() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_command_request_is_refused_with_documented_problem() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (_worker, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let mut command = request("oversized", "mission.list");
@@ -854,7 +854,7 @@ fn assert_internal_503(problem: &Value) {
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (fw, _) = Fw::connect(&env, &token, "wid1", 0).await; // the hello advertises the operations
     drop(fw);
@@ -887,7 +887,7 @@ async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let (st, _) = api
@@ -919,7 +919,7 @@ async fn unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed(
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_stream_gets_change_notices_not_event_bodies_or_command_results() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let origin = env.origin();
     let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());

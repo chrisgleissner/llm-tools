@@ -12,7 +12,7 @@ use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use base64::Engine;
 use serde_json::{json, Map, Value};
@@ -731,10 +731,11 @@ async fn healthz() -> Response {
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote) -> ApiResult {
     let admin = st.db.admin_get()?;
+    let principal_id = st.db.admin_principal_id()?;
     let setup_required = admin.is_none();
     let configured_origin = match (st.cfg.public_origin.clone(), admin.as_ref()) {
         (Some(origin), _) => Some(origin),
-        (None, Some((username, _))) => st.db.passkey_origin(username)?,
+        (None, Some(_)) => principal_id.as_deref().map(|id| st.db.passkey_origin(id)).transpose()?.flatten(),
         (None, None) => None,
     };
     let request_origin = headers
@@ -743,11 +744,11 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
         .map(str::to_owned)
         .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|host| format!("https://{host}")))
         .and_then(|origin| crate::passkeys::canonical_origin(&origin).ok());
-    let passkey_sign_in_available = if let Some((username, _)) = &admin {
+    let passkey_sign_in_available = if admin.is_some() {
         configured_origin.is_some()
             && configured_origin == request_origin
             && crate::passkeys::verifier(request_origin.as_deref().unwrap_or_default()).is_ok()
-            && st.db.passkey_count(username)? > 0
+            && principal_id.as_deref().map(|id| st.db.passkey_count(id)).transpose()?.unwrap_or(0) > 0
     } else {
         false
     };
@@ -1157,15 +1158,15 @@ fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
     let canonical = crate::passkeys::canonical_origin(origin)
         .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
-    let principal = st.db.admin_get()?.map(|(username, _)| username);
+    let principal = st.db.admin_principal_id()?;
     let stored = match principal.as_deref() {
-        Some(username) => st.db.passkey_origin(username)?,
+        Some(id) => st.db.passkey_origin(id)?,
         None => None,
     };
     let expected = st.cfg.public_origin.as_deref().or(stored.as_deref());
     if expected.is_none() {
-        if let Some(username) = principal.as_deref() {
-            if st.db.passkey_count(username)? > 0 {
+        if let Some(id) = principal.as_deref() {
+            if st.db.passkey_count(id)? > 0 {
                 return Err(err(
                     StatusCode::CONFLICT,
                     "canonical-origin-required",
@@ -1212,6 +1213,12 @@ fn valid_challenge_id(id: &str) -> bool {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegisterStartBody {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyRenameBody {
     name: String,
 }
 
@@ -1265,6 +1272,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let wa = crate::passkeys::verifier(&origin)
         .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
     let (options, state) = crate::passkeys::begin_registration(&wa, &username, &username, &body.name)
@@ -1277,7 +1285,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
         state,
     };
     let row = crate::db::WebauthnChallengeRow {
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         binding: token_hash,
         kind: "registration".into(),
         state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
@@ -1311,7 +1319,8 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
-    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &username, &token_hash, "registration")? else {
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &principal_id, &token_hash, "registration")? else {
         return Err(err(
             StatusCode::GONE,
             "challenge-expired",
@@ -1332,7 +1341,7 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
     let passkey_json = serde_json::to_string(&credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store passkey"))?;
     let row = crate::db::PasskeyCredentialRow {
         credential_id,
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         credential: passkey_json,
         user_name: stored.credential_name.unwrap_or_else(|| "Passkey".into()),
         created_at: crate::now(),
@@ -1420,7 +1429,8 @@ async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: 
         st.db.audit(&username, "passkey.reenrol.failure", "current password did not verify", &ip);
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
     }
-    st.db.passkey_rebind_origin(&username, &origin)?;
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    st.db.passkey_rebind_origin(&principal_id, &origin)?;
     st.db.audit(&username, "passkey.origin.reenrolled", &clean(&origin), &ip);
     security_notification(&st, &username, "passkey_origin_reenrolled");
     Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
@@ -1517,9 +1527,10 @@ async fn totp_disable(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
 }
 
 async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
-    let Some((principal, _)) = st.db.admin_get()? else {
+    if st.db.admin_get()?.is_none() {
         return Err(unauthorized());
-    };
+    }
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let passkeys = st
         .db
         .passkeys_for_principal(&principal)?
@@ -1539,16 +1550,95 @@ async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
     Ok(json_ok(StatusCode::OK, json!({"passkeys":passkeys})))
 }
 
+fn valid_passkey_handle(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 1024 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+async fn rename_passkey(State(st): State<St>, Path(id): Path<String>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
+    let Principal::Session { principal_id, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey management requires a browser session"));
+    };
+    if !valid_passkey_handle(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "passkey id is invalid"));
+    }
+    let m = parse_body(&body.bytes)?;
+    let body: PasskeyRenameBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "name is required and unknown fields are not allowed",
+        )
+    })?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "passkey name must be 1-64 printable characters",
+        ));
+    }
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref() != Some(principal_id.as_str()) || !st.db.passkey_rename(&principal_id, &id, name)? {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found"));
+    }
+    st.db.audit(&username, "passkey.renamed", "passkey display name changed", &ip);
+    security_notification(&st, &username, "passkey_renamed");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
+}
+
+async fn remove_passkey(State(st): State<St>, Path(id): Path<String>, Authed(p, ip): Authed) -> ApiResult {
+    fresh_session_step_up(&p)?;
+    let Principal::Session { principal_id, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey management requires a browser session"));
+    };
+    if !valid_passkey_handle(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "passkey id is invalid"));
+    }
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref() != Some(principal_id.as_str()) {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found"));
+    }
+    match st
+        .db
+        .passkey_remove_with_policy(&principal_id, &id, st.cfg.exposure == crate::config::Exposure::Internet)?
+    {
+        crate::db::PasskeyRemoval::NotFound => return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found")),
+        crate::db::PasskeyRemoval::LastSignInMethod => {
+            st.db
+                .audit(&username, "passkey.removal.denied", "would remove the last available sign-in method", &ip);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "last-sign-in-method",
+                "add another passkey or enable TOTP before removing the last passkey",
+            ));
+        }
+        crate::db::PasskeyRemoval::Removed => {}
+    }
+    let totp_enabled = st.db.totp_get(&principal_id)?.is_some_and(|(_, enabled, _)| enabled);
+    st.db.audit(&username, "passkey.removed", "passkey removed", &ip);
+    security_notification(&st, &username, "passkey_removed");
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"ok":true,"password_sign_in_available":!password_login_blocked(st.cfg.exposure, totp_enabled)}),
+    ))
+}
+
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
     check_public_origin(&st, &headers)?;
     check_address_mutation_limit(&st, &ip)?;
     let origin = webauthn_origin(&st, &headers)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &[])?;
-    let Some((username, _)) = st.db.admin_get()? else {
+    if st.db.admin_get()?.is_none() {
         return Err(unauthorized());
-    };
-    let records = st.db.passkeys_for_principal(&username)?;
+    }
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let records = st.db.passkeys_for_principal(&principal_id)?;
     let credentials = records
         .iter()
         .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
@@ -1569,7 +1659,7 @@ async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers:
         state,
     };
     let row = crate::db::WebauthnChallengeRow {
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         binding: auth::sha256_hex(&ticket),
         kind: "authentication".into(),
         state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
@@ -1601,9 +1691,10 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let Some(row) = st
         .db
-        .webauthn_challenge_take(&body.challenge_id, &username, &auth::sha256_hex(&ticket), "authentication")?
+        .webauthn_challenge_take(&body.challenge_id, &principal_id, &auth::sha256_hex(&ticket), "authentication")?
     else {
         return Err(err(
             StatusCode::GONE,
@@ -1617,7 +1708,7 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
         return Err(err(StatusCode::FORBIDDEN, "bad-origin", "ceremony origin changed"));
     }
     let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
-    let mut records = st.db.passkeys_for_principal(&username)?;
+    let mut records = st.db.passkeys_for_principal(&principal_id)?;
     let credentials = records
         .iter()
         .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
@@ -3932,6 +4023,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/{id}", &["PATCH", "DELETE"], Access::Session, ""),
     ("/api/v1/auth/sessions", &["GET"], Access::Session, ""),
     ("/api/v1/auth/sessions/{id}", &["DELETE"], Access::Session, ""),
     ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
@@ -3939,20 +4031,23 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
-    ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
-    ("/api/v1/workers/{name}", &["GET", "DELETE"], Access::Authed, "admin"),
-    ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/workers", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/workers", &["POST"], Access::Session, ""),
+    ("/api/v1/workers/{name}", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}", &["DELETE"], Access::Session, ""),
+    ("/api/v1/workers/{name}/restore", &["POST"], Access::Session, ""),
     ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
-    ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
+    ("/api/v1/tokens", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/tokens", &["POST"], Access::Session, ""),
     ("/api/v1/audit", &["GET"], Access::Authed, "admin"),
-    ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/tokens/{name}", &["DELETE"], Access::Session, ""),
     ("/api/v1/security/notifications", &["GET"], Access::Authed, "admin"),
     ("/api/v1/security/notifications/{id}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
-    ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions", &["POST"], Access::Session, ""),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}", &["DELETE"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
@@ -3965,7 +4060,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}/proposals", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/proposals", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/proposals/{n}/{action}", &["POST"], Access::Authed, "operate"),
-    ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Session, ""),
     ("/api/v1/missions/{id}/steer", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/finish", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
@@ -4175,6 +4270,10 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/totp/confirm", post(totp_confirm).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/totp/disable", post(totp_disable).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/passkeys", get(list_passkeys))
+        .route(
+            "/api/v1/auth/passkeys/{id}",
+            patch(rename_passkey).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)).delete(remove_passkey),
+        )
         .route("/api/v1/auth/sessions", get(list_sessions))
         .route("/api/v1/auth/sessions/{id}", delete(revoke_session))
         .route(

@@ -101,6 +101,13 @@ pub struct PasskeyCredentialRow {
     pub sign_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyRemoval {
+    Removed,
+    NotFound,
+    LastSignInMethod,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerRow {
     pub name: String,
@@ -284,7 +291,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
@@ -359,7 +366,11 @@ const MIGRATE_V18: &str = "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL 
 /// Version 20: per-principal TOTP verifier state and one-time Argon2id recovery-code hashes.
 const MIGRATE_V20: &str = "CREATE TABLE totp_auth(principal_id TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),last_step INTEGER NOT NULL DEFAULT -1); CREATE TABLE recovery_codes(principal_id TEXT NOT NULL, code_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(principal_id,code_hash)); CREATE INDEX recovery_codes_principal ON recovery_codes(principal_id);";
 /// Version 21: a short-lived step-up marker belongs to the rotated browser session.
+/// Version 22: passkey credentials and canonical origins are keyed by stable principal ID.
 const MIGRATE_V21: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_until INTEGER NOT NULL DEFAULT 0;";
+const MIGRATE_V22_PASSKEYS: &str = "UPDATE passkeys SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+const MIGRATE_V22_POLICY: &str = "UPDATE auth_policy SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+const MIGRATE_V22_CHALLENGES: &str = "DELETE FROM webauthn_challenges WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -629,6 +640,24 @@ impl Db {
             let alter = if has_sessions && !has_column { MIGRATE_V21 } else { "" };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 21; COMMIT;"))?;
         }
+        if version < 22 {
+            let table_exists = |name: &str| -> R<bool> {
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |row| {
+                    row.get(0)
+                })
+            };
+            let mut migration = String::new();
+            if table_exists("passkeys")? && table_exists("principals")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_PASSKEYS);
+            }
+            if table_exists("auth_policy")? && table_exists("principals")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_POLICY);
+            }
+            if table_exists("webauthn_challenges")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_CHALLENGES);
+            }
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 22; COMMIT;"))?;
+        }
         conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -783,6 +812,42 @@ impl Db {
                 row.principal_id
             ],
         )? == 1)
+    }
+
+    /// Rename or remove a credential only when it belongs to the supplied principal.
+    pub fn passkey_rename(&self, principal: &str, credential_id: &str, name: &str) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE passkeys SET user_name=? WHERE principal_id=? AND credential_id=?",
+            params![name, principal, credential_id],
+        )? == 1)
+    }
+
+    pub fn passkey_remove_with_policy(&self, principal: &str, credential_id: &str, protect_last: bool) -> R<PasskeyRemoval> {
+        let mut c = self.c();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM passkeys WHERE principal_id=?1 AND credential_id=?2)",
+            params![principal, credential_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(PasskeyRemoval::NotFound);
+        }
+        if protect_last {
+            let totp_enabled: Option<i64> = tx
+                .query_row("SELECT enabled FROM totp_auth WHERE principal_id=?1", [principal], |row| row.get(0))
+                .optional()?;
+            let count: i64 = tx.query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?1", [principal], |row| row.get(0))?;
+            if totp_enabled.unwrap_or(0) == 0 && count <= 1 {
+                return Ok(PasskeyRemoval::LastSignInMethod);
+            }
+        }
+        tx.execute(
+            "DELETE FROM passkeys WHERE principal_id=?1 AND credential_id=?2",
+            params![principal, credential_id],
+        )?;
+        tx.commit()?;
+        Ok(PasskeyRemoval::Removed)
     }
 
     /// Bind the first passkey to the canonical origin. A caller cannot silently move an existing
@@ -2166,5 +2231,100 @@ mod batch_write_cost {
         f.batch(10, 100, None);
         f.batch(10, 100, None);
         assert_eq!(f.stored().len(), 20, "a new worker of the same name starts from an empty count");
+    }
+}
+
+#[cfg(test)]
+mod passkey_removal_tests {
+    use super::*;
+
+    fn db() -> (Db, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("bridge-passkey-removal-{}-{}", std::process::id(), crate::now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("state.sqlite3")).unwrap();
+        (db, dir)
+    }
+
+    fn credential(id: &str) -> PasskeyCredentialRow {
+        PasskeyCredentialRow {
+            credential_id: id.into(),
+            principal_id: "admin".into(),
+            credential: "{}".into(),
+            user_name: "Passkey".into(),
+            created_at: 1,
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        }
+    }
+
+    #[test]
+    fn policy_protected_removal_is_atomic_and_preserves_a_sign_in_method() {
+        let (db, dir) = db();
+        db.passkey_put(&credential("first")).unwrap();
+        db.passkey_put(&credential("second")).unwrap();
+
+        assert_eq!(db.passkey_remove_with_policy("admin", "first", true).unwrap(), PasskeyRemoval::Removed);
+        assert_eq!(
+            db.passkey_remove_with_policy("admin", "second", true).unwrap(),
+            PasskeyRemoval::LastSignInMethod
+        );
+        assert_eq!(db.passkey_count("admin").unwrap(), 1);
+
+        db.totp_pending_set("admin", "secret").unwrap();
+        db.totp_enable_with_recovery_codes("admin", &["recovery-hash".into()], 100).unwrap();
+        assert_eq!(db.passkey_remove_with_policy("admin", "second", true).unwrap(), PasskeyRemoval::Removed);
+        assert_eq!(db.passkey_count("admin").unwrap(), 0);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unprotected_local_removal_and_missing_credentials_are_distinguished() {
+        let (db, dir) = db();
+        db.passkey_put(&credential("only")).unwrap();
+        assert_eq!(db.passkey_remove_with_policy("admin", "unknown", true).unwrap(), PasskeyRemoval::NotFound);
+        assert_eq!(db.passkey_remove_with_policy("admin", "only", false).unwrap(), PasskeyRemoval::Removed);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_protected_removals_cannot_delete_the_last_two_credentials() {
+        use std::sync::{Arc, Barrier};
+
+        let (db, dir) = db();
+        db.passkey_put(&credential("first")).unwrap();
+        db.passkey_put(&credential("second")).unwrap();
+        let path = dir.join("state.sqlite3");
+        let other = Db::open(&path).unwrap();
+        let db = Arc::new(db);
+        let other = Arc::new(other);
+        let barrier = Arc::new(Barrier::new(3));
+        let first = {
+            let (db, barrier) = (db.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                db.passkey_remove_with_policy("admin", "first", true).unwrap()
+            })
+        };
+        let second = {
+            let (db, barrier) = (other.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                db.passkey_remove_with_policy("admin", "second", true).unwrap()
+            })
+        };
+        barrier.wait();
+        let outcomes = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| **result == PasskeyRemoval::Removed).count(), 1);
+        assert_eq!(outcomes.iter().filter(|result| **result == PasskeyRemoval::LastSignInMethod).count(), 1);
+        assert_eq!(db.passkey_count("admin").unwrap(), 1);
+        drop(other);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

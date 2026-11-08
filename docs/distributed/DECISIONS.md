@@ -517,3 +517,26 @@ lazily-loaded JavaScript chunks (Playwright `e2e/budget.spec.ts`, Linux x86-64, 
 Keep these screens on the lazy path so first-run and sign-in downloads remain unchanged; set the
 lazy cap to 377,000 raw / 102,000 gzip, under 0.7% raw headroom above the measured bundle. A later
 addition must still fit this explicit limit or record a new measurement and reason.
+
+## D29 Measured budget for passkey account management (PK-006, WEB-010)
+
+The Chromium production build with Account-screen passkey registration, rename and removal
+measured 381,268 raw / 103,006 gzip bytes across lazy JavaScript chunks (Playwright
+`e2e/budget.spec.ts`, Linux x86-64, 2026-11-08). The initial bundle stayed within its existing
+caps. Set the lazy caps to 383,000 raw / 104,000 gzip, leaving 1,732 raw and 994 gzip bytes of
+headroom; do not increase the cap again without another measured reason.
+
+In the code: `web/budget.json`, `web/src/views/account.ts`, and `web/src/passkeys.ts`.
+
+## D30 Passkey records use the stable principal ID (SEC2-019, PK-006)
+
+Passkey credentials, canonical origins and ceremonies use the stable principal ID, never the
+administrator's chosen username. The previous implementation mixed both identities, which made a
+passkey enrolled under a non-default username invisible to sign-in, account management and the
+Internet-mode startup check. Schema migration 22 rekeys the existing credential and origin rows to
+the single administrator principal and discards pending ceremonies; the coordinator has only one
+administrator, so that migration preserves the existing owner while making later role/username
+changes independent of credential ownership.
+
+In the code: `coordinator/src/db.rs::MIGRATE_V22`, `coordinator/src/http.rs`, and
+`coordinator/src/server.rs`; regressions are `coordinator/tests/passkeys.rs::schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal` and `coordinator/tests/web_api.rs::passkey_management_requires_fresh_session_and_is_principal_scoped`.

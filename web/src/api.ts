@@ -127,9 +127,10 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
+export const patch = <T>(path: string, body: unknown): Promise<T> => request<T>("PATCH", path, body);
 export async function post<T>(path: string, body: unknown = {}): Promise<T> {
   const result = await request<T>("POST", path, body);
-  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll") {
+  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll" || path === "/api/v1/auth/passkeys/registration/finish") {
     window.dispatchEvent(new Event("bridge-security-notification"));
   }
   return result;

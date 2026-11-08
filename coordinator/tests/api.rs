@@ -286,7 +286,7 @@ async fn csrf_origin_and_bearer_tokens() {
     bearer.bearer = Some(tok.clone());
     let (status, problem) = bearer.post("/api/v1/workers", json!({"name": "w-bearer"})).await;
     assert_eq!(status, 403, "bearer tokens cannot substitute for browser step-up: {problem}");
-    assert_eq!(problem["code"], "step-up-required");
+    assert_eq!(problem["code"], "session-required");
     assert_eq!(bearer.get("/api/v1/diagnostics").await.0, 200);
     env.srv.state.db.token_revoke("cli").unwrap();
     assert_eq!(bearer.get("/api/v1/workers").await.0, 401);
