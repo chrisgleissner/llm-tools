@@ -104,7 +104,8 @@ impl From<rusqlite::Error> for ApiError {
             busy.retry_after = Some(2);
             return busy;
         }
-        eprintln!("database error: {e}");
+        // `err` emits only a correlation ID. SQLite error values can include paths or query
+        // details, so keep them out of logs and the public problem response.
         err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
 }
