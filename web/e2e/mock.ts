@@ -352,7 +352,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       extras["task_counts"] = countsOf(tasksFor(m.id, m.status, needsFor(m.id) !== null || (dataset === "default" && m.id === MISSIONS[0]!.mission.id)));
       if (LIVE.has(m.status)) Object.assign(extras, { current_task: running ? { ordinal: 2, title: "Implement the new tokenizer" } : null, station: running ? "codex" : "unknown", model: running ? "gpt-5" : "unknown", needs_kind: needs?.kind ?? null, needs_tasks: needs?.tasks.length ?? 0, ...(needs ? { needs_you: needs } : {}) });
     }
-    if (opts.attention !== false) extras["attention"] = m.status === "COMPLETED" || m.status === "CANCELLED" || !needs ? null : { kind: needs.kind, message: needs.message, tasks: needs.tasks };
+    if (opts.attention !== false) extras["attention"] = m.status === "COMPLETED" || m.status === "CANCELLED" || !needs ? null : { kind: needs.kind, message: needs.kind === "failed" ? "mission failed" : needs.message, tasks: needs.tasks }; // a worker that has no failure reason to report: the row reads "Task 2 failed"
     return { ...entry, mission: { ...extras, ...entry.mission } } as (typeof MISSIONS)[number];
   };
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
