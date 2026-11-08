@@ -167,7 +167,7 @@ export interface AuthState {
   password_change_required?: boolean;
   /** Set after the host reset the password, until it is changed or a week has passed (signed-in sessions only). */
   password_reset_notice?: { at: number; message: string };
-  session?: { remember: boolean; expires_at: number; idle_timeout_secs: number };
+  session?: { remember: boolean; expires_at: string; idle_timeout_secs: number };
 }
 
 export async function authState(): Promise<AuthState> {

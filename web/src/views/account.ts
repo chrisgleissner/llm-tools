@@ -292,7 +292,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const me = opts.me;
   const s = me?.session;
   const form = passwordForm({ me, onPasswordChanged: opts.onPasswordChanged });
-  const exp = s ? new Date(s.expires_at * 1000) : null;
+  const exp = s ? new Date(s.expires_at) : null;
   const session = h(
     "section",
     { class: "card narrow", "aria-labelledby": "acct-session" },

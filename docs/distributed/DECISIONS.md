@@ -507,3 +507,13 @@ The operator delegated the remaining open questions: "All other questions answer
 - PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
 - DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
 
+
+
+## D28 Measured headroom for the consolidated account view (WEB-010)
+
+After merging the active-session controls, scoped API-token management, paged audit history and
+passkey metadata, the production build measured 376,680 raw / 101,373 gzip bytes across the
+lazily-loaded JavaScript chunks (Playwright `e2e/budget.spec.ts`, Linux x86-64, 2026-11-08).
+Keep these screens on the lazy path so first-run and sign-in downloads remain unchanged; set the
+lazy cap to 377,000 raw / 102,000 gzip, under 0.7% raw headroom above the measured bundle. A later
+addition must still fit this explicit limit or record a new measurement and reason.
