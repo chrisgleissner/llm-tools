@@ -22,6 +22,11 @@ Every spec runs on all four projects. `mobile.spec.ts` asserts no horizontal scr
 44x44 CSS px, input font size of at least 16 px, dialogs inside the viewport and the terminal key bar (Esc, Tab, Ctrl,
 arrows; the test captures the bytes sent on the WebSocket) in portrait and landscape.
 
+The `typing-flood` project holds one test, T36 "typing under a 200 lines per second terminal stream" (`e2e/redesign/uxr-typing.spec.ts`). It measures
+wall-clock key-to-paint latency at 4x CPU throttling, which is only meaningful when no other test competes for the cores, so every other project
+depends on it: Playwright runs it first and alone, then the parallel workers start. Selecting any project therefore runs it once first (about 6 s);
+pass `--no-deps` to skip it. It does not take part in `--repeat-each` multiples of the other projects or in file and `-g` filters.
+
 ## Click paths, the on-screen keyboard and thumb reach (UXR-043 to UXR-046)
 
 `e2e/redesign/click-paths-data.ts` lists every operator task with its interaction count at 1440x900 and at phone widths; `docs/distributed/ux-audit.md`
