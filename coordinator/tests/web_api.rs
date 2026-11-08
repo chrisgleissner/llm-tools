@@ -1720,6 +1720,8 @@ async fn command_resource_redacts_private_request_and_event_fields() {
                         "data": {
                             "cwd": "/private/event-path-sentinel",
                             "terminal_output": "raw-terminal-sentinel",
+                            "screen": "captured-terminal-screen-sentinel",
+                            "provider_api_key": "provider-secret-sentinel",
                             "summary": "mission created"
                         }
                     }]
@@ -1746,6 +1748,8 @@ async fn command_resource_redacts_private_request_and_event_fields() {
         "private-request-prompt-sentinel",
         "/private/event-path-sentinel",
         "raw-terminal-sentinel",
+        "captured-terminal-screen-sentinel",
+        "provider-secret-sentinel",
     ] {
         assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
     }
