@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 pub const MIN_PASSWORD_LEN: usize = 15;
 pub const MAX_PASSWORD_LEN: usize = 256;
+const COMMON_PASSWORDS: &str = include_str!("../data/common-passwords.txt");
+const _: () = assert!(COMMON_PASSWORDS.len() <= 64 * 1024, "bundled password blocklist exceeds 64 KiB");
 pub const GLOBAL_MUTATION_BUDGET_KEY: &str = "global:mutations";
 pub const DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE: usize = 600;
 
@@ -175,9 +177,7 @@ pub fn valid_password(p: &str) -> Result<(), String> {
 /// Matching is ASCII case-insensitive; passwords themselves are never logged or persisted here.
 fn is_common_password(password: &str) -> bool {
     let candidate = password.to_ascii_lowercase();
-    include_str!("../data/common-passwords.txt")
-        .lines()
-        .any(|blocked| !blocked.is_empty() && candidate == blocked)
+    COMMON_PASSWORDS.lines().any(|blocked| !blocked.is_empty() && candidate == blocked)
 }
 
 /// Rate-limit key for a client address. IPv6 clients are keyed by their /64 (a single subscriber
@@ -439,6 +439,7 @@ mod tests {
 
     #[test]
     fn password_policy_rejects_bundled_common_passwords_case_insensitively() {
+        assert!(COMMON_PASSWORDS.len() <= 64 * 1024);
         assert!(valid_password("correcthorsebatterystaple").is_err());
         assert!(valid_password("CorrectHorseBatteryStaple").is_err());
         assert!(valid_password("a less common passphrase").is_ok());
