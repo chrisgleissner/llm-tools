@@ -9,9 +9,10 @@ CI run 42181869238 on c81ccde is green on every job,
 across Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64.
 ARM64 deployment was verified under emulation and on the physical Raspberry Pi Zero 2 W.
 The physical board's deployment and coordinator measurements are recorded separately
-from QEMU and derived figures in `benchmarks.md` and `install.md`. The remaining physical
-card-write and operator-only recovery checks are listed as limitations, not reported as
-verified. This report is derived from `SPEC_STATUS.md`; the decisions it cites are in
+from QEMU and derived figures in `benchmarks.md` and `install.md`. The first physical
+card-write sample is retained with its unresolved writer attribution; the operator waived
+a second capture and real-phone passkey checks. Other open hardware checks remain listed
+as limitations, not reported as verified. This report is derived from `SPEC_STATUS.md`; the decisions it cites are in
 `DECISIONS.md`.
 Standalone Bridge is unchanged and opens no network connection. This report is derived
 from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
@@ -70,13 +71,13 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 262 |
-| Incomplete `[~]` | 76 |
+| Verified `[x]` | 261 |
+| Incomplete `[~]` | 78 |
 | Blocked `[!]` | 5 |
-| Not started `[ ]` | 91 |
+| Not started `[ ]` | 90 |
 | **Total** | **434** |
 
-The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Three of the verified rows (DOG-023, PI-WEAR-009, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 23:45 rather than by new evidence; each row says so.
+The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Two of the verified rows (DOG-023, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 rather than by new evidence; each row says so.
 ## 3. Test results and coverage
 
 CI run 42181869238 on c81ccde:
@@ -245,9 +246,10 @@ volatile logs and a persistent data volume. Desktop Chrome and Firefox trusted t
 coordinator CA and signed in without certificate bypass; the worker reconnected after a
 reboot and a browser terminal view was exercised.
 
-The separate private hardware verification records the remaining items: a full 24-hour
-card-write interval, end-to-end unattended kernel upgrade/reboot (no update was available
-and downgrading the installed kernel was not treated as a safe substitute), physical
-power-loss recovery (requires a person to unplug the Pi), and Android Chrome/Firefox
-checks (the attached phone lacks both browsers). These limitations are not presented as
-verified measurements.
+The separate private hardware verification records the remaining items: attribution of
+the high first 24-hour card-write sample, end-to-end unattended kernel upgrade/reboot (no
+update was available and downgrading the installed kernel was not treated as a safe
+substitute), physical power-loss recovery (requires a person to unplug the Pi), and
+Android Chrome/Firefox browser checks (the attached phone lacks both browsers). The
+operator waived a second card-write capture and real-phone passkey verification. These
+limitations are not presented as verified measurements.
