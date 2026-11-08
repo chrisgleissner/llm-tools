@@ -14,7 +14,7 @@ from llm_tools.bridge_log_sink import main as log_sink_main
 from llm_tools.bridge_runtime import _prune_old_run_logs
 from llm_tools.bridge_store import BridgeStore
 from llm_tools import common
-from tests.conftest import scaled, wait_for
+from tests.conftest import scaled
 
 
 def test_controller_log_sink_rotates_and_closes_fds(tmp_path: Path) -> None:
@@ -68,20 +68,10 @@ def test_bridge_headless_pty_capture_keeps_only_bounded_tail(tmp_path: Path) -> 
     assert "Earlier bytes were discarded" in text
 
 
-def _wait_until_exited_without_reaping(pid: int) -> None:
-    """Block until the child has exited, leaving it unreaped for the code under test."""
-    if hasattr(os, "waitid"):
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
-        return
-    # macOS has no waitid(): an exited, unreaped child shows as a zombie in ps.
-    wait_for(
-        lambda: subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip().startswith("Z"),
-        timeout=scaled(10),
-        interval=0.01,
-        message=f"child {pid} did not exit",
-    )
-
-
+@pytest.mark.skipif(
+    not hasattr(os, "waitid"),
+    reason="needs os.waitid; on macOS the pty buffer cannot hold the child's output while the reader is held back, so the child never exits",
+)
 def test_pty_capture_collects_output_still_buffered_when_the_child_has_exited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,7 +87,7 @@ def test_pty_capture_collects_output_still_buffered_when_the_child_has_exited(
     def select_after_child_exit(rlist, wlist, xlist, timeout=None):  # type: ignore[no-untyped-def]
         if not calls:
             calls.append(1)
-            _wait_until_exited_without_reaping(pids[0])
+            os.waitid(os.P_PID, pids[0], os.WEXITED | os.WNOWAIT)
             return [], [], []
         return real_select(rlist, wlist, xlist, timeout)
 
