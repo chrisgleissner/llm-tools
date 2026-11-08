@@ -17,7 +17,7 @@ SPEC_GROUPS = {
     "AGENT": 9, "TRACK": 12, "REPO": 5, "ARCH": 9, "LOCAL": 8, "CLI": 8, "WORK": 10, "COORD": 10, "PROTO": 10,
     "NET": 10, "AUTH": 10, "SEC": 9, "WEB": 12, "DATA": 7, "OPS": 5, "TEST": 17, "QUAL": 10, "CONV": 12,
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
-    "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6, "PRD": 37,
+    "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6, "PRD": 38,
     "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 25, "PAR": 14,
     "UXR": 46,
 }
