@@ -151,6 +151,8 @@ test.describe("sign-in", () => {
     await form.getByRole("button", { name: "Create token" }).click();
     await page.getByRole("dialog", { name: "Token created" }).getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
+    // The notices are behind a header button with their count (no banner above the page: a late notice would move the content).
+    await page.getByRole("button", { name: /^Security notifications, \d+$/ }).click();
     const banner = page.getByRole("region", { name: "Security notifications" });
     await expect(banner).toContainText("An API token was created.");
     const dismiss = banner.getByRole("button", { name: "Dismiss security notification" });

@@ -98,7 +98,8 @@ export function missionState(m: MissionEntry, extra: { needsYou?: api.NeedsYou |
   const state = deriveState({
     entity: "mission",
     status: m.mission.status,
-    needsYou: extra.needsYou ?? m.mission.needs_you ?? null,
+    // `null` is an answer ("nothing needs you", for example a hint the task list contradicts), only an absent value falls back to the list.
+    needsYou: extra.needsYou !== undefined ? extra.needsYou : (m.mission.needs_you ?? null),
     taskCounts: extra.taskCounts ?? null,
     worker: w ? { state: w.state, lastSeen: w.last_seen } : null,
     conn: store.conn,

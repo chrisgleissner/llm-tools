@@ -45,7 +45,17 @@ for (const path of paths) {
     "--chrome-flags=--headless=new --no-sandbox --ignore-certificate-errors",
   ];
   if (cookie) args.push(`--extra-headers=${JSON.stringify({ Cookie: cookie })}`);
-  execFileSync("npx", args, { env: { ...process.env, CHROME_PATH: chrome }, stdio: ["ignore", "ignore", "inherit"] });
+  // Lighthouse itself sometimes cannot record a trace ("NO_NAVSTART": the page load started before tracing did). That is a failed measurement, not a result:
+  // it is repeated, up to three times. A measurement that was made and misses a budget is never repeated.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync("npx", args, { env: { ...process.env, CHROME_PATH: chrome }, stdio: ["ignore", "ignore", "inherit"] });
+      break;
+    } catch (error) {
+      if (attempt >= 3) throw error;
+      console.error(`lighthouse could not measure ${path} (attempt ${attempt}); trying again`);
+    }
+  }
   const lhr = JSON.parse(readFileSync(out, "utf8"));
   const score = (id) => lhr.categories[id]?.score ?? 0;
   const lcp = lhr.audits["largest-contentful-paint"]?.numericValue ?? Infinity;

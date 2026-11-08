@@ -101,6 +101,10 @@ test.describe("with a connected worker", () => {
       await second.getByRole("button", { name: "Resume task 2" }).click();
       await expect(second.locator(".pill")).not.toHaveText("Paused", { timeout: 20_000 });
 
+      // On a phone a toast sits over the lower part of the list and, while the pointer rests on it, does not expire: dismiss them as an operator would.
+      for (let i = 0; i < 5 && (await page.locator(".toast").count()) > 0; i += 1) await page.getByRole("button", { name: "Dismiss notification" }).first().click();
+      await expect(page.locator(".toast")).toHaveCount(0);
+
       // Destructive action: cancel asks for confirmation; declining changes nothing.
       const cancel = async () => {
         await second.getByRole("button", { name: "More actions for task 2" }).click();

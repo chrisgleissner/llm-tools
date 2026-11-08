@@ -28,8 +28,6 @@
   background: var(--surface-1); border: 1px solid var(--border); border-inline-start: 3px solid var(--border); border-radius: var(--r-2);
 }
 .mrow[data-layout="cells"] { grid-template-areas: "pill title sub menu"; padding-block: 3px; }
-.mrow[data-tier="alert"] { border-inline-start-color: var(--alert-attention-bar); }
-.mrow[data-state="failed"] { border-inline-start-color: var(--alert-failed-bar); }
 .mrow.selected { background: var(--accent-tint); }
 .mrow > .pill { grid-area: pill; justify-self: start; }
 .row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
@@ -37,7 +35,9 @@
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .row-reason { flex: 1 1 7rem; min-inline-size: 0; }
 .row-reason + .row-reason, .row-reason.one { flex-basis: 100%; }
-.row-reason.one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; } /* an approval: the reason and its summary on one line, the rest in the tooltip and the dialog */
+.row-reason.one, .tail { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; } /* an approval: the reason and its summary on one line, the rest in the tooltip and the dialog */
+/* what an approval rests on (verifier result, size of the change) is a box of its own in the same line, so its late arrival does not widen the text block of the reason or of the mission answer (LCP, T37) */
+.tail { display: inline-block; max-width: 22rem; vertical-align: top; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
 .row-cells { flex-wrap: nowrap; gap: var(--sp-3); }

@@ -500,7 +500,8 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   syncTyping(true); // a sign-in form that was replaced while it had focus fires no focusout
 
   // Security notices are fetched by a separate chunk once the shell is up; the box stays hidden while there are none.
-  const security = h("section", { class: "notice", "aria-label": "Security notifications", hidden: true });
+  // The notices are read by a separate chunk once the shell is up; the header button stays hidden while there are none.
+  const security = h("button", { type: "button", class: "btn ghost", id: "security-button", "aria-haspopup": "dialog", hidden: true });
   let stopSecurity = (): void => {};
   let shellDisposed = false;
   void import("./security-notice").then((m) => {
@@ -519,10 +520,11 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       h("button", { type: "button", class: "btn search-open", id: "palette-open", "aria-label": `Search missions, actions ${mac ? "Cmd K" : "Ctrl K"}`, "aria-keyshortcuts": "Control+K Meta+K", onclick: () => void openPaletteLazy() }, icon("search", 18), h("span", { class: "so-text" }, "Search missions, actions"), " ", h("kbd", {}, mac ? "Cmd K" : "Ctrl K")),
       caps.el,
       conn,
+      security,
       user,
     ),
     nav,
-    h("section", { class: "conn-wrap", "aria-label": "Connection status" }, banner, security),
+    h("section", { class: "conn-wrap", "aria-label": "Connection status" }, banner),
     main,
     offer,
   );

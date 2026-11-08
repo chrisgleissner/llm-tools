@@ -250,9 +250,8 @@ export function reasonLines(item: Item): string[] {
     if (parts.length === 0) {
       parts = [state.id === "failed" && item.entry.mission.status.toUpperCase() === "FAILED" ? "The mission failed." : state.detail ? capital(state.detail) : state.id === "needs-approval" ? "A task is waiting for approval." : state.id === "needs-input" ? "The provider is waiting for you." : "A task failed."];
     }
-    const line = state.id === "needs-approval" ? evidenceAt.get(evidenceKey(item)) : undefined;
-    // A provider question is shown as the question, then its choices; any other message is one line (an approval adds what it rests on, after the reason, so a clamp cuts the verifier text first).
-    return attention?.kind === "provider" ? parts : [[parts.join(" - "), line].filter(Boolean).join(" - ")];
+    // A provider question is shown as the question, then its choices; any other message is one line (an approval adds what it rests on after it, see `rowEvidence`).
+    return attention?.kind === "provider" ? parts : [parts.join(" - ")];
   }
   if (state.id === "running") {
     const line = lastLine(item.entry);
@@ -264,6 +263,9 @@ export function reasonLines(item: Item): string[] {
   return [];
 }
 
+
+/** What an approval rests on (verifier result and size of the change), once read: shown after the reason, in a box of its own so a late arrival does not widen the reason's text block. */
+export const rowEvidence = (item: Item): string => (item.state.id === "needs-approval" && item.attention?.kind !== "provider" ? (evidenceAt.get(evidenceKey(item)) ?? "") : "");
 
 /** Read what the visible needs-you rows lack: the failing task of a failed mission, the verifier and change summary of an approval. */
 const reading = new Set<string>();
@@ -419,7 +421,7 @@ function rowMenu(item: Item): HTMLElement {
 /** Everything a row shows, as one string: when it is unchanged the page keeps the existing element. */
 export function rowSig(item: Item, o: RowOptions): string {
   const e = item.entry;
-  return JSON.stringify([item.state.id, item.state.label, item.state.detail, e.mission.name, e.worker, age(e.mission.updated_at), reasonLines(item), progress(item), providerLabel(e), item.attention?.tasks ?? null, item.attention?.kind ?? null, o.selected ?? false, o.l0, blockedReason(e) ?? "", store.conn]);
+  return JSON.stringify([item.state.id, item.state.label, item.state.detail, e.mission.name, e.worker, age(e.mission.updated_at), reasonLines(item), rowEvidence(item), progress(item), providerLabel(e), item.attention?.tasks ?? null, item.attention?.kind ?? null, o.selected ?? false, o.l0, blockedReason(e) ?? "", store.conn]);
 }
 
 export function missionRow(item: Item, o: RowOptions): HTMLElement {
@@ -435,7 +437,10 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
       h("span", { class: "cell nowrap", "data-cell": "worker", title: e.worker }, e.worker),
       h("span", { class: "cell num nowrap", "data-cell": "updated", title: "Time since the last update" }, updated))
     : h("div", { class: "row-sub" },
-      ...reasons.map((line) => h("span", { class: item.state.id === "needs-approval" ? "row-reason one" : "row-reason clamp-2", title: line }, line)),
+      ...reasons.map((line) => {
+        const evidence = rowEvidence(item);
+        return h("span", { class: item.state.id === "needs-approval" ? "row-reason one" : "row-reason clamp-2", title: evidence ? `${line} - ${evidence}` : line }, line, evidence ? " - " : null, evidence ? h("span", { class: "tail" }, evidence) : null);
+      }),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);
   const actions = o.actions ? inlineActions(item, () => o.done?.(item)) : [];

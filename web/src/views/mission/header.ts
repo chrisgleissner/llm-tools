@@ -73,7 +73,7 @@ function currentTaskText(snapshot: Record<string, unknown> | null): string {
  * The three short answers of spec section 3, rule 4: what is happening, does it need me, what next. Each says something the others do not:
  * "Task 2 awaits your approval. Needs you. Approve or reject." and, while nothing is needed, "Running task 2. Nothing needed from you. It keeps working."
  */
-export function answers(m: HeaderModel): { what: string; needMe: string; next: string } {
+export function answers(m: HeaderModel): { what: string; tail: string; needMe: string; next: string } {
   const s = m.state;
   const current = currentTaskText(m.snapshot);
   const ord = m.needs?.tasks?.[0];
@@ -83,18 +83,19 @@ export function answers(m: HeaderModel): { what: string; needMe: string; next: s
   const task = ord ? `Task ${ord}` : "A task";
   const seen = m.worker?.last_seen ? ` since ${absTime(new Date(m.worker.last_seen * 1000)).slice(11)}` : "";
   const end = (t: string): string => (/[.?!]$/.test(t) ? t : `${t}.`);
-  const verifier = m.verifier === null ? "" : m.verifier ? ` Verifier: ${m.verifier}.` : " No verifier result recorded.";
+  // The sentence about the verifier has its line from the first paint (while the result is read it says so), so its arrival changes neither the height of the header nor the size of the answer's text block (CLS and LCP, T37).
+  const verifier = m.verifier === null ? " Checking the verifier result." : m.verifier ? ` Verifier: ${m.verifier}.` : " No verifier result recorded.";
   switch (s.id) {
-    case "offline": return { what: `Worker ${m.workerName} has been offline${seen}.`, needMe: "The worker needs attention.", next: "See Workers for why." };
-    case "waiting": return { what: "Waiting for provider capacity.", needMe: none, next: "It continues when capacity returns." };
-    case "paused": return { what: "Paused.", needMe: none, next: "Resume when you are ready." };
-    case "queued": return { what: "Created, not started.", needMe: "Waiting for you.", next: "Start it to begin." };
-    case "done": return { what: "All tasks finished.", needMe: none, next: "See Tasks." };
-    case "stopped": return { what: m.status === "CANCELLED" ? "Cancelled." : "Stopped.", needMe: none, next: m.status === "CANCELLED" ? "See Activity." : "Start it again to continue." };
-    case "needs-approval": return { what: end(said ?? `${task} awaits your approval`) + verifier, needMe: needs, next: ord ? "Approve or reject." : "Review the tasks." };
-    case "needs-input": return { what: end(said ?? "The provider is waiting for an answer"), needMe: needs, next: "Take control to answer." };
-    case "failed": return { what: end(said ?? `${task} failed`), needMe: needs, next: ord ? "Retry it, or check Activity." : "Check Activity." };
-    default: return { what: current ? `Running ${current}.` : "Running.", needMe: none, next: "It keeps working." };
+    case "offline": return { what: `Worker ${m.workerName} has been offline${seen}.`, tail: "", needMe: "The worker needs attention.", next: "See Workers for why." };
+    case "waiting": return { what: "Waiting for provider capacity.", tail: "", needMe: none, next: "It continues when capacity returns." };
+    case "paused": return { what: "Paused.", tail: "", needMe: none, next: "Resume when you are ready." };
+    case "queued": return { what: "Created, not started.", tail: "", needMe: "Waiting for you.", next: "Start it to begin." };
+    case "done": return { what: "All tasks finished.", tail: "", needMe: none, next: "See Tasks." };
+    case "stopped": return { what: m.status === "CANCELLED" ? "Cancelled." : "Stopped.", tail: "", needMe: none, next: m.status === "CANCELLED" ? "See Activity." : "Start it again to continue." };
+    case "needs-approval": return { what: end(said ?? `${task} awaits your approval`), tail: verifier, needMe: needs, next: ord ? "Approve or reject." : "Review the tasks." };
+    case "needs-input": return { what: end(said ?? "The provider is waiting for an answer"), tail: "", needMe: needs, next: "Take control to answer." };
+    case "failed": return { what: end(said ?? `${task} failed`), tail: "", needMe: needs, next: ord ? "Retry it, or check Activity." : "Check Activity." };
+    default: return { what: current ? `Running ${current}.` : "Running.", tail: "", needMe: none, next: "It keeps working." };
   }
 }
 
@@ -205,7 +206,7 @@ export function buildHeader(m: HeaderModel, hd: HeaderHandlers): Node[] {
       ),
       h("div", { class: "head-actions", role: "group", "aria-label": "Mission actions" }, ...actions, menu({ label: "More mission actions", kind: "ghost" }, menuItems(m, hd))),
     ),
-    h("p", { class: "mission-answer small", title: `${a.what} ${a.needMe} ${a.next}` }, h("span", { "data-q": "what" }, a.what), " ", h("span", { "data-q": "need-me" }, a.needMe), " ", h(m.state.id === "offline" ? "a" : "span", { "data-q": "next", href: m.state.id === "offline" ? "/workers" : null }, a.next)),
+    h("p", { class: "mission-answer small", title: `${a.what}${a.tail} ${a.needMe} ${a.next}` }, h("span", { "data-q": "what" }, a.what, a.tail ? h("span", { class: "tail" }, a.tail) : null), " ", h("span", { "data-q": "need-me" }, a.needMe), " ", h(m.state.id === "offline" ? "a" : "span", { "data-q": "next", href: m.state.id === "offline" ? "/workers" : null }, a.next)),
     meta.length ? h("p", { class: "head-meta muted small" }, ...meta) : null,
   ].flatMap((n) => (n ? [n] : []));
 }

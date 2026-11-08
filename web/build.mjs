@@ -1,6 +1,7 @@
 // Bundles src/ into dist/ with esbuild: hashed app-HASH.js / app-HASH.css and an index.html that references them.
 import { build } from "esbuild";
-import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -72,6 +73,18 @@ const outputs = [...Object.keys(result.metafile.outputs), ...Object.keys(css.met
 const js = outputs.find((f) => f.startsWith("app-") && f.endsWith(".js"));
 const style = outputs.find((f) => f.endsWith(".css"));
 if (!js || !style) throw new Error("esbuild produced no js/css output");
-const html = readFileSync("src/index.html", "utf8").replace("{{JS}}", js).replace("{{CSS}}", style);
+// The browser learns the whole first-load graph from the HTML instead of from the entry script, and the session state starts with the document:
+// without these hints the entry script, then its static chunks, then the sign-in check follow one another (one round trip each, PRD-037 T37).
+const entryOutput = Object.entries(result.metafile.outputs).find(([, output]) => output.entryPoint === "src/main.ts")?.[1];
+const preload = [
+  ...(entryOutput?.imports ?? []).filter((i) => i.kind === "import-statement").map((i) => `<link rel="modulepreload" href="/${basename(i.path)}">`),
+  '<link rel="preload" as="fetch" href="/api/v1/auth/state" crossorigin="anonymous">',
+].join("\n");
+const html = readFileSync("src/index.html", "utf8").replace("{{JS}}", js).replace("{{CSS}}", style).replace("{{PRELOAD}}", preload);
 writeFileSync("dist/index.html", html);
 console.log(`dist/index.html -> ${js}, ${style}`);
+// A gzip copy of every text asset sits next to it (`app-HASH.js.gz`): the coordinator sends it to a client that accepts gzip, which cuts the bytes of the first
+// load by about 75% on a slow link (PRD-037 T37). The plain files stay, for clients that do not accept gzip and for the budget check.
+for (const file of readdirSync("dist")) {
+  if (/\.(html|js|css|svg|json)$/.test(file)) writeFileSync(`dist/${file}.gz`, gzipSync(readFileSync(`dist/${file}`), { level: 9 }));
+}

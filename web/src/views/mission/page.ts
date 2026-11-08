@@ -23,6 +23,8 @@ const EVENT_WINDOW = 300;
 const NEVER_STARTED = new Set(["CREATED", "QUEUED", "READY"]);
 const TABS: Array<{ id: Tab; label: string }> = [{ id: "session", label: "Session" }, { id: "tasks", label: "Tasks" }, { id: "activity", label: "Activity" }];
 
+// Resolves 100 ms after the second frame: a request made then starts after the first paint of the page has been reported (a callback of the first frame runs before that paint).
+const afterPaint = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 100))));
 const isTab = (v: string | null): v is Tab => v === "session" || v === "tasks" || v === "activity";
 const record = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 
@@ -343,7 +345,9 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
         sessionKind = "reserve";
         sessionSlot.replaceChildren(sessionReserve());
       }
-      void loadSession(workerName, missionId, { running: st === "RUNNING", available: online(), ...(providerName() ? { provider: providerName() } : {}) })
+      // The terminal chunk is fetched and evaluated after the header and the tasks were painted: its evaluation is one long task that would otherwise come first (LCP and TBT, T37).
+      void afterPaint()
+        .then(() => loadSession(workerName, missionId, { running: st === "RUNNING", available: online(), ...(providerName() ? { provider: providerName() } : {}) }))
         .then((handle) => {
           if (disposed) return handle.dispose();
           session = handle;

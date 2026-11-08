@@ -142,9 +142,9 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--
 .toast .btn.icon { margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2)) 0 0; }
 .toast.applied { border-inline-start-color: var(--icon-done); }
 .toast.applied .toast-icon { color: var(--icon-done); }
-.toast.accepted, .toast.uncertain, .toast.attention { border-inline-start-color: var(--alert-attention-bar); }
+.toast.accepted, .toast.uncertain, .toast.attention, .mrow[data-tier="alert"] { border-inline-start-color: var(--alert-attention-bar); }
 .toast.accepted .toast-icon, .toast.uncertain .toast-icon, .toast.attention .toast-icon { color: var(--alert-attention-fg); }
-.toast.rejected, .toast.failed, .toast.error { border-inline-start-color: var(--alert-failed-bar); }
+.toast.rejected, .toast.failed, .toast.error, .mrow[data-state="failed"] { border-inline-start-color: var(--alert-failed-bar); } /* the toast colours and the bar of a Needs you row: failed after attention, both beat the neutral bar of .mrow */
 .toast.rejected .toast-icon, .toast.failed .toast-icon, .toast.error .toast-icon { color: var(--alert-failed-fg); }
 .toast-more { font-size: var(--fs-xs); color: var(--text-muted); text-align: end; }
 

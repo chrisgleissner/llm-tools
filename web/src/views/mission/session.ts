@@ -21,6 +21,8 @@ export interface SessionHandle {
 
 export async function loadSession(workerName: string, missionId: string, opts: SessionOpts): Promise<SessionHandle> {
   const { sessionPane } = await import("../../session");
+  // Evaluating the terminal chunk is one long task; building the pane is another. Between them the browser handles input and paints (total blocking time, T37).
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   const pane = sessionPane(workerName, missionId, opts.provider ? { provider: opts.provider } : {});
   let running = opts.running;
   let available = opts.available;
