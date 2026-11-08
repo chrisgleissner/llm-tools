@@ -248,6 +248,33 @@ fn recovery_commands_reset_password_and_certificates() {
 }
 
 #[test]
+fn local_reset_passkeys_clears_credentials_origin_binding_and_sessions() {
+    let dir = tmp_dir();
+    let d = dir.to_str().unwrap();
+    assert!(run(&["init", "--data-dir", d, "--hostname", "a.test"], None).status.success());
+    let db = Db::open(&db_path(&dir)).unwrap();
+    db.admin_create("admin", "old-hash").unwrap();
+    db.session_create("tokenhash", "csrf").unwrap();
+    let conn = rusqlite::Connection::open(db_path(&dir)).unwrap();
+    conn.execute("INSERT INTO auth_policy(principal_id,passkey_origin) VALUES('admin','https://a.test')", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at) VALUES('cred','admin','{}','admin',1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = run(&["admin", "reset-passkeys", "--data-dir", d], None);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("1 passkey"));
+    assert_eq!(db.passkey_count("admin").unwrap(), 0);
+    assert_eq!(db.passkey_origin("admin").unwrap(), None);
+    assert_eq!(db.session_count().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn init_twice_changes_nothing_and_says_so() {
     let dir = tmp_dir();
     let d = dir.to_str().unwrap();

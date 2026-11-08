@@ -29,6 +29,79 @@ async fn sign_in_with_ua(api: &Api, user_agent: &str) -> reqwest::Response {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn totp_enrollment_and_recovery_codes_gate_login_and_recovery_is_single_use() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let (status, enrolled) = admin.post("/api/v1/auth/totp/enroll", json!({"current_password":PASSWORD})).await;
+    assert_eq!(status, 200, "{enrolled}");
+    let secret = enrolled["secret"].as_str().expect("enrollment secret");
+    assert!(enrolled["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+
+    let (status, _) = admin.post("/api/v1/auth/totp/confirm", json!({"code":"000000"})).await;
+    assert_eq!(status, 401, "invalid code must not activate MFA");
+    let code = bridge_coordinator::auth::totp_code(secret, bridge_coordinator::now()).unwrap();
+    let (status, confirmed) = admin.post("/api/v1/auth/totp/confirm", json!({"code":code})).await;
+    assert_eq!(status, 200, "{confirmed}");
+    let recovery = confirmed["recovery_codes"].as_array().unwrap();
+    assert_eq!(recovery.len(), 10);
+    let first = recovery[0].as_str().unwrap().to_string();
+    let stored = env.srv.state.db.recovery_code_hashes("admin").unwrap();
+    assert_eq!(stored.len(), 10);
+    assert!(stored.iter().any(|hash| bridge_coordinator::auth::verify_recovery_code(&first, hash)));
+    assert!(stored
+        .iter()
+        .all(|hash| hash.starts_with("$argon2id$") && !recovery.iter().any(|code| code == hash)));
+
+    // Enrollment confirmation consumes the current step; use the next accepted step for login.
+    let totp = bridge_coordinator::auth::totp_code(secret, bridge_coordinator::now() + 30).unwrap();
+    let good_totp = env
+        .api()
+        .bare(Method::POST, "/api/v1/auth/login")
+        .json(&json!({"username":"admin","password":PASSWORD,"totp_code":totp}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(good_totp.status().as_u16(), 200, "a valid TOTP should satisfy MFA");
+    let replayed_totp = env
+        .api()
+        .bare(Method::POST, "/api/v1/auth/login")
+        .json(&json!({"username":"admin","password":PASSWORD,"totp_code":totp}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replayed_totp.status().as_u16(), 401, "a TOTP time step must not be replayable");
+
+    let bad = env
+        .api()
+        .bare(Method::POST, "/api/v1/auth/login")
+        .json(&json!({"username":"admin","password":PASSWORD}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status().as_u16(), 401, "TOTP must be required after enrollment");
+    let good = env
+        .api()
+        .bare(Method::POST, "/api/v1/auth/login")
+        .json(&json!({"username":"admin","password":PASSWORD,"recovery_code":first}))
+        .send()
+        .await
+        .unwrap();
+    let good_status = good.status().as_u16();
+    let good_body = good.text().await.unwrap();
+    assert_eq!(good_status, 200, "recovery code should allow controlled account recovery: {good_body}");
+    let replay = env
+        .api()
+        .bare(Method::POST, "/api/v1/auth/login")
+        .json(&json!({"username":"admin","password":PASSWORD,"recovery_code":first}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status().as_u16(), 401, "recovery codes are one-time");
+    assert_eq!(env.srv.state.db.recovery_code_hashes("admin").unwrap().len(), 9);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mutation_bodies_require_json_content_type() {
     let env = boot().await;
     let api = env.admin().await;

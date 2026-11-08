@@ -5,6 +5,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use rand::rngs::SysRng;
 use rand::TryRng;
+use ring::hmac;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -30,6 +31,110 @@ pub fn hash_password(password: &str) -> String {
 
 pub fn verify_password(password: &str, phc: &str) -> bool {
     argon().verify_password(password.as_bytes(), phc).is_ok()
+}
+
+/// Produce an RFC 6238 SHA-1 TOTP secret (160 random bits, Base32 without padding).
+pub fn new_totp_secret() -> String {
+    let mut bytes = [0u8; 20];
+    SysRng.try_fill_bytes(&mut bytes).expect("operating system random source");
+    base32_encode(&bytes)
+}
+
+/// Calculate the six-digit SHA-1 TOTP value for an explicit Unix timestamp.
+pub fn totp_code(secret: &str, unix_time: i64) -> Option<String> {
+    let key = base32_decode(secret)?;
+    if unix_time < 0 {
+        return None;
+    }
+    let counter = (unix_time as u64) / 30;
+    let counter = counter.to_be_bytes();
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &key);
+    let mac = hmac::sign(&key, &counter);
+    let bytes = mac.as_ref();
+    let offset = usize::from(bytes[bytes.len() - 1] & 0x0f);
+    let binary =
+        (u32::from(bytes[offset] & 0x7f) << 24) | (u32::from(bytes[offset + 1]) << 16) | (u32::from(bytes[offset + 2]) << 8) | u32::from(bytes[offset + 3]);
+    Some(format!("{:06}", binary % 1_000_000))
+}
+
+/// Accept the current 30-second step and one step on either side for clock skew.
+pub fn verify_totp(secret: &str, code: &str, unix_time: i64) -> bool {
+    matching_totp_step(secret, code, unix_time).is_some()
+}
+
+pub fn matching_totp_step(secret: &str, code: &str, unix_time: i64) -> Option<i64> {
+    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) || unix_time < 0 {
+        return None;
+    }
+    [0, -30, 30].into_iter().find_map(|delta| {
+        (unix_time + delta >= 0 && totp_code(secret, unix_time + delta).is_some_and(|candidate| ct_eq(&candidate, code))).then_some((unix_time + delta) / 30)
+    })
+}
+
+/// Hash recovery codes using the same memory-hard Argon2id parameters as passwords.
+pub fn hash_recovery_code(code: &str) -> String {
+    hash_password(&normalize_recovery_code(code))
+}
+
+pub fn verify_recovery_code(code: &str, phc: &str) -> bool {
+    verify_password(&normalize_recovery_code(code), phc)
+}
+
+pub fn new_recovery_code() -> String {
+    let mut bytes = [0u8; 8];
+    SysRng.try_fill_bytes(&mut bytes).expect("operating system random source");
+    let value = hex::encode_upper(bytes);
+    format!("{}-{}-{}-{}", &value[0..4], &value[4..8], &value[8..12], &value[12..16])
+}
+
+fn normalize_recovery_code(code: &str) -> String {
+    code.bytes()
+        .filter(|b| b.is_ascii_alphanumeric())
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect()
+}
+
+fn base32_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut output = String::new();
+    let mut buffer = 0u16;
+    let mut bits = 0u8;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(ALPHABET[usize::from((buffer >> bits) & 31)] as char);
+        }
+    }
+    if bits > 0 {
+        output.push(ALPHABET[usize::from((buffer << (5 - bits)) & 31)] as char);
+    }
+    output
+}
+
+fn base32_decode(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(value.len() * 5 / 8);
+    let mut buffer = 0u16;
+    let mut bits = 0u8;
+    for byte in value.bytes() {
+        let byte = byte.to_ascii_uppercase();
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | u16::from(digit);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+        }
+    }
+    Some(output)
 }
 
 /// 32 random bytes, URL-safe base64 without padding (43 characters).
@@ -318,5 +423,23 @@ mod tests {
         assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN)).is_ok());
         assert!(valid_password(&"correct horse battery staple".repeat(8)).is_ok());
         assert!(valid_password(&"x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn totp_matches_rfc_6238_sha1_vector_and_accepts_only_adjacent_steps() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        assert_eq!(totp_code(secret, 59).as_deref(), Some("287082"));
+        assert!(verify_totp(secret, "287082", 59));
+        assert!(!verify_totp(secret, "287082", 120));
+        assert!(!verify_totp(secret, "28708", 59));
+    }
+
+    #[test]
+    fn recovery_codes_are_argon2id_hashed_and_verified_without_plaintext_storage() {
+        let code = "B72F-9C15-114A-CC33";
+        let hash = hash_recovery_code(code);
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_recovery_code(code, &hash));
+        assert!(!verify_recovery_code("B72F-9C15-114A-CC34", &hash));
     }
 }

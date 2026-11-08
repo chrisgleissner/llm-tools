@@ -131,6 +131,7 @@ worker protocol is `protocol.md`.
 - `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
   sets a new password from stdin, deletes all sessions and revokes every API token
   (the number is printed) unless `--keep-api-tokens` is given.
+- `bridge-coordinator admin reset-passkeys` (local shell recovery; clears passkeys, the canonical passkey origin, challenges and browser sessions).
 - `bridge-coordinator cert renew [--hostname ...] [--ip ...]` replaces the
   server certificate from the existing CA (names must be within the CA's name
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
@@ -162,7 +163,7 @@ Public:
 | GET | `/healthz` | `{"status":"ok"}` only. |
 | GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
-| POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
+| POST | `/api/v1/auth/login` | `{username, password, remember?, totp_code? | recovery_code?}`. When optional TOTP is enabled, password plus exactly one valid TOTP or unused recovery code is required. Recovery codes are consumed once and their use is audited and notified. `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error for invalid password or MFA. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
@@ -170,6 +171,9 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. |
+| POST | `/auth/totp/enroll` | Browser session only; `{current_password}` starts enrollment and returns a pending Base32 secret and `otpauth://` URI. |
+| POST | `/auth/totp/confirm` | Browser session only; `{code}` confirms possession and returns ten one-time recovery codes once. Only Argon2id hashes are stored. |
+| POST | `/auth/totp/disable` | Browser session only; `{current_password, code}` disables TOTP and deletes stored recovery-code hashes. |
 | GET | `/auth/sessions` | Browser session only; lists at most 100 active sessions for its principal, with created/last-seen/expiry times and a `current` flag. Public IDs are random and independent of session credential hashes. |
 | DELETE | `/auth/sessions/{id}` | Browser session only; revokes an active session belonging to the same principal. |
 | POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. `public_origin` may be configured in `config.toml`; otherwise the first completed registration binds and persists it. Existing credentials without a recorded origin require this setting before startup. |

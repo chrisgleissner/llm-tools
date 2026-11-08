@@ -272,7 +272,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
@@ -344,6 +344,8 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
 const MIGRATE_V18: &str = "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE audit ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';";
+/// Version 20: per-principal TOTP verifier state and one-time Argon2id recovery-code hashes.
+const MIGRATE_V20: &str = "CREATE TABLE totp_auth(principal_id TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),last_step INTEGER NOT NULL DEFAULT -1); CREATE TABLE recovery_codes(principal_id TEXT NOT NULL, code_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(principal_id,code_hash)); CREATE INDEX recovery_codes_principal ON recovery_codes(principal_id);";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -583,6 +585,9 @@ impl Db {
                 conn.pragma_update(None, "user_version", 19)?;
             }
         }
+        if version < 20 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V20} PRAGMA user_version = 20; COMMIT;"))?;
+        }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -780,6 +785,89 @@ impl Db {
     pub fn passkey_count(&self, principal: &str) -> R<i64> {
         self.c()
             .query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?", [principal], |r| r.get(0))
+    }
+
+    pub fn totp_get(&self, principal: &str) -> R<Option<(String, bool, i64)>> {
+        self.c()
+            .query_row("SELECT secret,enabled,last_step FROM totp_auth WHERE principal_id=?", [principal], |r| {
+                Ok((r.get(0)?, r.get::<_, bool>(1)?, r.get(2)?))
+            })
+            .optional()
+    }
+
+    pub fn totp_step_consume(&self, principal: &str, step: i64) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE totp_auth SET last_step=? WHERE principal_id=? AND enabled=1 AND last_step<?",
+            params![step, principal, step],
+        )? == 1)
+    }
+
+    pub fn totp_pending_set(&self, principal: &str, secret: &str) -> R<()> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT INTO totp_auth(principal_id,secret,enabled) VALUES(?,?,0) ON CONFLICT(principal_id) DO UPDATE SET secret=excluded.secret,enabled=0",
+            params![principal, secret],
+        )?;
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        tx.commit()
+    }
+
+    pub fn totp_enable_with_recovery_codes(&self, principal: &str, hashes: &[String], step: i64) -> R<()> {
+        if hashes.is_empty() || hashes.len() > 20 {
+            return Err(rusqlite::Error::InvalidParameterName("invalid recovery-code set".into()));
+        }
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let changed = tx.execute(
+            "UPDATE totp_auth SET enabled=1,last_step=? WHERE principal_id=? AND enabled=0 AND last_step<?",
+            params![step, principal, step],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidParameterName("no pending TOTP enrollment".into()));
+        }
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        for hash in hashes {
+            tx.execute(
+                "INSERT INTO recovery_codes(principal_id,code_hash,created_at) VALUES(?,?,?)",
+                params![principal, hash, crate::now()],
+            )?;
+        }
+        tx.commit()
+    }
+
+    pub fn recovery_code_hashes(&self, principal: &str) -> R<Vec<String>> {
+        let c = self.c();
+        let mut stmt = c.prepare("SELECT code_hash FROM recovery_codes WHERE principal_id=? ORDER BY code_hash")?;
+        let rows = stmt.query_map([principal], |r| r.get(0))?.collect();
+        rows
+    }
+
+    pub fn recovery_code_consume(&self, principal: &str, hash: &str) -> R<bool> {
+        Ok(self
+            .c()
+            .execute("DELETE FROM recovery_codes WHERE principal_id=? AND code_hash=?", params![principal, hash])?
+            == 1)
+    }
+
+    pub fn totp_disable(&self, principal: &str) -> R<()> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM totp_auth WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        tx.commit()
+    }
+
+    /// Local operator recovery: delete credentials, challenges, origin binding and sessions atomically.
+    pub fn admin_reset_passkeys(&self, principal: &str) -> R<usize> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let removed = tx.execute("DELETE FROM passkeys WHERE principal_id=?", [principal])?;
+        tx.execute("UPDATE auth_policy SET passkey_origin=NULL WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM webauthn_challenges WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM sessions", [])?;
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ---- admin ----

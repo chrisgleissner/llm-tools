@@ -287,23 +287,23 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `task priority` | Typed `task.priority`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task reorder` | Typed `task.reorder`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task dependencies` | Typed `task.dependency`; resource `PATCH /api/v1/missions/{id}/tasks/{n}` with the prerequisite's mission-local task number. |
-| `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/pause`. |
-| `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/resume`. |
-| `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/cancel`. |
-| `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/retry`. |
+| `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=pause`. |
+| `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=resume`. |
+| `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=cancel`. |
+| `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=retry`. |
 | `task verify` | Typed `task.verify`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
 | `task reject` | Typed `task.reject`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify` with `approved:false`. |
 | `proposal create` | Typed `proposal.create`; resource `POST /api/v1/missions/{id}/proposals`. Source operation is checked by the worker. |
 | `proposal list` | Typed `proposal.list`; resource `GET /api/v1/missions/{id}/proposals`. |
-| `proposal accept` | Typed `proposal.accept`; resource `POST /api/v1/missions/{id}/proposals/{n}/accept`. |
-| `proposal reject` | Typed `proposal.reject`; resource `POST /api/v1/missions/{id}/proposals/{n}/reject`. |
+| `proposal accept` | Typed `proposal.accept`; resource `POST /api/v1/missions/{id}/proposals/{n}/{action}` with `action=accept`. |
+| `proposal reject` | Typed `proposal.reject`; resource `POST /api/v1/missions/{id}/proposals/{n}/{action}` with `action=reject`. |
 | `events` | Typed `mission.events`; resource `GET /api/v1/missions/{id}/events`. |
-| `start` | Typed `mission.start`; resource `POST /api/v1/missions/{id}/start`. |
-| `pause` | Typed `mission.pause`; resource `POST /api/v1/missions/{id}/pause`. |
-| `resume` | Typed `mission.resume`; resource `POST /api/v1/missions/{id}/resume`. |
-| `continue` | Typed `mission.continue`; resource `POST /api/v1/missions/{id}/continue`. |
-| `stop` | Typed `mission.stop`; resource `POST /api/v1/missions/{id}/stop`. |
-| `cancel` | Typed `mission.cancel`; resource `POST /api/v1/missions/{id}/cancel`. |
+| `start` | Typed `mission.start`; resource `POST /api/v1/missions/{id}/{action}` with `action=start`. |
+| `pause` | Typed `mission.pause`; resource `POST /api/v1/missions/{id}/{action}` with `action=pause`. |
+| `resume` | Typed `mission.resume`; resource `POST /api/v1/missions/{id}/{action}` with `action=resume`. |
+| `continue` | Typed `mission.continue`; resource `POST /api/v1/missions/{id}/{action}` with `action=continue`. |
+| `stop` | Typed `mission.stop`; resource `POST /api/v1/missions/{id}/{action}` with `action=stop`. |
+| `cancel` | Typed `mission.cancel`; resource `POST /api/v1/missions/{id}/{action}` with `action=cancel`. |
 | `attach` | Exclusion: attaches a local tmux station; replacement is local attach or remote terminal WebSocket for viewing. |
 | `detach` | Exclusion: detaches a local tmux client; no remote station-control API; run locally. |
 | `missions` | Exclusion: interactive picker/station switching is local; use `GET /api/v1/missions` to list remotely. |
@@ -418,6 +418,9 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/auth/state` |
 | `POST /api/v1/auth/setup` |
 | `POST /api/v1/auth/login` |
+| `POST /api/v1/auth/totp/enroll` |
+| `POST /api/v1/auth/totp/confirm` |
+| `POST /api/v1/auth/totp/disable` |
 | `POST /api/v1/auth/logout` |
 | `POST /api/v1/auth/password` |
 | `POST /api/v1/auth/passkeys/registration/start` |

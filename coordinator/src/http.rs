@@ -658,6 +658,18 @@ async fn verify_blocking(st: &AppState, password: String, phc: String) -> bool {
         .expect("verify task")
 }
 
+async fn hash_recovery_blocking(st: &AppState, code: String) -> String {
+    let _slot = st.argon_slots.acquire().await.expect("semaphore open");
+    tokio::task::spawn_blocking(move || auth::hash_recovery_code(&code)).await.expect("hash task")
+}
+
+async fn verify_recovery_blocking(st: &AppState, code: String, phc: String) -> bool {
+    let _slot = st.argon_slots.acquire().await.expect("semaphore open");
+    tokio::task::spawn_blocking(move || auth::verify_recovery_code(&code, &phc))
+        .await
+        .expect("verify task")
+}
+
 /// `max_age: None` makes a browser-session cookie (no `Max-Age`): the browser drops it on exit.
 fn session_cookie(value: &str, max_age: Option<u64>) -> String {
     let age = max_age.map(|a| format!("; Max-Age={a}")).unwrap_or_default();
@@ -864,16 +876,30 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         }
     };
     let parsed = parse_body(&body.bytes).and_then(|m| {
-        no_extra(&m, &["username", "password", "remember"])?;
+        no_extra(&m, &["username", "password", "remember", "totp_code", "recovery_code"])?;
         let remember = match m.get("remember") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "remember must be true or false")),
         };
-        Ok((str_field(&m, "username")?.to_string(), str_field(&m, "password")?.to_string(), remember))
+        let totp = m.get("totp_code").and_then(Value::as_str).map(str::to_owned);
+        let recovery = m.get("recovery_code").and_then(Value::as_str).map(str::to_owned);
+        if totp.is_some() && recovery.is_some() {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "provide one MFA code"));
+        }
+        if totp.as_ref().is_some_and(|v| v.len() > 16) || recovery.as_ref().is_some_and(|v| v.len() > 64) {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "MFA code is too long"));
+        }
+        Ok((
+            str_field(&m, "username")?.to_string(),
+            str_field(&m, "password")?.to_string(),
+            remember,
+            totp,
+            recovery,
+        ))
     });
     drop(body);
-    let (username, password, remember) = match parsed {
+    let (username, password, remember, totp_code, recovery_code) = match parsed {
         Ok(c) => c,
         Err(e) => {
             attempt.release();
@@ -902,6 +928,39 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         st.db.audit(&clean(&username), "login.failure", "invalid credentials", &ip);
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
     }
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let mut used_recovery_code = false;
+    if let Some((secret, enabled, _)) = st.db.totp_get(&principal)? {
+        if enabled {
+            let mut mfa_ok = false;
+            if let Some(code) = totp_code.as_deref() {
+                if let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) {
+                    mfa_ok = st.db.totp_step_consume(&principal, step)?;
+                }
+            } else if let Some(code) = recovery_code.as_deref() {
+                let hashes = st.db.recovery_code_hashes(&principal)?;
+                let mut matched = None;
+                // Check the whole bounded set so the matching code's position is not exposed.
+                for hash in hashes {
+                    if verify_recovery_blocking(&st, code.to_string(), hash.clone()).await && matched.is_none() {
+                        matched = Some(hash);
+                    }
+                }
+                if let Some(hash) = matched {
+                    mfa_ok = st.db.recovery_code_consume(&principal, &hash)?;
+                    used_recovery_code = mfa_ok;
+                }
+            }
+            if !mfa_ok {
+                attempt.fail();
+                st.db.audit(&clean(&username), "login.failure", "invalid credentials", &ip);
+                return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
+            }
+        }
+    } else if totp_code.is_some() || recovery_code.is_some() {
+        attempt.fail();
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
+    }
     attempt.succeed();
     st.db.known_addr_remember(&addr)?;
     if !known_addr {
@@ -909,13 +968,12 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     }
     remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_for(
-        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
-        &auth::sha256_hex(&token),
-        &csrf,
-        remember,
-    )?;
-    st.db.audit(&username, "login.success", "", &ip);
+    st.db.session_create_for(&principal, &auth::sha256_hex(&token), &csrf, remember)?;
+    st.db
+        .audit(&username, "login.success", if used_recovery_code { "recovery code" } else { "" }, &ip);
+    if used_recovery_code {
+        security_notification(&st, &principal, "recovery_code_used");
+    }
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
         header::SET_COOKIE,
@@ -1202,6 +1260,96 @@ async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: 
     st.db.audit(&username, "passkey.origin.reenrolled", &clean(&origin), &ip);
     security_notification(&st, &username, "passkey_origin_reenrolled");
     Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
+}
+
+async fn totp_enroll(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP enrollment requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["current_password"])?;
+    let current = str_field(&m, "current_password")?;
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    if current.len() > auth::MAX_PASSWORD_LEN || !verify_blocking(&st, current.to_string(), password_hash).await {
+        st.db.audit(&username, "totp.enrollment.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    if st.db.totp_get(&principal)?.is_some_and(|(_, enabled, _)| enabled) {
+        return Err(err(StatusCode::CONFLICT, "totp-already-enabled", "disable TOTP before enrolling a replacement"));
+    }
+    let secret = auth::new_totp_secret();
+    st.db.totp_pending_set(&principal, &secret)?;
+    st.db.audit(&username, "totp.enrollment.started", "", &ip);
+    let label = format!("LLM%20Bridge:{}", username.replace('@', "%40"));
+    let uri = format!("otpauth://totp/{label}?secret={secret}&issuer=LLM%20Bridge&algorithm=SHA1&digits=6&period=30");
+    Ok(json_ok(StatusCode::OK, json!({"secret":secret,"otpauth_uri":uri,"confirmed":false})))
+}
+
+async fn totp_confirm(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP enrollment requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["code"])?;
+    let code = str_field(&m, "code")?;
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some((secret, enabled, _)) = st.db.totp_get(&principal)? else {
+        return Err(err(StatusCode::CONFLICT, "totp-enrollment-missing", "start TOTP enrollment first"));
+    };
+    if enabled {
+        return Err(err(StatusCode::CONFLICT, "totp-already-enabled", "TOTP is already enabled"));
+    }
+    let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) else {
+        st.db.audit(&username, "totp.enrollment.failure", "invalid verification code", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    };
+    let codes: Vec<String> = (0..10).map(|_| auth::new_recovery_code()).collect();
+    let mut hashes = Vec::with_capacity(codes.len());
+    for code in &codes {
+        hashes.push(hash_recovery_blocking(&st, code.clone()).await);
+    }
+    st.db.totp_enable_with_recovery_codes(&principal, &hashes, step)?;
+    st.db.audit(&username, "totp.enabled", "10 recovery codes generated", &ip);
+    security_notification(&st, &principal, "totp_enabled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true,"recovery_codes":codes})))
+}
+
+async fn totp_disable(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP management requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["current_password", "code"])?;
+    let current = str_field(&m, "current_password")?;
+    let code = str_field(&m, "code")?;
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some((secret, enabled, _)) = st.db.totp_get(&principal)? else {
+        return Err(err(StatusCode::CONFLICT, "totp-not-enabled", "TOTP is not enabled"));
+    };
+    if current.len() > auth::MAX_PASSWORD_LEN || !verify_blocking(&st, current.to_string(), password_hash).await {
+        st.db.audit(&username, "totp.disable.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    let Some(step) = enabled.then(|| auth::matching_totp_step(&secret, code, crate::now())).flatten() else {
+        st.db.audit(&username, "totp.disable.failure", "invalid verification code", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    };
+    if !st.db.totp_step_consume(&principal, step)? {
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    }
+    st.db.totp_disable(&principal)?;
+    st.db.audit(&username, "totp.disabled", "recovery codes deleted", &ip);
+    security_notification(&st, &principal, "totp_disabled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
 }
 
 async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
@@ -3485,6 +3633,9 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/state", &["GET"], Access::Public, ""),
     ("/api/v1/auth/setup", &["POST"], Access::Public, ""),
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/totp/enroll", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/totp/confirm", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/totp/disable", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
@@ -3717,6 +3868,9 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/enroll", post(totp_enroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/confirm", post(totp_confirm).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/disable", post(totp_disable).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/passkeys", get(list_passkeys))
         .route("/api/v1/auth/sessions", get(list_sessions))
         .route("/api/v1/auth/sessions/{id}", delete(revoke_session))

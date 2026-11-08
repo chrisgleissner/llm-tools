@@ -323,10 +323,25 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "properties":{
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
                     "password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
-                    "remember":{"type":"boolean"}
+                    "remember":{"type":"boolean"},
+                    "totp_code":{"type":"string","pattern":"^[0-9]{6}$"},
+                    "recovery_code":{"type":"string","minLength":1,"maxLength":64}
                 }
             }}}
         });
+    }
+    if path == "/api/v1/auth/totp/enroll" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["current_password"],"properties":{"current_password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] = json!({"type":"object","required":["secret","otpauth_uri","confirmed"],"properties":{"secret":{"type":"string","minLength":32,"maxLength":64},"otpauth_uri":{"type":"string","format":"uri"},"confirmed":{"const":false}},"additionalProperties":false});
+    }
+    if path == "/api/v1/auth/totp/confirm" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string","pattern":"^[0-9]{6}$"}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] = json!({"type":"object","required":["ok","recovery_codes"],"properties":{"ok":{"const":true},"recovery_codes":{"type":"array","minItems":10,"maxItems":10,"items":{"type":"string","pattern":"^[A-F0-9]{4}(-[A-F0-9]{4}){3}$"}}},"additionalProperties":false});
+    }
+    if path == "/api/v1/auth/totp/disable" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["current_password","code"],"properties":{"current_password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},"code":{"type":"string","pattern":"^[0-9]{6}$"}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] =
+            json!({"type":"object","required":["ok"],"properties":{"ok":{"const":true}},"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
         op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string","minLength":1,"maxLength":64}}}}}});
