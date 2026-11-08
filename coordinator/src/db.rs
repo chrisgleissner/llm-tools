@@ -2237,12 +2237,29 @@ mod batch_write_cost {
 #[cfg(test)]
 mod passkey_removal_tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
+
+    fn test_db_dir(timestamp: i64, sequence: u64) -> PathBuf {
+        std::env::temp_dir().join(format!("bridge-passkey-removal-{}-{timestamp}-{sequence}", std::process::id()))
+    }
+
+    fn unique_test_db_dir(timestamp: i64) -> PathBuf {
+        let sequence = NEXT_TEST_DB.fetch_add(1, Ordering::Relaxed);
+        test_db_dir(timestamp, sequence)
+    }
 
     fn db() -> (Db, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("bridge-passkey-removal-{}-{}", std::process::id(), crate::now()));
+        let dir = unique_test_db_dir(crate::now());
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("state.sqlite3")).unwrap();
         (db, dir)
+    }
+
+    #[test]
+    fn test_database_directories_are_unique_within_the_same_second() {
+        assert_ne!(unique_test_db_dir(1_800_000_000), unique_test_db_dir(1_800_000_000));
     }
 
     fn credential(id: &str) -> PasskeyCredentialRow {
