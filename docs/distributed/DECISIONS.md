@@ -551,6 +551,24 @@ is admitted at once instead of getting 503; its hello (a write) waits. Test expe
 hold the connection that long, are written to stderr (`slow database call <name>`); that log stays because
 it names the call that held the writer.
 
+Reads after writes. With reads on their own connections, a read no longer queues behind a write that
+is already under way, so a client could see state older than a write that the coordinator had just made.
+Found on the Windows runners: `unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed`
+polled a read-only command after the worker was seen offline (the in-memory hub changes first) and got
+`sent` because the disconnect's commit was still running; with a 400 ms delay in that commit the test fails
+every time on a plain reader and passes with the change below. Two changes: the disconnect writes the
+worker row and finishes the worker's unanswered reads in one transaction (`Db::worker_gone`), and the
+command read (`command_get`) uses `Db::r_after_writes`, which waits (at most 3 s, 503 `database-busy`
+after that) until the writes that had asked for the writer connection when the read began have finished
+or given up. Other reads, including the worker, mission, event and auth lists, never wait for a writer, so
+they can lag a commit that is still running; the commits that these reads must follow (the worker hello)
+finish before the coordinator answers the worker. Regression test:
+`a_read_command_polled_while_the_disconnect_is_committing_is_seen_finished` in `tests/worker.rs` (fails on a
+plain reader), plus a unit test in `db.rs`.
+
+The copy's flush interval stays 1 MiB on every platform: a 32 MiB interval on macOS and Windows made the
+copy stop at 60 of 98 MiB on the macOS ARM64 runner (no progress for 80 s).
+
 Remaining limit: a commit that holds the writer connection for longer than the wait still makes
 requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.

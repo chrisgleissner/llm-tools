@@ -436,8 +436,7 @@ to 42450825462), before reads got their own connections:
 - The control run without any backup failed on Windows too: event batch commits took 0.8 to 3 s and
   `/api/v1/auth/state` answered 503 behind them, while `/healthz` stayed fast. macOS stayed under 1 s
   without a backup (slowest request 609 ms) and failed with one (a 2.6 s commit while the copy was
-  flushed every MiB; a flush is a full drive cache flush there, so the copy flushes every 32 MiB on
-  macOS and Windows). The cause of the request stalls was that reads shared the writer's connection;
+  flushed every MiB). The cause of the request stalls was that reads shared the writer's connection;
   reads now have four read-only connections (decision D29). After that change both tests passed their
   control run on macOS Intel and Windows (CI run 42453427529), reads stayed fast, and the remaining slow
   calls were the worker's own event batch commits (up to 9 s on the Windows runner, the copy at that time

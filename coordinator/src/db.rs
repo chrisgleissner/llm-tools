@@ -217,11 +217,18 @@ impl Drop for ConnGuard<'_> {
 #[derive(Default)]
 struct Gate {
     state: Mutex<GateState>,
+    /// Signalled whenever a writer finishes, for [`Gate::barrier`].
+    idle: std::sync::Condvar,
 }
 
 #[derive(Default)]
 struct GateState {
     held: bool,
+    /// Writers that have asked for the connection, and writers that have released it or given up.
+    /// A read that has to see the effect of writes already under way waits until `finished` reaches the
+    /// value `arrived` had when the read began ([`Gate::barrier`]).
+    arrived: u64,
+    finished: u64,
     next_ticket: u64,
     queue: std::collections::VecDeque<(u64, std::sync::Arc<std::sync::Condvar>)>,
 }
@@ -238,9 +245,28 @@ impl Gate {
     fn release(&self) {
         let mut st = self.state();
         st.held = false;
+        st.finished += 1;
         if let Some((_, cv)) = st.queue.front() {
             cv.notify_one();
         }
+        drop(st);
+        self.idle.notify_all();
+    }
+
+    /// Wait until every writer that had asked for the connection when this was called has finished
+    /// (committed, failed or given up), for at most `wait`.
+    fn barrier(&self, wait: std::time::Duration) -> R<()> {
+        let mut st = self.state();
+        let target = st.arrived;
+        let deadline = std::time::Instant::now() + wait;
+        while st.finished < target {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(busy("a write that this read follows is still in progress"));
+            }
+            st = self.idle.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        Ok(())
     }
 
     /// Wait for the connection for at most `wait`; refuse at once when `max_waiters` callers are queued.
@@ -248,11 +274,13 @@ impl Gate {
         let mut st = self.state();
         if !st.held && st.queue.is_empty() {
             st.held = true;
+            st.arrived += 1;
             return Ok(());
         }
         if st.queue.len() >= max_waiters {
             return Err(busy("too many requests are waiting for the database"));
         }
+        st.arrived += 1;
         let ticket = st.next_ticket;
         st.next_ticket += 1;
         let cv = std::sync::Arc::new(std::sync::Condvar::new());
@@ -268,6 +296,8 @@ impl Gate {
             let now = std::time::Instant::now();
             if now >= deadline {
                 st.queue.retain(|(t, _)| *t != ticket);
+                st.finished += 1;
+                self.idle.notify_all();
                 if !st.held {
                     if let Some((_, next)) = st.queue.front() {
                         next.notify_one(); // this caller was the head and the connection is free
@@ -880,6 +910,15 @@ impl Db {
             }
             st = self.readers.returned.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
         }
+    }
+
+    /// A read-only connection, after every write that had already asked for the writer connection has
+    /// finished. For reads whose answer has to include the effect of a write that is under way (a command
+    /// that a client polls, the unanswered reads of a worker that has just disconnected). It waits at most
+    /// [`lock_wait`], like a write does; ordinary reads use [`Db::r`] and never wait for a writer.
+    pub(crate) fn r_after_writes(&self) -> R<ReadGuard<'_>> {
+        self.gate.barrier(lock_wait())?;
+        self.r()
     }
 
     /// Set how many callers may wait for the connection at once (the server uses `max_connections` plus a
@@ -1866,7 +1905,7 @@ impl Db {
 
     // ---- commands ----
     pub fn command_get(&self, id: &str) -> R<Option<CommandRow>> {
-        self.r()?
+        self.r_after_writes()?
             .query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
             .optional()
     }
@@ -1931,9 +1970,24 @@ impl Db {
     /// backlog of them after a reconnect sent hundreds of large results (18.6 MB in 30 s measured).
     /// The failure is the same `command.result` shape a worker sends, so a client polling the
     /// journal entry sees a normal failed read.
+    /// A worker's connection ended: record the time and finish its unanswered read-only commands, in one
+    /// transaction, so that a client that sees the worker offline and then reads the command sees it finished.
+    pub fn worker_gone(&self, name: &str) -> R<Vec<CommandRow>> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        tx.execute("UPDATE workers SET last_seen=?, remote_address=NULL WHERE name=?", params![crate::now(), name])?;
+        let done = Self::expire_reads_in(&tx, name)?;
+        tx.commit()?;
+        Ok(done)
+    }
     pub fn commands_expire_reads(&self, worker: &str) -> R<Vec<CommandRow>> {
         let mut c = self.c()?;
         let tx = c.transaction()?;
+        let done = Self::expire_reads_in(&tx, worker)?;
+        tx.commit()?;
+        Ok(done)
+    }
+    fn expire_reads_in(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<Vec<CommandRow>> {
         let rows: Vec<CommandRow> = {
             let mut st = tx.prepare(&format!(
                 "SELECT {CCOLS} FROM commands WHERE worker=? AND mutating=0 AND state IN ('pending','sent','acked') ORDER BY rowid"
@@ -1959,7 +2013,6 @@ impl Db {
             row.updated_at = now;
             done.push(row);
         }
-        tx.commit()?;
         Ok(done)
     }
 
@@ -2389,6 +2442,7 @@ mod lock_wait_tests {
         assert!(db.worker_get("w").unwrap().is_none());
         db.worker_disconnected("w").unwrap();
         set_lock_wait(Duration::from_secs(3));
+        a_command_read_waits_for_writes_already_under_way_but_other_reads_do_not(&db);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2409,6 +2463,38 @@ mod lock_wait_tests {
         assert!(db.worker_add("w9", "hash").unwrap());
         assert!(db.worker_get("w9").unwrap().is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Runs inside the test that owns the process-wide connection wait.
+    fn a_command_read_waits_for_writes_already_under_way_but_other_reads_do_not(db: &std::sync::Arc<Db>) {
+        let held = db.c().unwrap();
+        // An ordinary read does not wait for the writer.
+        assert!(db.admin_get().unwrap().is_none());
+        // A command read that begins while a write is under way returns only after it has finished.
+        let reader = db.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let r = reader.command_get("nothing");
+            done_tx.send(Instant::now()).unwrap();
+            r
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err(), "the command read did not wait");
+        let released = Instant::now();
+        drop(held);
+        let returned = done_rx.recv_timeout(Duration::from_secs(5)).expect("the command read returns after the write");
+        assert!(returned >= released);
+        assert!(t.join().unwrap().unwrap().is_none());
+        // With no write under way it does not wait at all.
+        let started = Instant::now();
+        assert!(db.command_get("nothing").unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // A write that gave up (503) does not leave the barrier waiting for it.
+        set_lock_wait(Duration::from_millis(100));
+        let held = db.c().unwrap();
+        assert!(is_busy(&db.worker_disconnected("w").unwrap_err()));
+        drop(held);
+        assert!(db.command_get("nothing").unwrap().is_none());
+        set_lock_wait(Duration::from_secs(3));
     }
 
     #[test]

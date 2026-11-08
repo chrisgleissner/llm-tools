@@ -354,15 +354,10 @@ pub const BACKUP_DEFAULT_BUDGET: Duration = Duration::from_secs(15 * 60);
 pub const BACKUP_DEFAULT_MAX_BYTES_PER_SEC: u64 = 6 * 1024 * 1024;
 /// Dirty data a backup may leave in the page cache. On ext4 an fsync by another process (every
 /// coordinator commit) also waits for this data, so the bound is what the commit has to wait for.
-/// Output written between two forced flushes of the copy. On Linux a MiB keeps the dirty page cache small
-/// on a slow card. On macOS a flush is a full drive cache flush (`F_FULLFSYNC`) and on Windows a
-/// `FlushFileBuffers`; each one makes the coordinator's own synchronous commits wait for it, so a copy
-/// that flushes every MiB at 4 MiB/s delayed a commit by 2.5 s on the hosted macOS runner. There the copy
-/// flushes every 32 MiB.
-#[cfg(target_os = "linux")]
+/// Output written between two forced flushes of the copy; it keeps the dirty page cache small on a slow
+/// card. (A limit of 32 MiB on macOS and Windows was tried: on the hosted macOS ARM64 runner the copy then
+/// stopped making progress at 60 of 98 MiB and did not finish within 90 s, so the flush stays small.)
 const BACKUP_DIRTY_LIMIT: u64 = 1024 * 1024;
-#[cfg(not(target_os = "linux"))]
-const BACKUP_DIRTY_LIMIT: u64 = 32 * 1024 * 1024;
 const PROBE_BYTES: usize = 4 * 1024 * 1024;
 const MIB: f64 = 1024.0 * 1024.0;
 
