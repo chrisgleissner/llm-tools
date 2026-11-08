@@ -13,6 +13,10 @@ const TYPING_SPEC = /redesign[\\/]uxr-typing\.spec\.ts$/;
 const aloneFirst = { dependencies: ["typing-flood"] };
 // T37 (Lighthouse, e2e/redesign/uxr-lighthouse.spec.ts) is a measurement as well: it has a project of its own (`--project=lighthouse`, the CI job `web-lighthouse`) and the
 // standard projects leave it out, so it never runs beside the parallel workers of another project.
+// Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows), and so are the PRD-037 acceptance specs in e2e/redesign/: they measure text, boxes
+// and timing and are calibrated for the Linux fonts of the Playwright image (CI runs them there). A project's own `testIgnore` replaces the one of the config, so the
+// projects that have one list these too.
+const PLATFORM_IGNORE = process.platform === "linux" ? [] : [/screenshots\.spec\.ts$/, /[\\/]redesign[\\/]/];
 const LIGHTHOUSE_SPEC = /redesign[\\/]uxr-lighthouse\.spec\.ts$/;
 
 // PRD-037 device matrix (docs/distributed/web-design-spec.md section 12, T45): nine more Chromium projects that run
@@ -36,9 +40,7 @@ const phonePaths = (width: number, height: number) => ({ name: `paths-${width}x$
 
 export default defineConfig({
   testDir: "e2e",
-  // Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows), and so are the PRD-037 acceptance specs in e2e/redesign/: they measure
-  // text, boxes and timing and are calibrated for the Linux fonts of the Playwright image (CI runs them there).
-  testIgnore: process.platform === "linux" ? [] : [/screenshots\.spec\.ts$/, /[\\/]redesign[\\/]/],
+  testIgnore: PLATFORM_IGNORE,
   timeout: 90_000,
   expect: {
     timeout: 10_000,
@@ -54,11 +56,11 @@ export default defineConfig({
   projects: [
     { name: "typing-flood", testMatch: TYPING_SPEC, use: { ...devices["Pixel 4"] } },
     { name: "lighthouse", testMatch: LIGHTHOUSE_SPEC, ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
-    { name: "chromium-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
-    { name: "chromium-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Pixel 4"] } },
-    { name: "firefox-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
+    { name: "chromium-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    { name: "chromium-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Pixel 4"] } },
+    { name: "firefox-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
     // 393x851 CSS px at device scale factor 2.75 (the size the operator asked for); touch enabled.
-    { name: "firefox-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
+    { name: "firefox-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
     matrix(2560, 1440, "desktop"),
     matrix(1280, 720, "desktop"),
     matrix(768, 1024, "tablet"),
