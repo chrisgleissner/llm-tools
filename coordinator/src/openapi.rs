@@ -772,8 +772,19 @@ mod tests {
 
     #[test]
     fn generated_openapi_matches_committed_snapshot() {
+        let generated = openapi_value();
+        if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+            let mut bytes = serde_json::to_vec_pretty(&generated).expect("serialize generated OpenAPI");
+            bytes.push(b'\n');
+            std::fs::write(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"),
+                bytes,
+            )
+            .expect("write OpenAPI snapshot");
+            return;
+        }
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");
-        assert_eq!(openapi_value(), snapshot);
+        assert_eq!(generated, snapshot);
     }
 
     #[test]

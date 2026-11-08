@@ -6561,7 +6561,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
