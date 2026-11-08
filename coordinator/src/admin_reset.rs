@@ -180,7 +180,7 @@ impl Db {
     }
 
     fn meta_value(&self, key: &str) -> rusqlite::Result<Option<String>> {
-        self.c()?.query_row("SELECT value FROM meta WHERE key=?", params![key], |r| r.get(0)).optional()
+        self.r()?.query_row("SELECT value FROM meta WHERE key=?", params![key], |r| r.get(0)).optional()
     }
     }
 }

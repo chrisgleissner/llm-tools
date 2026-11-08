@@ -19,14 +19,11 @@
 //! (default: only `--assume-mb-s 100`, so the product's 6 MiB/s write cap applies), `BACKUP_TEST_OUT` a file that
 //! receives the measurements, `BACKUP_TEST_KEEP` a directory to keep the generated database in.
 //!
-//! The test is ignored on Windows (`cargo test -- --ignored` runs it). On the hosted Windows runners the
-//! same traffic without any backup (`BACKUP_TEST_CONTROL=1`, CI run 42450825462) already showed event batch
-//! commits of 0.8 to 3 s (`slow database call events_store` in the server log) and 503 `database-busy` for
-//! the requests queued behind them, while `/healthz` stayed fast: the runner's disk cannot sustain the
-//! coordinator's synchronous commits for this fixture, whatever else runs. The same control run on the
-//! hosted macOS runner stayed under 1 s (slowest request 609 ms). `tests/backup.rs`, `tests/db_stall.rs` and
-//! `tests/db_lock_burst.rs` cover backup correctness and independence of the runtime and the connection queue
-//! from a slow database on every platform.
+//! A second test runs the same traffic without a backup (`BACKUP_TEST_CONTROL=1` does it for the first test
+//! as well). On the hosted Windows runners that control run showed event batch commits of 0.8 to 3 s
+//! (`slow database call events_store` in the server log) while the single connection was in use for them:
+//! reads queued behind the committing writer, so `/api/v1/auth/state` answered 503. Reads now use their own
+//! read-only connections and the requirement is the same on every platform.
 mod common;
 use bridge_coordinator::{db::Db, db_path, ops};
 use common::*;
@@ -302,7 +299,6 @@ fn rows(path: &Path) -> (i64, i64, i64) {
     (n("events"), n("commands"), n("audit"))
 }
 
-#[cfg_attr(windows, ignore = "the hosted Windows disk stalls commits without any backup; see the module comment")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backup_of_a_large_database_does_not_stop_serving() {
     scenario(
@@ -312,7 +308,16 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_traffic_without_a_backup_stays_responsive() {
+    scenario(true, None).await;
+}
+
+/// The two scenarios start a coordinator each on a large database; one at a time keeps their timings apart.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn scenario(control: bool, out_file: Option<PathBuf>) {
+    let _serial = SERIAL.lock().await;
     let bin = std::env::var("BACKUP_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
     let old_binary = bin != BIN;
     let flags: Vec<String> = match std::env::var("BACKUP_TEST_FLAGS") {
@@ -485,6 +490,13 @@ async fn scenario(control: bool, out_file: Option<PathBuf>) {
         std::fs::write(file, &report).unwrap();
     }
 
+    assert_eq!(
+        health.over_one_second + state.over_one_second,
+        0,
+        "a request took 1 s or longer{}\n{report}\nserver log: {}",
+        if control { "" } else { " during the backup" },
+        std::fs::read_to_string(&serve_log).unwrap_or_default()
+    );
     if control {
         return;
     }
@@ -493,12 +505,6 @@ async fn scenario(control: bool, out_file: Option<PathBuf>) {
         "the backup did not finish in {limit:?} while the worker kept writing\n{report}"
     );
     assert!(finished.unwrap().success(), "the backup failed\n{report}");
-    assert_eq!(
-        health.over_one_second + state.over_one_second,
-        0,
-        "a request took 1 s or longer during the backup\n{report}\nserver log: {}",
-        std::fs::read_to_string(&serve_log).unwrap_or_default()
-    );
     // The copy is a consistent database that holds at least what the live one held when the backup began.
     let copy = rows(&out);
     assert!(

@@ -532,6 +532,25 @@ queue a peak of 56, 247 and 260 callers, none is refused, longest hold 0.8 to 3.
 now follows `max_connections` (the number of calls that can be in flight), clamped to 480 so the
 waiting threads stay below the 512 of tokio's blocking pool.
 
-Remaining limit: a commit that holds the connection for longer than the wait still makes
-database-backed requests answer 503 for its duration. Page-cache write stalls on the
+Reads on their own connections. A control run of the serving test without any backup failed on the
+hosted Windows runners (event batch commits of 0.8 to 3 s, `/api/v1/auth/state` answering 503), so the
+single connection was the bottleneck even without a backup: a read queued behind a committing write.
+Reads now use up to four read-only connections (`PRAGMA query_only`) to the same WAL file, opened on
+demand (`Db::r`). A read runs from the snapshot committed when its statement began and does not wait for the
+writer or for a backup. Each `Db` method is one or the other: the lists, `admin_get`, `events_list`,
+`worker_get` and the like read only; a method that reads and then maybe writes does its read on a reader and
+takes the writer only for the write (`session_get` deletes an expired session or touches `last_seen`,
+`token_lookup`, `cursor_key`, `known_addr` writes the salt once). Writes keep one connection with the
+first-come queue and the 3 s bound. A read waits (at most 3 s) only when all four read connections are in
+use by other reads, which take microseconds. Measured with `a_slow_commit_...` in `db_stall.rs`, a second
+connection holding SQLite's write lock for 6 s and one write waiting in SQLite's busy handler: before,
+`/api/v1/auth/state` answered 503 after 3.0 s and the workers list waited 1.5 s; after, the auth state,
+workers, missions and events lists answer 200 in 1 to 2 ms. A worker connect, which only checks the token,
+is admitted at once instead of getting 503; its hello (a write) waits. Test expectations that said
+"queued reads get 503" were changed accordingly. Calls that take 500 ms or more, and retention steps that
+hold the connection that long, are written to stderr (`slow database call <name>`); that log stays because
+it names the call that held the writer.
+
+Remaining limit: a commit that holds the writer connection for longer than the wait still makes
+requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.

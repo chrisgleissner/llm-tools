@@ -280,6 +280,55 @@ impl Gate {
     }
 }
 
+/// Read-only connections to the same WAL database. A read never waits for the writer connection or
+/// for a commit in progress: it runs from the snapshot that was committed when its statement began.
+/// The pool is filled on demand up to [`READERS`] connections and a caller waits for one only while all
+/// of them are in use by other reads (each of which takes microseconds).
+const READERS: usize = 4;
+
+#[derive(Default)]
+struct ReaderPool {
+    state: Mutex<ReaderState>,
+    returned: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct ReaderState {
+    idle: Vec<Connection>,
+    opened: usize,
+}
+
+/// A pooled read-only connection; it goes back to the pool when dropped.
+pub struct ReadGuard<'a> {
+    conn: Option<Connection>,
+    pool: &'a ReaderPool,
+}
+
+impl std::ops::Deref for ReadGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("guard holds a connection until it is dropped")
+    }
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.state.lock().unwrap_or_else(|e| e.into_inner()).idle.push(conn);
+            self.pool.returned.notify_one();
+        }
+    }
+}
+
+fn open_reader(path: &Path) -> R<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(3))?;
+    // A reader must never write, whatever a statement says.
+    conn.pragma_update(None, "query_only", true)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    Ok(conn)
+}
+
 #[derive(Default)]
 struct LockStats {
     max_hold_us: AtomicU64,
@@ -296,6 +345,7 @@ pub struct LockSnapshot {
 pub struct Db {
     conn: Mutex<Connection>,
     gate: Gate,
+    readers: ReaderPool,
     max_waiters: AtomicUsize,
     stats: LockStats,
     path: PathBuf,
@@ -783,6 +833,7 @@ impl Db {
         Ok(Db {
             conn: Mutex::new(conn),
             gate: Gate::default(),
+            readers: ReaderPool::default(),
             max_waiters: AtomicUsize::new(DEFAULT_MAX_LOCK_WAITERS),
             stats: LockStats::default(),
             path: path.to_path_buf(),
@@ -799,6 +850,36 @@ impl Db {
         // handler that panicked is recovered.
         let inner = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(ConnGuard { inner: Some(inner), gate: &self.gate, stats: &self.stats, since: std::time::Instant::now() })
+    }
+
+    /// A read-only connection, for statements that only read. It does not wait for the writer
+    /// connection or for a commit; it waits (at most [`lock_wait`]) only when all [`READERS`] connections
+    /// are in use by other reads.
+    pub(crate) fn r(&self) -> R<ReadGuard<'_>> {
+        let deadline = std::time::Instant::now() + lock_wait();
+        let mut st = self.readers.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(conn) = st.idle.pop() {
+                return Ok(ReadGuard { conn: Some(conn), pool: &self.readers });
+            }
+            if st.opened < READERS {
+                st.opened += 1;
+                drop(st);
+                return match open_reader(&self.path) {
+                    Ok(conn) => Ok(ReadGuard { conn: Some(conn), pool: &self.readers }),
+                    Err(e) => {
+                        self.readers.state.lock().unwrap_or_else(|e| e.into_inner()).opened -= 1;
+                        self.readers.returned.notify_one();
+                        Err(e)
+                    }
+                };
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(busy("every read connection is in use"));
+            }
+            st = self.readers.returned.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
     }
 
     /// Set how many callers may wait for the connection at once (the server uses `max_connections` plus a
@@ -926,7 +1007,7 @@ impl Db {
     }
 
     pub fn passkeys_for_principal(&self, principal: &str) -> R<Vec<PasskeyCredentialRow>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut stmt = c.prepare("SELECT credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count FROM passkeys WHERE principal_id=? ORDER BY created_at,credential_id")?;
         let rows = stmt
             .query_map([principal], |r| {
@@ -997,20 +1078,20 @@ impl Db {
     }
 
     pub fn passkey_origin(&self, principal: &str) -> R<Option<String>> {
-        self.c()?
+        self.r()?
             .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))
             .optional()
             .map(Option::flatten)
     }
 
     pub fn passkey_count(&self, principal: &str) -> R<i64> {
-        self.c()?
+        self.r()?
             .query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?", [principal], |r| r.get(0))
     }
 
     // ---- admin ----
     pub fn admin_get(&self) -> R<Option<(String, String)>> {
-        self.c()?
+        self.r()?
             .query_row("SELECT username, password_hash FROM admin WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()
     }
@@ -1032,12 +1113,12 @@ impl Db {
         Ok(inserted)
     }
     pub fn admin_principal_id(&self) -> R<Option<String>> {
-        self.c()?
+        self.r()?
             .query_row("SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1", [], |r| r.get(0))
             .optional()
     }
     pub fn principals_list(&self) -> R<Vec<Value>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut stmt = c.prepare("SELECT id,username,role,created_at FROM principals ORDER BY id")?;
         let rows = stmt
             .query_map([], |r| {
@@ -1079,8 +1160,10 @@ impl Db {
     }
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
-        let c = self.c()?;
-        let row: Option<(String, i64, i64, bool, String)> = c
+        // The lookup reads from a read-only connection; the writer connection is used only for the
+        // delete of an expired session and for the occasional last-seen update.
+        let row: Option<(String, i64, i64, bool, String)> = self
+            .r()?
             .query_row(
                 "SELECT csrf, last_seen, expires_at, remember,principal_id FROM sessions WHERE token_hash=?",
                 params![token_hash],
@@ -1092,11 +1175,11 @@ impl Db {
         };
         let (idle_secs, _) = session_policy(remember);
         if now >= expires_at || now - last_seen >= idle_secs {
-            c.execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
+            self.c()?.execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
             return Ok(None);
         }
         if now - last_seen >= TOUCH_EVERY_SECS {
-            c.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", params![now, token_hash])?;
+            self.c()?.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", params![now, token_hash])?;
         }
         Ok(Some(Session {
             principal_id,
@@ -1135,7 +1218,7 @@ impl Db {
         Ok(())
     }
     pub fn session_count(&self) -> R<i64> {
-        self.c()?.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        self.r()?.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
     }
 
     // ---- api tokens ----
@@ -1198,13 +1281,13 @@ impl Db {
     }
     /// (name, expires_at) of every API token, by name.
     pub fn tokens_list(&self) -> R<Vec<(String, Option<i64>)>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare("SELECT name, expires_at FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
         rows
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare(
             "SELECT name, principal_id, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs, allowed_workers, sender_constraint_kind, sender_constraint_id FROM api_tokens ORDER BY name",
         )?;
@@ -1228,7 +1311,7 @@ impl Db {
     }
     /// Internet exposure requires every API token to have an explicit expiry.
     pub fn non_expiring_api_token_count(&self) -> R<i64> {
-        self.c()?.query_row("SELECT COUNT(*) FROM api_tokens WHERE expires_at IS NULL", [], |r| r.get(0))
+        self.r()?.query_row("SELECT COUNT(*) FROM api_tokens WHERE expires_at IS NULL", [], |r| r.get(0))
     }
     /// Record a bounded token-use projection. Repeated calls from the same address update only
     /// the timestamp at the existing low-write touch interval.
@@ -1249,7 +1332,7 @@ impl Db {
     /// equality. Every legacy digest is compared in constant time; new tokens use the indexed ID
     /// lookup below. Touch `last_used` at most every `TOUCH_EVERY_SECS`.
     pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let now = crate::now();
         let mut stmt = c.prepare(
             "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id IS NULL ORDER BY name",
@@ -1276,11 +1359,12 @@ impl Db {
             }
         }
         drop(stmt);
+        drop(c);
         let Some((name, last, scopes_json, cidrs_json, workers_json, principal_id)) = matched else {
             return Ok(None);
         };
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
-            c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
+            self.c()?.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
         Ok(Some(ApiToken {
@@ -1294,8 +1378,8 @@ impl Db {
     /// Look up an identifiable token by its public ID, then compare the supplied secret hash
     /// against the stored hash in constant time.
     pub fn token_lookup_identified(&self, token_id: &str, secret_hash: &str) -> R<Option<ApiToken>> {
-        let c = self.c()?;
-        let row: Option<IdentifiedTokenRow> = c
+        let row: Option<IdentifiedTokenRow> = self
+            .r()?
             .query_row(
                 "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id=?",
                 params![token_id],
@@ -1310,7 +1394,7 @@ impl Db {
         }
         let now = crate::now();
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
-            c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
+            self.c()?.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
         Ok(Some(ApiToken {
@@ -1348,9 +1432,20 @@ impl Db {
     }
     /// True when `addr_key` had a successful login within [`KNOWN_ADDR_SECS`].
     pub fn known_addr(&self, addr_key: &str) -> R<bool> {
-        let c = self.c()?;
-        let h = Self::addr_hash(&c, addr_key)?;
-        let last: Option<i64> = c
+        // The salt exists after the first login attempt; only the very first call has to write it.
+        let salt: Option<String> = self
+            .r()?
+            .query_row("SELECT value FROM meta WHERE key='addr_salt'", [], |r| r.get(0))
+            .optional()?;
+        let h = match salt {
+            Some(salt) => crate::auth::sha256_hex(&format!("{salt}|{addr_key}")),
+            None => {
+                let c = self.c()?;
+                Self::addr_hash(&c, addr_key)?
+            }
+        };
+        let last: Option<i64> = self
+            .r()?
             .query_row("SELECT last_success FROM known_addrs WHERE hash=?", params![h], |r| r.get(0))
             .optional()?;
         Ok(last.is_some_and(|t| crate::now() - t < KNOWN_ADDR_SECS))
@@ -1424,7 +1519,7 @@ impl Db {
     }
 
     pub fn security_notifications_list(&self, principal_id: &str) -> R<Vec<Value>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare("SELECT id, category, created_at FROM security_notifications WHERE principal_id=? AND dismissed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 20")?;
         let rows = st
             .query_map([principal_id], |r| {
@@ -1460,14 +1555,14 @@ impl Db {
         Ok(revoked)
     }
     pub fn worker_by_token(&self, hash: &str) -> R<Option<WorkerRow>> {
-        self.c()?
+        self.r()?
             .query_row(&format!("SELECT {WCOLS} FROM workers WHERE token_hash=?"), params![hash], worker_row)
             .optional()
     }
     /// Authenticate a worker channel handshake with either the active token or a staged
     /// rotation token. A pending token is not promoted until the worker sends a valid hello.
     pub fn worker_by_connection_token(&self, hash: &str, now: i64) -> R<Option<(WorkerRow, bool)>> {
-        self.c()?
+        self.r()?
             .query_row(
                 &format!(
                     "SELECT {WCOLS}, (pending_token_hash IS NOT NULL AND pending_token_hash=?1) FROM workers
@@ -1494,7 +1589,7 @@ impl Db {
         )? == 1)
     }
     pub fn worker_by_client_certificate(&self, fingerprint: &str) -> R<Option<WorkerRow>> {
-        self.c()?
+        self.r()?
             .query_row(
                 &format!("SELECT {WCOLS} FROM workers WHERE client_cert_fingerprint=?"),
                 params![fingerprint],
@@ -1503,25 +1598,32 @@ impl Db {
             .optional()
     }
     pub fn worker_client_certificate_matches(&self, name: &str, fingerprint: &str) -> R<bool> {
-        Ok(self.c()?.query_row(
+        Ok(self.r()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM workers WHERE name=? AND client_cert_fingerprint=?)",
             params![name, fingerprint],
             |r| r.get::<_, i64>(0),
         )? != 0)
     }
     pub fn worker_get(&self, name: &str) -> R<Option<WorkerRow>> {
-        self.c()?
+        self.r()?
             .query_row(&format!("SELECT {WCOLS} FROM workers WHERE name=?"), params![name], worker_row)
             .optional()
     }
     pub fn workers_list(&self) -> R<Vec<WorkerRow>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare(&format!("SELECT {WCOLS} FROM workers ORDER BY name"))?;
         let rows = st.query_map([], worker_row)?.collect();
         rows
     }
     /// Stable database-local HMAC key used to sign opaque pagination cursors.
     pub fn cursor_key(&self) -> R<String> {
+        let existing: Option<String> = self
+            .r()?
+            .query_row("SELECT value FROM meta WHERE key='cursor_hmac_key'", [], |row| row.get(0))
+            .optional()?;
+        if let Some(key) = existing {
+            return Ok(key);
+        }
         let c = self.c()?;
         c.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('cursor_hmac_key',?1)",
@@ -1607,7 +1709,7 @@ impl Db {
     }
 
     pub fn missions_list(&self) -> R<Vec<(String, Value)>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare("SELECT worker, info FROM missions ORDER BY worker, mission_id")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.map(|r| r.map(|(w, i)| (w, serde_json::from_str(&i).unwrap_or(Value::Null)))).collect()
@@ -1730,7 +1832,7 @@ impl Db {
     }
 
     pub fn mission_tombstoned(&self, worker: &str, mission_id: &str) -> R<bool> {
-        self.c()?
+        self.r()?
             .query_row(
                 "SELECT 1 FROM mission_tombstones WHERE worker=? AND mission_id=?",
                 params![worker, mission_id],
@@ -1742,7 +1844,7 @@ impl Db {
 
     /// Whether the coordinator holds a summary for exactly this mission of this worker.
     pub fn mission_known(&self, worker: &str, mission_id: &str) -> R<bool> {
-        self.c()?
+        self.r()?
             .query_row(
                 "SELECT 1 FROM missions WHERE worker=? AND mission_id=?",
                 params![worker, mission_id],
@@ -1753,7 +1855,7 @@ impl Db {
     }
 
     pub fn events_list(&self, worker: Option<&str>, after: u64, limit: u64) -> R<Vec<Value>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare("SELECT worker, id, body FROM events WHERE (?1 IS NULL OR worker=?1) AND id > ?2 ORDER BY worker, id LIMIT ?3")?;
         let rows = st.query_map(params![worker, after as i64, limit as i64], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
@@ -1764,7 +1866,7 @@ impl Db {
 
     // ---- commands ----
     pub fn command_get(&self, id: &str) -> R<Option<CommandRow>> {
-        self.c()?
+        self.r()?
             .query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
             .optional()
     }
@@ -1816,7 +1918,7 @@ impl Db {
     /// Unfinished mutating commands, oldest first, for redelivery after a reconnect.
     /// Read-only commands are not redelivered: see [`Db::commands_expire_reads`].
     pub fn commands_resend(&self, worker: &str) -> R<Vec<CommandRow>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare(&format!(
             "SELECT {CCOLS} FROM commands WHERE worker=? AND mutating=1 AND state IN ('pending','sent','acked') ORDER BY rowid"
         ))?;
@@ -1905,7 +2007,7 @@ impl Db {
         Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
-        let c = self.c()?;
+        let c = self.r()?;
         let mut st = c.prepare("SELECT ts, actor, action, detail, remote FROM audit ORDER BY id DESC LIMIT ?")?;
         let rows = st
             .query_map(params![limit], |r| {
@@ -2023,7 +2125,7 @@ impl Db {
 
     /// Free pages that the file still holds and whether it can give them back without a rebuild.
     pub fn free_space(&self) -> R<(i64, i64, bool)> {
-        let c = self.c()?;
+        let c = self.r()?;
         let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         let total: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
@@ -2032,7 +2134,7 @@ impl Db {
     }
 
     pub fn diagnostics(&self) -> R<Value> {
-        let c = self.c()?;
+        let c = self.r()?;
         let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let wal = std::fs::metadata(format!("{}-wal", self.path.display())).map(|m| m.len()).unwrap_or(0);
@@ -2252,7 +2354,7 @@ mod lock_wait_tests {
 
         // A caller behind a held connection gets a busy error after the wait, not later and not never.
         let started = Instant::now();
-        let err = db.worker_get("w").unwrap_err();
+        let err = db.worker_disconnected("w").unwrap_err();
         let took = started.elapsed();
         assert!(is_busy(&err), "{err:?}");
         assert!(took >= Duration::from_millis(140) && took < Duration::from_secs(2), "{took:?}");
@@ -2262,7 +2364,7 @@ mod lock_wait_tests {
         let waiting: Vec<_> = (0..DEFAULT_MAX_LOCK_WAITERS)
             .map(|_| {
                 let db = db.clone();
-                std::thread::spawn(move || db.worker_get("w"))
+                std::thread::spawn(move || db.worker_disconnected("w"))
             })
             .collect();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2271,7 +2373,7 @@ mod lock_wait_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let started = Instant::now();
-        let err = db.worker_get("w").unwrap_err();
+        let err = db.worker_disconnected("w").unwrap_err();
         assert!(
             is_busy(&err) && started.elapsed() < Duration::from_millis(500),
             "{err:?} after {:?}",
@@ -2285,7 +2387,27 @@ mod lock_wait_tests {
         }
         assert_eq!(db.lock_waiting(), 0);
         assert!(db.worker_get("w").unwrap().is_none());
+        db.worker_disconnected("w").unwrap();
         set_lock_wait(Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_proceed_while_the_writer_connection_is_held_and_see_committed_rows() {
+        let (dir, db) = open();
+        let held = db.c().unwrap();
+        // Every read method answers at once although the writer connection is taken.
+        let started = Instant::now();
+        assert!(db.admin_get().unwrap().is_none());
+        assert!(db.worker_get("w").unwrap().is_none());
+        assert!(db.events_list(None, 0, 10).unwrap().is_empty());
+        assert!(db.workers_list().unwrap().is_empty());
+        assert!(db.session_get("nothing").unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        drop(held);
+        // A write by the writer connection is visible to the next read.
+        assert!(db.worker_add("w9", "hash").unwrap());
+        assert!(db.worker_get("w9").unwrap().is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2324,6 +2446,7 @@ mod lock_wait_tests {
             panic!("a request handler panicked while holding the connection");
         })
         .join();
+        db.worker_disconnected("w").unwrap();
         assert!(db.worker_get("w").unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }

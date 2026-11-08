@@ -1,11 +1,12 @@
 //! DOG-024: a slow database commit must not stop the coordinator from accepting connections,
-//! completing TLS handshakes and answering `/healthz`, requests that need the database must get a clear
-//! 503 instead of hanging, and serving must recover when the commit ends.
+//! completing TLS handshakes and answering `/healthz`; reads (the auth state, the lists of workers,
+//! missions and events) must keep answering from the last committed snapshot, within a second; requests
+//! that write must get a clear 503 instead of hanging; and serving must recover when the commit ends.
 //!
 //! The stall is made the way a slow card makes one: a second connection holds the database write lock
 //! for several seconds, so the coordinator's first write waits inside SQLite's busy handler while it
-//! holds its connection mutex, and every other database call queues behind that mutex. The runtime has
-//! two worker threads, as in production.
+//! holds the writer connection, and every other write queues behind it. Reads use their own read-only
+//! connections and do not queue. The runtime has two worker threads, as in production.
 mod common;
 use bridge_coordinator::db_path;
 use common::*;
@@ -15,7 +16,6 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Error as WsError;
 
 const HOLD: Duration = Duration::from_secs(6);
 
@@ -78,23 +78,6 @@ async fn a_slow_commit_leaves_the_server_responsive_and_it_recovers() {
         "a 300 ms timer took {:?}: the runtime threads are stuck on the database",
         first.elapsed()
     );
-    // Requests that need the database queue behind it.
-    let queued: Vec<_> = (0..3)
-        .map(|_| {
-            let (base, tls) = (env.base(), env.tls.clone());
-            tokio::spawn(async move {
-                let client = reqwest::Client::builder()
-                    .use_preconfigured_tls((*tls).clone())
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .unwrap();
-                let started = Instant::now();
-                let r = client.get(format!("{base}/api/v1/auth/state")).send().await.unwrap();
-                let status = r.status().as_u16();
-                (started.elapsed(), status, r.text().await.unwrap())
-            })
-        })
-        .collect();
     // A worker connect, started now, needs the database as well.
     let connect = {
         let (addr, tls, token) = (env.addr, env.tls.clone(), token.clone());
@@ -135,21 +118,40 @@ async fn a_slow_commit_leaves_the_server_responsive_and_it_recovers() {
     println!("{probes} probes of /healthz and TLS handshakes during the stall, slowest {slowest:?}");
     assert!(slowest < Duration::from_secs(1), "a probe took {slowest:?} while a commit was stalled");
 
-    // A worker that tries to connect got an answer: 503, not a hang.
+    // A worker that tries to connect is admitted: the token check is a read. Its hello, which writes,
+    // has to wait for the stalled writer.
     let (connect, connect_took) = connect.await.unwrap();
-    match connect {
-        Err(WsError::Http(resp)) => assert_eq!(resp.status().as_u16(), 503, "worker connect during the stall"),
-        other => panic!("worker connect during the stall: {other:?}"),
-    }
-    assert!(connect_took < Duration::from_secs(5), "the worker connect answered after {connect_took:?}");
+    assert!(connect.is_ok(), "worker connect during the stall: {connect:?}");
+    assert!(connect_took < Duration::from_secs(1), "the worker connect took {connect_took:?}");
 
-    // The queued reads were answered with a clear 503 and a problem document, not left hanging.
-    for q in queued {
-        let (took, status, body) = q.await.unwrap();
-        assert_eq!(status, 503, "{body}");
-        assert!(body.contains("database-busy") && body.contains("retry"), "{body}");
-        assert!(took < Duration::from_secs(6), "a queued request waited {took:?}");
+    // Reads answer from the last committed snapshot, within a second, while the writer is stuck.
+    for path in ["/api/v1/auth/state", "/api/v1/workers", "/api/v1/missions", "/api/v1/events"] {
+        let started = Instant::now();
+        let (status, body) = api.get(path).await;
+        println!("{path} during the stall: {status} in {:?}", started.elapsed());
+        assert_eq!(status, 200, "{path} during the stall: {body}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{path} took {:?} while a commit was stalled",
+            started.elapsed()
+        );
     }
+    let (took, status) = fresh_client_get(&env, "/api/v1/auth/state").await;
+    assert_eq!(status, Ok(200));
+    assert!(took < Duration::from_secs(1), "a fresh client's auth state took {took:?} during the stall");
+    // A write waits for the stalled writer and ends with a clear 503 and a problem document or, when
+    // the stall ends first, with its normal answer. It does not hang.
+    let write_started = Instant::now();
+    let (write_status, write_body) = api.post("/api/v1/workers", json!({"name": "x-during-stall"})).await;
+    assert!(matches!(write_status, 201 | 503), "{write_status}: {write_body}");
+    if write_status == 503 {
+        assert!(write_body.to_string().contains("database-busy"), "{write_body}");
+    }
+    assert!(
+        write_started.elapsed() < Duration::from_secs(10),
+        "a write waited {:?}",
+        write_started.elapsed()
+    );
 
     // After the commit ends serving is back, including worker connects and writes.
     holder.join().unwrap();

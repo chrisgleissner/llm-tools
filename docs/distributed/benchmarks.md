@@ -427,19 +427,18 @@ not at a tmpfs.
 | Fixed binary, 400 MiB data + 200 MiB free pages, default options | 698 MiB (470 MiB in use) | backup 44 s (copy 445 MiB, written at 10.9 MiB/s on average against a 6 MiB/s cap, pacing is per statement step), `integrity_check` 0.4 s; slowest `/healthz` 131 ms, `/auth/state` 308 ms, event batch 248 ms |
 | Same, control without backup | 698 MiB | slowest `/healthz` 113 ms, `/auth/state` 118 ms, event batch 221 ms |
 
-The test runs the backup with the product default write cap (6 MiB/s). Findings from the GitHub-hosted
-runners (CI runs 42445440538 to 42450825462):
+The test runs the backup with the product default write cap (6 MiB/s), and a second test runs the same
+traffic without a backup, on every platform. Findings from the GitHub-hosted runners (CI runs 42445440538
+to 42450825462), before reads got their own connections:
 
 - With `--max-mb-s 40` the copy saturated the disk shared with the coordinator's commits: one commit, and
-  the request queued behind it, took 1.2 s on Linux and 2.9 s on Windows. The test therefore uses the default cap.
-- Windows: the same traffic without any backup (control run) already had event batch commits of 0.8 to
-  3 s and 503 `database-busy` for the requests queued behind them, while `/healthz` stayed fast. The runner's
-  disk cannot sustain the coordinator's synchronous commits for this fixture, so the test is ignored on Windows.
-- macOS Intel: the control run stayed under 1 s (slowest request 609 ms). With the backup (background class,
-  copy flushed every MiB) one commit took 2.6 s. The cause is the flush: on macOS it is a full drive cache
-  flush that the coordinator's own commits wait for. The copy now flushes every 32 MiB on macOS and Windows
-  and every MiB on Linux.
-- Linux passed at the default cap.
+  the request queued behind it, took 1.2 s on Linux and 2.9 s on Windows. The test uses the default cap.
+- The control run without any backup failed on Windows too: event batch commits took 0.8 to 3 s and
+  `/api/v1/auth/state` answered 503 behind them, while `/healthz` stayed fast. macOS stayed under 1 s
+  without a backup (slowest request 609 ms) and failed with one (a 2.6 s commit while the copy was
+  flushed every MiB; a flush is a full drive cache flush there, so the copy flushes every 32 MiB on
+  macOS and Windows). The cause of the request stalls was that reads shared the writer's connection;
+  reads now have four read-only connections (decision D29).
 
 The control run shows the database's own retention work after start (the fixture holds
 53,000 finished commands with bulky results) as the main source of the larger figures.
