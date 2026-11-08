@@ -122,6 +122,18 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api_tokens_are_never_accepted_from_query_strings() {
+    let env = boot().await;
+    let _admin = env.admin().await;
+    let secret = env.test_api_token("url-rejected", &["read"]);
+    let response = env.api().bare(Method::GET, &format!("/api/v1/missions?token={secret}")).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 401, "URL credentials must not authenticate an API request");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["code"], "unauthorized");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_sessions_can_list_and_revoke_only_their_principals_sessions() {
     let env = boot().await;
     let first = env.admin().await;
