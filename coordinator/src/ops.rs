@@ -496,7 +496,7 @@ fn fmt_duration(d: Duration) -> String {
 }
 
 /// Lower this process's CPU priority and I/O priority: nice 19 and the idle I/O class on Linux, the
-/// background class on macOS, background mode on Windows.
+/// nice 19 on macOS, background mode on Windows.
 /// Returns a description of what took effect. It is called by the command line, not by [`backup`], so
 /// a test or embedding process never changes its own priority (a non-root process cannot raise it again).
 pub fn lower_priority() -> String {
@@ -516,12 +516,15 @@ pub fn lower_priority() -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        // The Darwin background class lowers CPU priority and throttles disk I/O of the whole process.
+        // Only the CPU priority: the Darwin background class (PRIO_DARWIN_BG) also throttles disk I/O of the
+        // whole process, and on the hosted macOS ARM64 runner the throttled copy and its integrity check
+        // made no progress for over a minute while the coordinator kept writing. The write cap limits the
+        // copy's I/O instead.
         // SAFETY: plain integer arguments; a failure only means the priority is unchanged.
-        if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) } == 0 {
-            "background class (CPU and disk I/O throttled)".into()
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 19) } == 0 {
+            "nice 19 (disk I/O not throttled)".into()
         } else {
-            "normal priority (the background class is not available)".into()
+            "normal priority (nice is not available)".into()
         }
     }
     #[cfg(windows)]

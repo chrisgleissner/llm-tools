@@ -566,6 +566,13 @@ finish before the coordinator answers the worker. Regression test:
 `a_read_command_polled_while_the_disconnect_is_committing_is_seen_finished` in `tests/worker.rs` (fails on a
 plain reader), plus a unit test in `db.rs`.
 
+Backup priority outside Linux. On Linux the backup runs at nice 19 and in the idle I/O class. Windows uses
+background mode (`PROCESS_MODE_BACKGROUND_BEGIN`; the copy then ran at 1.4 to 2 MiB/s). macOS uses nice 19
+only: with the Darwin background class (`PRIO_DARWIN_BG`), which also throttles disk I/O, the copy and its
+integrity check on the macOS ARM64 runner made no progress for over a minute (run 42457434409: copy done in
+27 s, `integrity_check` unfinished after 63 s more) while the coordinator kept writing. The write cap limits
+the copy's I/O there.
+
 The copy's flush interval stays 1 MiB on every platform: a 32 MiB interval on macOS and Windows made the
 copy stop at 60 of 98 MiB on the macOS ARM64 runner (no progress for 80 s).
 
