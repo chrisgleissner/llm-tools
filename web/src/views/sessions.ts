@@ -21,7 +21,7 @@ const dash = (v: string | number | null | undefined) => (v === null || v === und
 export function sessions(root: HTMLElement, query: URLSearchParams): () => void {
   return workerReadView(root, {
     title: "Sessions",
-    operation: "session.list",
+    resource: "sessions",
     query,
     render: (result, workerName) => {
       const list = (result["sessions"] as Session[] | undefined) ?? [];

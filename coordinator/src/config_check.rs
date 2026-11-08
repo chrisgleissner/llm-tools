@@ -184,6 +184,11 @@ fn specs() -> Vec<Spec> {
             kind: Kind::UIntRange { min: 1, max: 10_000 },
             default: n(d.mutation_limit_per_address as u64),
         },
+        Spec {
+            key: "mutation_limit_global",
+            kind: Kind::UIntRange { min: 1, max: 10_000 },
+            default: n(d.mutation_limit_global as u64),
+        },
     ]
 }
 

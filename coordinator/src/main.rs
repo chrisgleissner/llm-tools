@@ -34,10 +34,12 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
                                 (on a terminal: asks for the new password twice, without echo;
                                  otherwise reads it from stdin. --temporary generates a one-time
                                  password, prints it once and forces a change at the next web
-                                 sign-in. Deletes all sessions; revokes all API tokens unless kept.
+                                  sign-in. Clears TOTP and recovery codes, deletes all sessions;
+                                  revokes all API tokens unless kept.
                                  There is exactly one administrator account, so --username is only
                                  checked against its name. Run as the service user, or as root:
                                  the database files then keep the data directory's owner)
+  admin reset-passkeys          (local recovery; deletes all passkeys and browser sessions)
   cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
                                                     within the CA's name constraints)
   cert new-ca [--hostname NAME]... [--ip ADDR]...  (new name-constrained CA and server certificate;
@@ -408,6 +410,23 @@ async fn run(args: Args) -> Result<(), String> {
             drop(db);
             admin_reset::restore_ownership(&dir);
             print!("{}", report?.text(args.keep_api_tokens));
+            Ok(())
+        }
+        ["admin", "reset-passkeys"] => {
+            let db = open_db(&dir)?;
+            let Some((username, _)) = db.admin_get().map_err(|e| e.to_string())? else {
+                return Err("no administrator exists yet; use the setup token".into());
+            };
+            let principal = db.admin_principal_id().map_err(|e| e.to_string())?.unwrap_or_else(|| "admin".into());
+            let removed = db.admin_reset_passkeys(&principal).map_err(|e| e.to_string())?;
+            db.audit(
+                "cli",
+                "passkeys.reset",
+                &format!("{removed} passkey(s) removed; all browser sessions deleted"),
+                "local",
+            );
+            println!("{removed} passkey(s) removed; canonical origin cleared; all browser sessions deleted; register a new passkey after signing in with the administrator password.");
+            let _ = username;
             Ok(())
         }
         ["cert", "renew"] => certs::renew(&dir, &sans),

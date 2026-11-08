@@ -60,6 +60,45 @@ export function requestOptions(options: api.PasskeyAssertionStart["options"]): P
   };
 }
 
+export function creationOptions(options: { publicKey: Record<string, unknown> }): PublicKeyCredentialCreationOptions {
+  const json = options.publicKey as {
+    challenge: string;
+    rp: PublicKeyCredentialRpEntity;
+    user: Omit<PublicKeyCredentialUserEntity, "id"> & { id: string };
+    pubKeyCredParams: PublicKeyCredentialParameters[];
+    timeout?: number;
+    authenticatorSelection?: AuthenticatorSelectionCriteria;
+    excludeCredentials?: Array<Omit<PublicKeyCredentialDescriptor, "id"> & { id: string }>;
+    attestation?: AttestationConveyancePreference;
+    extensions?: AuthenticationExtensionsClientInputs;
+  };
+  return {
+    ...json,
+    challenge: decodeBase64Url(json.challenge),
+    user: { ...json.user, id: decodeBase64Url(json.user.id) },
+    excludeCredentials: json.excludeCredentials?.map((item) => ({ ...item, id: decodeBase64Url(item.id) })),
+  };
+}
+
+export function serializeRegistration(credential: Credential): Record<string, unknown> {
+  const value = credential as PublicKeyCredential;
+  const response = value.response as AuthenticatorAttestationResponse;
+  if (!value.rawId || !response?.clientDataJSON || !response.attestationObject) {
+    throw new Error("The browser returned an incomplete passkey registration.");
+  }
+  return {
+    id: value.id,
+    rawId: encodeBase64Url(value.rawId),
+    type: value.type,
+    response: {
+      clientDataJSON: encodeBase64Url(response.clientDataJSON),
+      attestationObject: encodeBase64Url(response.attestationObject),
+      transports: response.getTransports?.() ?? [],
+    },
+    clientExtensionResults: value.getClientExtensionResults(),
+  };
+}
+
 export function serializeAssertion(credential: Credential): Record<string, unknown> {
   const value = credential as PublicKeyCredential;
   const response = value.response as AuthenticatorAssertionResponse;

@@ -57,11 +57,11 @@ impl Report {
         };
         match &self.temporary_password {
             Some(p) => format!(
-                "password reset; all sessions deleted; {tokens}\n\
+                "password reset; all sessions, TOTP and recovery codes deleted; {tokens}\n\
                  temporary password (shown once): {p}\n\
                  It must be changed at the next sign-in; until then the web interface only accepts the password change.\n"
             ),
-            None => format!("password changed; all sessions deleted; {tokens}\n"),
+            None => format!("password changed; all sessions, TOTP and recovery codes deleted; {tokens}\n"),
         }
     }
 }
@@ -135,10 +135,13 @@ impl Db {
     /// `keep_api_tokens`, record the reset time, set (`must_change`) or clear the change-required
     /// flag, and write the audit entry. Returns the number of revoked tokens.
     pub fn admin_reset(&self, hash: &str, keep_api_tokens: bool, must_change: bool) -> rusqlite::Result<usize> {
+        let principal = self.admin_principal_id()?.unwrap_or_else(|| "admin".into());
         let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
+        tx.execute("DELETE FROM totp_auth WHERE principal_id=?", params![principal])?;
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", params![principal])?;
         let revoked = if keep_api_tokens { 0 } else { tx.execute("DELETE FROM api_tokens", [])? };
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",

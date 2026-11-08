@@ -186,6 +186,7 @@ worker protocol is `protocol.md`.
   The change-required flag and the reset time are kept in the `meta` table (keys
   `password_change_required` and `password_reset_at`), so no schema migration is involved;
   a password change through `POST /auth/password` deletes both keys.
+- `bridge-coordinator admin reset-passkeys` (local shell recovery; clears passkeys, the canonical passkey origin, challenges and browser sessions).
 - `bridge-coordinator cert renew [--hostname ...] [--ip ...]` replaces the
   server certificate from the existing CA (names must be within the CA's name
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
@@ -217,17 +218,27 @@ Public:
 | GET | `/healthz` | `{"status":"ok"}` only. |
 | GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. It also adds `password_change_required` (true while a temporary password from `admin reset-password --temporary` has not been replaced) and, after a reset on the host, `password_reset_notice: {at, message}` (`at` is the UTC epoch of the reset; the message is "Your password was reset by an administrator on the host."). The notice stays until the password is changed through `/auth/password` or seven days pass. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
-| POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
+| POST | `/api/v1/auth/login` | `{username, password, remember?, totp_code? | recovery_code?}`. When optional TOTP is enabled, password plus exactly one valid TOTP or unused recovery code is required. Password sign-in also requires this second factor in Internet mode; without TOTP there, use passkey sign-in. Recovery codes are consumed once and their use is audited and notified. `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error for invalid password or MFA. |
+| POST | `/api/v1/auth/step-up` | Browser session only. `{password, totp_code? | recovery_code?}`; verifies the password and, when enabled, consumes one TOTP step or recovery code. Atomically rotates the session cookie, CSRF token and public session ID, and marks the new session freshly authenticated for ten minutes with its authentication method. Sensitive browser mutations require this marker; bearer tokens cannot substitute for fresh human authentication. |
+| POST | `/api/v1/auth/passkeys/step-up/start` | Browser session plus CSRF and exact Origin. Returns a five-minute assertion challenge bound to the current session and principal. |
+| POST | `/api/v1/auth/passkeys/step-up/finish` | Browser session plus CSRF and exact Origin. Consumes the session-bound challenge, requires user verification, rotates the session cookie, CSRF token and public session ID, and grants a ten-minute passkey step-up marker. Challenges cannot be reused or moved to a different session. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
-| POST | `/auth/password` | `{current, new}`; deletes every session. While `password_change_required` is true, every request made with a session cookie except this one, `/auth/logout` and `GET /auth/state` is answered with `403` and error code `password-change-required`. API tokens are not affected. A successful change clears the flag and the reset notice. |
+| POST | `/auth/password` | `{current, new}`; deletes every session but preserves TOTP and recovery codes. While `password_change_required` is true, every request made with a session cookie except this one, `/auth/logout` and `GET /auth/state` is answered with `403` and error code `password-change-required`. API tokens are not affected. A successful change clears the flag and the reset notice. |
+| POST | `/auth/totp/enroll` | Browser session only; `{current_password}` starts enrollment and returns a pending Base32 secret and `otpauth://` URI. |
+| POST | `/auth/totp/confirm` | Browser session only; `{code}` confirms possession and returns ten one-time recovery codes once. Only Argon2id hashes are stored. |
+| POST | `/auth/totp/disable` | Browser session only; `{current_password, code}` disables TOTP and deletes stored recovery-code hashes. |
+| GET | `/auth/sessions` | Browser session only; lists at most 100 active sessions for its principal, with created/last-seen/expiry times and a `current` flag. Public IDs are random and independent of session credential hashes. |
+| DELETE | `/auth/sessions/{id}` | Browser session only; revokes an active session belonging to the same principal. |
 | POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. `public_origin` may be configured in `config.toml`; otherwise the first completed registration binds and persists it. Existing credentials without a recorded origin require this setting before startup. |
 | POST | `/auth/passkeys/registration/finish` | Browser session plus CSRF and the same Origin required; `{challenge_id, credential}` verifies once and stores the passkey. |
 | GET | `/auth/passkeys` | Browser session only; lists credential handle, operator label, AAGUID, creation and last-use times, and backup/synced state. It omits credential data and signature counters. |
+| PATCH | `/auth/passkeys/{id}` | Browser session plus CSRF and a fresh password/TOTP/recovery step-up from the last ten minutes; `{name}` changes only the operator label for a passkey belonging to the current principal. Bearer tokens are refused. |
+| DELETE | `/auth/passkeys/{id}` | Browser session plus CSRF and a fresh password/TOTP/recovery step-up from the last ten minutes; removes only a passkey belonging to the current principal. Password sign-in remains available if the final passkey is removed. Bearer tokens are refused. |
 | POST | `/auth/passkeys/re-enroll` | Browser session plus CSRF, exact allowed HTTPS DNS Origin, current password and `{confirm:true}` required. Deletes all passkeys and atomically binds the supplied matching `new_origin`; passkey registration must be completed again. |
 | POST | `/auth/passkeys/assertion/start` | Public sign-in start, exact HTTPS DNS Origin required; `{}` returns assertion options and sets a short-lived, single-use HttpOnly browser ticket. No registered credentials returns 404. |
 | POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
@@ -236,13 +247,14 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/workers` | `{name}` → one-time `{token, mutual_tls}` and, when coordinator `worker_mtls` is enabled, the client certificate/private key. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, expiry metadata, optional `allowed_cidrs`, and optional `allowed_workers`. Requires an administrator session or an `admin` token. |
-| POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?, allowed_workers?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses; up to 32 existing worker names may restrict object access. Empty worker restrictions mean all workers. Worker-bound tokens see filtered worker/mission lists and must name an allowed worker on worker, mission and terminal routes; global audit, diagnostics, token management, and low-level `/commands` are denied. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
-| DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
+| POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?, allowed_workers?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses; up to 32 existing worker names may restrict object access. Empty worker restrictions mean all workers. Worker-bound tokens see filtered worker/mission lists and must name an allowed worker on worker, mission and terminal routes; global audit, diagnostics, token management, and low-level `/commands` are denied. Returns the secret once. Requires a fresh passkey assertion in the administrator's browser session with CSRF and exact Origin; password/TOTP step-up alone and an `admin` bearer token cannot create another token. Creation is audited. |
+| DELETE | `/tokens/{name}` | Revoke a token. Requires a fresh administrator browser session with CSRF and exact Origin; an `admin` bearer token cannot revoke tokens. Revocation is audited. |
+| GET | `/audit?limit=100&cursor=` | Read the newest security audit entries (limit 1–500), their previous/current SHA-256 links, and whole-retained-chain integrity. Use the encrypted `next_cursor` with the same limit. Requires an administrator session or `admin` token. |
 | GET | `/security/notifications` | Active security events for the administrator: new sign-in address, API token creation, and repeated blocked sign-in failures. Requires an administrator session or an `admin` token. |
 | DELETE | `/security/notifications/{id}` | Dismiss one active event. Requires an administrator session with CSRF and exact Origin, or an `admin` token. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A mutating command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. A read-only command for an offline worker is refused with 503 `worker-offline` and is not queued (protocol.md, "Read-only commands and offline workers"). The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
-| GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
+| GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`; recursively redacts private paths, environment, credentials and terminal-output fields from stored request/result JSON. |
 | DELETE | `/missions/{id}?worker=NAME` | Typed `mission.delete`, operate scope. The JSON body must contain `{"confirm": true}` (optional `wait_ms`); without it the answer is `400 confirmation-required` and nothing is queued. The worker refuses a mission that is running, paused or stopping, or that has a live controller or station (`conflict`). When the worker reports the deletion the coordinator removes its copy of the mission (summary and stored events), records a tombstone and an audit entry `mission.delete`. See `protocol.md`, Mission deletion. |
 | GET | `/missions/{id}/tasks?worker=&limit=&cursor=` | Typed `task.list`; default limit 50, maximum 1000. Returns a command result with `next_cursor` when another page exists. |
 | GET | `/missions/{id}/events?worker=&limit=&cursor=` | Typed `mission.events`; default limit 50, maximum 1000. Legacy `after` remains available. |
@@ -282,6 +294,13 @@ usable by non-browser clients and are still subject to authentication, exact
 Origin and CSRF rules where applicable.
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
+Sensitive account and worker mutations use the browser session's ten-minute
+step-up marker after password and configured TOTP/recovery verification. This
+includes token creation/revocation, worker enrollment/removal, restore, the
+`mission.create` / `--allow-create` operation and suspend-until-credits. Step-up
+rotates the session credential, CSRF token and public session ID. Admin bearer
+tokens cannot perform these operations; passkey assertion step-up is not yet
+implemented.
 
 API errors are RFC 9457 problem details (`application/problem+json`) with a
 stable type URI derived from the existing error code. The nested `error` object
@@ -324,8 +343,11 @@ identify the existing coordinator error. Common statuses include `401` for a
 missing/invalid credential, `403` for a missing scope, `409` for a conflicting
 state, `412` for a stale task revision, `415` for a non-JSON mutation body, and
 `429` for a rate limit. Bearer-authenticated mutations allow 30 requests per
-token and 120 per client address in each rolling 60-second window. A limited
-request includes `Retry-After`. Every bearer use and mutation is audited with
+token, 120 per client address, and 600 per coordinator in each rolling 60-second window. The token,
+address and coordinator limits are configurable (each from 1 to 10,000); Internet mode requires
+the coordinator-wide limit to be at most 300. A limited
+request includes `Retry-After`. Authentication lockouts increase their retry delay exponentially
+after repeated bursts, capped at 15 minutes. Every bearer use and mutation is audited with
 token metadata and request ID; the secret itself is never logged. Cookie-session
 mutations and public passkey ceremony requests also consume the per-address
 budget, without a per-token budget.
@@ -369,7 +391,7 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Database calls | run off the async worker threads (`block_in_place`); writes get the writer connection in arrival order, wait at most 3 s for it, and at most `max_connections` + 32 may wait (every connection has one call in flight); reads (lists, auth state, token and session lookups) use up to four read-only connections to the same WAL file and never wait for a commit, otherwise the request gets 503 `database-busy` with `Retry-After: 2`. `/healthz` does not use the database | fixed |
 | Retention and vacuum passes | hourly and at start, on a blocking thread, 50 rows per statement with the database lock released between statements; databases created by this version use incremental auto-vacuum and each pass returns up to 8 MiB of free pages; the write-ahead log file is cut back to 16 MiB after a checkpoint. A database created earlier keeps its free pages until `compact` | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
-| Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
+| Authenticated mutations | 30 per token, 120 per client address and 600 per coordinator by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | token/address/coordinator configurable with `mutation_limit_per_token`, `mutation_limit_per_address`, `mutation_limit_global` (1–10,000) |
 
 Every bearer-authenticated API request also writes an audit row with the token name,
 granted scopes, method, path, client address and supplied request ID. The bearer
@@ -405,7 +427,11 @@ SQLite (WAL, `synchronous=FULL`) with `PRAGMA user_version` migrations:
 high-water mark of issued generations; survives `worker revoke`, so a worker that is
 revoked and added again receives a generation above every earlier one),
 `known_addrs` and `meta` (schema version 2). Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
-session and API tokens are 32 random bytes stored as SHA-256 hashes.
+session and API tokens are 32 random bytes stored as SHA-256 hashes. Until a second factor is
+enrolled, new passwords must contain at least 15 characters; longer passphrases are accepted up
+to the 256-byte limit, with no composition rules. Password creation and change also reject entries
+in the coordinator's bundled, size-bounded common-password list, matched without ASCII case
+sensitivity; this check is offline and never logs the candidate password.
 
 ## Content Security Policy
 

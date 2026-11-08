@@ -6,6 +6,12 @@ small local reference at `/api/docs`. API tokens are sent only in the
 for mission and task changes; worker administration and diagnostics require
 `admin`. Token secrets are shown once by `bridge-coordinator token create`.
 
+Browser sessions are available only to the signed-in browser session:
+`GET /api/v1/auth/sessions` lists at most 100 active sessions for that principal,
+including a flag for the current browser. `DELETE /api/v1/auth/sessions/{id}`
+revokes one of those sessions. The public session ID is random and distinct from
+the session credential hash; session credentials are never returned.
+
 `GET /api/v1/workers` and `GET /api/v1/workers/{name}` include the hostname
 reported at enrolment and the peer address of the active worker connection. The
 address is null while the worker is offline; forwarded headers do not affect it.
@@ -27,7 +33,7 @@ The CLI/TUI and web console show the question and choices; take control of the
 mission terminal and use the provider's own UI to answer. Terminal input stays
 on the scoped WebSocket.
 
-The current version uses the durable `POST /api/v1/commands` adapter. A command
+The low-level `POST /api/v1/commands` adapter remains available. A command
 request has a caller-chosen `request_id`; retrying the same request ID returns
 the journal entry rather than applying the operation again. `Idempotency-Key`
 may supply that ID and takes precedence over the request body's value. If a worker is
@@ -35,17 +41,27 @@ offline, the command remains queued and the response has state `pending` and a
 `Location` header for its command record.
 `GET /api/v1/commands/{request_id}` retrieves its outcome. A completed command
 can still report `uncertain`; clients must not treat that as success. Resource
-endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
-remaining CLI parity operations are being added in this follow-up.
+endpoints, `Idempotency-Key`, `If-Match` and opaque cursor pagination share this
+durable command journal. Remaining CLI parity decisions are tracked below.
+The generic journal view recursively removes private path, credential, environment
+and terminal-output fields from its stored request and result; use
+resource-specific endpoints for their bounded public projections.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
-/api/v1/missions/{id}`, `/tasks`, `/events` and `/operations` are thin adapters over
-the typed `mission.status`, `task.list`, `mission.events` and `session.list` operations. They return
+/api/v1/missions/{id}`, `/station`, `/tasks`, `/events` and `/operations` are thin adapters over
+the typed `mission.status`, `mission.station`, `task.list`, `mission.events` and `session.list` operations. The station resource returns only the bounded station projection (configuration, observed provider, mode and current station context). They return
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+`GET /api/v1/workers/{name}/sessions` reads the worker's bounded provider-session
+list through `session.list`; it accepts `mission`, `limit`, `cursor`, or the
+legacy `offset` (cursor and offset cannot be combined). Its encrypted cursor is
+bound to the worker, mission filter and page size. `GET
+/api/v1/workers/{name}/usage` returns the typed `usage.snapshot` projection; it
+contains availability and capacity values, never provider credentials or raw
+environment data. Both routes accept the same bounded `wait_ms` option.
 The current mutation adapters use the same command journal: `POST
 /api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
@@ -134,6 +150,15 @@ authenticated and encrypted, and bound to the original filters and sort order. T
 rejected if changed or reused with different filters. `offset` remains available
 for compatibility but cannot be combined with `cursor`.
 
+Mission rows are a bounded public projection. They include console fields such as
+the mission ID, name, status, folder label, current task counts and update time;
+the remote `llm-bridge --target WORKER mission list --json` result matches the
+local mission-list row after removing exactly these redacted fields from the
+local row: `cwd`, `repo_identity`, `objective`, and `config`. The remote client
+filters the console-only fields (`folder`, task counts, station and model) from
+its JSON result, so no other fields differ. `mission list --include-config` is
+local-only and is not exposed over REST.
+
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   "$COORDINATOR/api/v1/missions?limit=100"
@@ -175,22 +200,22 @@ curl --cacert ca.pem -H "Authorization: Bearer $OPERATE_TOKEN" \
   "$COORDINATOR/api/v1/commands"
 ```
 
-Manage API tokens with an administrator session (the browser adds CSRF and Origin
-checks) or a token that has `admin`. The create response includes the secret
+List API tokens with an administrator session or a token that has `admin`. Token
+creation and revocation require a fresh administrator browser session with CSRF
+and exact Origin checks; bearer tokens cannot create or revoke tokens. Sensitive
+actions use the ten-minute step-up flow described in `coordinator.md`. Creating a
+token specifically requires a fresh passkey assertion; password/TOTP step-up is not
+enough for minting a new bearer credential. The create response includes the secret
 once; the list response contains metadata only:
 
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90,"allowed_cidrs":["192.0.2.0/24"],"allowed_workers":["build-1"]}' \
   "$COORDINATOR/api/v1/tokens"
 
-curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$COORDINATOR/api/v1/tokens"
-
-curl --cacert ca.pem -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$COORDINATOR/api/v1/tokens/automation"
 ```
+
+Create and revoke tokens from Account settings in the console, which completes
+the passkey step-up, CSRF and Origin checks before sending the create mutation.
 
 Errors use `application/problem+json`. The stable `type` URI and `code` identify
 the existing coordinator error code; `status` is the HTTP status. List APIs use
@@ -259,7 +284,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
-| `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
+| `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}` with `worker=NAME` query and JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
 | `mission colour` | Typed `mission.settings.patch` field `colour`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission color` | Alias of `mission colour`; same typed settings field. |
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
@@ -273,10 +298,10 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `task priority` | Typed `task.priority`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task reorder` | Typed `task.reorder`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task dependencies` | Typed `task.dependency`; resource `PATCH /api/v1/missions/{id}/tasks/{n}` with the prerequisite's mission-local task number. |
-| `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/pause`. |
-| `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/resume`. |
-| `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/cancel`. |
-| `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/retry`. |
+| `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=pause`. |
+| `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=resume`. |
+| `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=cancel`. |
+| `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=retry`. |
 | `task verify` | Typed `task.verify`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
 | `task reject` | Typed `task.reject`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify` with `approved:false`. |
 | `task approve` | Typed `task.verify` with `approved:true`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
@@ -284,15 +309,15 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `task diff` | Typed `task.diff` (the task's recorded change) via `POST /api/v1/commands`; no resource path. |
 | `proposal create` | Typed `proposal.create`; resource `POST /api/v1/missions/{id}/proposals`. Source operation is checked by the worker. |
 | `proposal list` | Typed `proposal.list`; resource `GET /api/v1/missions/{id}/proposals`. |
-| `proposal accept` | Typed `proposal.accept`; resource `POST /api/v1/missions/{id}/proposals/{n}/accept`. |
-| `proposal reject` | Typed `proposal.reject`; resource `POST /api/v1/missions/{id}/proposals/{n}/reject`. |
+| `proposal accept` | Typed `proposal.accept`; resource `POST /api/v1/missions/{id}/proposals/{n}/{action}` with `action=accept`. |
+| `proposal reject` | Typed `proposal.reject`; resource `POST /api/v1/missions/{id}/proposals/{n}/{action}` with `action=reject`. |
 | `events` | Typed `mission.events`; resource `GET /api/v1/missions/{id}/events`. |
-| `start` | Typed `mission.start`; resource `POST /api/v1/missions/{id}/start`. |
-| `pause` | Typed `mission.pause`; resource `POST /api/v1/missions/{id}/pause`. |
-| `resume` | Typed `mission.resume`; resource `POST /api/v1/missions/{id}/resume`. |
-| `continue` | Typed `mission.continue`; resource `POST /api/v1/missions/{id}/continue`. |
-| `stop` | Typed `mission.stop`; resource `POST /api/v1/missions/{id}/stop`. |
-| `cancel` | Typed `mission.cancel`; resource `POST /api/v1/missions/{id}/cancel`. |
+| `start` | Typed `mission.start`; resource `POST /api/v1/missions/{id}/{action}` with `action=start`. |
+| `pause` | Typed `mission.pause`; resource `POST /api/v1/missions/{id}/{action}` with `action=pause`. |
+| `resume` | Typed `mission.resume`; resource `POST /api/v1/missions/{id}/{action}` with `action=resume`. |
+| `continue` | Typed `mission.continue`; resource `POST /api/v1/missions/{id}/{action}` with `action=continue`. |
+| `stop` | Typed `mission.stop`; resource `POST /api/v1/missions/{id}/{action}` with `action=stop`. |
+| `cancel` | Typed `mission.cancel`; resource `POST /api/v1/missions/{id}/{action}` with `action=cancel`. |
 | `attach` | Exclusion: attaches a local tmux station; replacement is local attach or remote terminal WebSocket for viewing. |
 | `detach` | Exclusion: detaches a local tmux client; no remote station-control API; run locally. |
 | `missions` | Exclusion: interactive picker/station switching is local; use `GET /api/v1/missions` to list remotely. |
@@ -317,7 +342,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `console` | Exclusion: opens local curses control station; remote web UI is the replacement. |
 | `control` | Exclusion: opens local curses control station; remote web UI is the replacement. |
 | `usage` | Exclusion: embeds local `llm-usage` data; no coordinator usage route. |
-| `station` | Exclusion: selects local station; remote terminal view is `GET /api/v1/terminal` WebSocket. |
+| `station` | The local interactive station selector is excluded; bounded station state is `GET /api/v1/missions/{id}/station` with `worker=NAME`, and terminal viewing remains the scoped `/api/v1/terminal` WebSocket. |
 | `rotation` | Typed `mission.rotation.get` / `mission.rotation.put`; resources `GET` / `PUT /api/v1/missions/{id}/rotation`. |
 | `steer` | Typed `mission.steer`; operate-scoped resource `POST /api/v1/missions/{id}/steer`; supports every CLI kind. Prompt files are read client-side and prompt text is sent in the typed request. |
 | `_station-gc` | Exclusion: private internal tmux cleanup command; never remote. |
@@ -339,11 +364,11 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
-| `--native` | `mission.start` params or `mission.create` body `native_tui`. |
+| `--native` | Maps to `mission.start` params or `mission.create` body `native_tui`. |
 | `--prompt` | `task.add`/`task.amend` or `mission.create` typed `prompt` field; local file read if `--prompt-file`. |
 | `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
-| `--providers` | `mission.start` params/body or `mission.create` body `providers`. |
-| `--routes` | `mission.start` params/body or `mission.create` body `routes`. |
+| `--providers` | Maps to `mission.start` params/body or `mission.create` body `providers`. |
+| `--routes` | Maps to `mission.start` params/body or `mission.create` body `routes`. |
 | `--teams` | `mission.create` body `teams`; mission edit maps to `mission.settings.patch`. |
 | `--token-spend` | `mission.create` body `token_spend`; mission edit maps to `mission.settings.patch`. |
 | `--trust-folder` | `mission.create` body `trust_folder`; worker only accepts a cwd inside its enrolled real-path roots. |
@@ -425,13 +450,23 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/auth/state` |
 | `POST /api/v1/auth/setup` |
 | `POST /api/v1/auth/login` |
+| `POST /api/v1/auth/step-up` |
+| `POST /api/v1/auth/totp/enroll` |
+| `POST /api/v1/auth/totp/confirm` |
+| `POST /api/v1/auth/totp/disable` |
 | `POST /api/v1/auth/logout` |
 | `POST /api/v1/auth/password` |
 | `POST /api/v1/auth/passkeys/registration/start` |
 | `POST /api/v1/auth/passkeys/registration/finish` |
 | `GET /api/v1/auth/passkeys` |
+| `PATCH /api/v1/auth/passkeys/{id}` |
+| `DELETE /api/v1/auth/passkeys/{id}` |
+| `GET /api/v1/auth/sessions` |
+| `DELETE /api/v1/auth/sessions/{id}` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
+| `POST /api/v1/auth/passkeys/step-up/start` |
+| `POST /api/v1/auth/passkeys/step-up/finish` |
 | `POST /api/v1/auth/passkeys/re-enroll` |
 | `GET /api/v1/workers` |
 | `POST /api/v1/workers` |
@@ -440,11 +475,14 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/workers/{name}/doctor` |
 | `GET /api/v1/workers/{name}/agents` |
+| `GET /api/v1/workers/{name}/sessions` |
+| `GET /api/v1/workers/{name}/usage` |
 | `GET /api/v1/workers/{name}/audit` |
 | `POST /api/v1/workers/{name}/gc` |
 | `GET /api/v1/tokens` |
 | `POST /api/v1/tokens` |
 | `DELETE /api/v1/tokens/{name}` |
+| `GET /api/v1/audit` |
 | `GET /api/v1/security/notifications` |
 | `DELETE /api/v1/security/notifications/{id}` |
 | `GET /api/v1/missions` |
@@ -453,6 +491,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `DELETE /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
+| `GET /api/v1/missions/{id}/station` |
 | `GET /api/v1/missions/{id}/agents` |
 | `GET /api/v1/missions/{id}/settings` |
 | `PATCH /api/v1/missions/{id}/settings` |

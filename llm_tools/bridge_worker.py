@@ -35,6 +35,7 @@ from .bridge_protocol import MAX_DELETED_MISSIONS_PER_MESSAGE, MAX_EVENTS_PER_BA
 from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_states import LIVE_MISSION_STATUSES
 from .bridge_status_bound import mission_digest
+from .bridge_store import controller_running as _controller_running
 from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
@@ -618,6 +619,8 @@ class WorkerSession:
             "id": mission_id,
             "name": row.get("name") or "",
             "status": row["status"],
+            "created_at": row.get("created_at"),
+            "controller_running": bool(_controller_running(mission_id, on_error=False)),
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }

@@ -43,7 +43,7 @@ async fn handshake(env: &Env) -> Duration {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_commit_leaves_the_server_responsive_and_it_recovers() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect_settled(&env, &token, "wid-stall", 0).await;
 

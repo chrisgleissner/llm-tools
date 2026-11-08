@@ -181,6 +181,7 @@ def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatc
     assert hello.payload["missions"][0]["id"] == mission_id
     summary = hello.payload["missions"][0]
     assert summary["task_counts"]["QUEUED"] == 1
+    assert summary["created_at"] and isinstance(summary["controller_running"], bool)
     assert summary["station"] == "unknown" and summary["model"] == "unknown"
     assert "cwd" not in summary and "config" not in summary
     assert hello.payload["host_name"] == "test-host.example"
@@ -430,9 +431,13 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
-    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "current_task", "station", "model", "needs_kind", "needs_tasks"} for mission in summaries.values())
+    allowed = {"id", "name", "status", "created_at", "controller_running", "folder", "updated_at", "task_counts",
+               "current_task", "station", "model", "needs_kind", "needs_tasks", "needs_you"}
+    assert all(set(mission) <= allowed for mission in summaries.values())
+    assert all({"id", "name", "status", "created_at", "controller_running", "folder", "updated_at", "task_counts"} <= set(mission)
+               for mission in summaries.values())
     assert all(mission["task_counts"] == {"QUEUED": 1} for mission in summaries.values())
-    assert all({"id", "name", "status", "folder", "updated_at", "task_counts", "station", "model"} <= set(mission) for mission in summaries.values())
+    assert all(mission["status"] == "CREATED" and mission["controller_running"] is False for mission in summaries.values())
 
 
 def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):

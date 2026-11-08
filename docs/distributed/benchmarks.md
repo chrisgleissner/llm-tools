@@ -449,4 +449,3 @@ The control run shows the database's own retention work after start (the fixture
 The test requires no polled request at or over 1 s and the backup to finish within 90 s.
 On the old binary it fails because the backup does not finish. Pi Zero 2 W figures are an
 extrapolation (install.md, Backup and restore) until measured on the board.
-

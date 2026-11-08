@@ -733,6 +733,7 @@ def test_run_control_loop_maps_f_keys_enter_escape_and_exit(monkeypatch) -> None
 
 def test_tui_compact_and_full_render_at_supported_sizes(monkeypatch) -> None:
     monkeypatch.setattr(bridge_tui.curses, "doupdate", lambda: None)
+    monkeypatch.setattr(bridge_tui, "_inside_station", lambda: False)
     state = bridge_tui._ConsoleState(
         "M3",
         lambda _mission, _command: "",
@@ -746,7 +747,12 @@ def test_tui_compact_and_full_render_at_supported_sizes(monkeypatch) -> None:
     assert "LLM BRIDGE" in compact.lines[0]
     assert "[Overview]" in compact.lines[2]
     assert compact.lines[4].startswith("› ")
-    assert "Tab/F1-9 views" in compact.lines[5] and compact.lines[5].rstrip().endswith("? help")
+    assert "Ctrl-E add task" in compact.lines[5] and compact.lines[5].rstrip().endswith("? help")
+    assert "Ctrl-] P provider" not in compact.lines[5], "provider switching is only shown in the live station"
+    monkeypatch.setattr(bridge_tui, "_inside_station", lambda: True)
+    station_compact = FakeWindow(6, 80)
+    bridge_tui._draw_compact(station_compact, state)  # type: ignore[arg-type]
+    assert "Ctrl-] P provider" in station_compact.lines[5]
 
     state.full = True
     full = FakeWindow(24, 80)

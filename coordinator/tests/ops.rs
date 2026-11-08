@@ -133,7 +133,7 @@ async fn health_checks_the_configured_bind_with_the_local_ca() {
 #[tokio::test(flavor = "multi_thread")]
 async fn backup_and_restore_round_trip() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     api.add_worker("w1").await;
     let out = env.dir.join("backup.sqlite3");
     ops::backup(&env.dir, &out).unwrap(); // online: the server is running
@@ -196,11 +196,19 @@ fn recovery_commands_reset_password_and_certificates() {
     let db = Db::open(&db_path(&dir)).unwrap();
     db.admin_create("admin", "old-hash").unwrap();
     db.session_create("tokenhash", "csrf").unwrap();
+    let principal = db.admin_principal_id().unwrap().unwrap();
+    db.totp_pending_set(&principal, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+    db.totp_enable_with_recovery_codes(&principal, &["$argon2id$recovery-hash".into()], 1).unwrap();
+    db.admin_set_password("browser-change-hash", true).unwrap();
+    assert!(db.totp_get(&principal).unwrap().unwrap().1, "browser password changes must preserve MFA");
+    assert_eq!(db.recovery_code_hashes(&principal).unwrap().len(), 1);
     let o = run(&["admin", "reset-password", "--data-dir", d], Some("a long enough password\n"));
     assert!(o.status.success(), "{}", text(&o));
     let (_, hash) = db.admin_get().unwrap().unwrap();
     assert!(hash.starts_with("$argon2id$"), "{hash}");
     assert_eq!(db.session_count().unwrap(), 0, "all sessions deleted");
+    assert!(db.totp_get(&principal).unwrap().is_none(), "local password recovery clears a lost TOTP factor");
+    assert!(db.recovery_code_hashes(&principal).unwrap().is_empty());
     assert!(!run(&["admin", "reset-password", "--data-dir", d], Some("short\n")).status.success());
 
     // cert renew within the CA's name constraints works.
@@ -244,6 +252,33 @@ fn recovery_commands_reset_password_and_certificates() {
     )
     .status
     .success());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn local_reset_passkeys_clears_credentials_origin_binding_and_sessions() {
+    let dir = tmp_dir();
+    let d = dir.to_str().unwrap();
+    assert!(run(&["init", "--data-dir", d, "--hostname", "a.test"], None).status.success());
+    let db = Db::open(&db_path(&dir)).unwrap();
+    db.admin_create("admin", "old-hash").unwrap();
+    db.session_create("tokenhash", "csrf").unwrap();
+    let conn = rusqlite::Connection::open(db_path(&dir)).unwrap();
+    conn.execute("INSERT INTO auth_policy(principal_id,passkey_origin) VALUES('admin','https://a.test')", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at) VALUES('cred','admin','{}','admin',1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = run(&["admin", "reset-passkeys", "--data-dir", d], None);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("1 passkey"));
+    assert_eq!(db.passkey_count("admin").unwrap(), 0);
+    assert_eq!(db.passkey_origin("admin").unwrap(), None);
+    assert_eq!(db.session_count().unwrap(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }
 

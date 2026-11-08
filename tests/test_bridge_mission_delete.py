@@ -329,6 +329,8 @@ def test_files_of_the_mission_go_and_other_files_stay(tmp_path, state, capsys) -
 def test_a_dead_station_socket_is_removed_and_a_live_station_is_not_touched(tmp_path, state, capsys, monkeypatch) -> None:
     from llm_tools.bridge_sockets import mission_socket_path
 
+    # This test invokes the CLI as the operator, regardless of the environment that launched pytest.
+    monkeypatch.delenv(bridge.MANAGED_ENV, raising=False)
     mission_id = _create(tmp_path, capsys)
     socket_path = mission_socket_path(mission_id)
     dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -348,6 +350,7 @@ def test_a_dead_station_socket_is_removed_and_a_live_station_is_not_touched(tmp_
     try:
         monkeypatch.undo()  # use the real liveness probe: a socket that accepts connections is a live station
         monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+        monkeypatch.delenv(bridge.MANAGED_ENV, raising=False)
         assert main(["mission", "delete", second, "--yes"]) == 4
         assert live_path.exists() and _exists(state, second)
         capsys.readouterr()

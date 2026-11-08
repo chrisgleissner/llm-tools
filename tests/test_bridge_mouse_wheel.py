@@ -23,7 +23,7 @@ from llm_tools.bridge_store import BridgeStore
 
 from tests import test_bridge_launcher_home as home
 from tests.test_bridge_viewer import Window
-from tests.conftest import scaled
+from tests.conftest import scaled, wait_for
 from tests.process_hygiene import terminate_process_tree
 
 Grid, mission = home.Grid, home.mission
@@ -361,7 +361,7 @@ def test_viewer_wheel_up_pauses_following_like_the_up_key(monkeypatch, tmp_path)
 
 # --- real pseudo-terminal ---------------------------------------------------
 
-def pty_session(code, env, keys, *, cwd, size=(30, 100), gap=0.15):
+def pty_session(code, env, keys, *, cwd, size=(30, 100), gap=0.15, wait_for_output=None, output_count=1, exit_key=None):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
     root = str(Path(__file__).resolve().parents[1])
@@ -385,6 +385,15 @@ def pty_session(code, env, keys, *, cwd, size=(30, 100), gap=0.15):
         pump(1.5)
         for key in keys:
             os.write(master, key)
+            pump(gap)
+        if wait_for_output is not None:
+            def output_ready():
+                pump(0.03)
+                return output.count(wait_for_output) >= output_count
+
+            wait_for(output_ready, timeout=scaled(5), interval=0.01, message=f"terminal never rendered {wait_for_output!r}")
+        if exit_key is not None:
+            os.write(master, exit_key)
             pump(gap)
         pump(0.5)
         try:
@@ -439,8 +448,8 @@ def test_pty_sgr_wheel_scrolls_the_provider_checklist(tmp_path, env):
                DISPATCH_LOG=str(tmp_path / "dispatch.log"))
     # Objective text, Tab to the checklist, wheel down three times (the selected codex is on top, then claude,
     # claude-sonnet and copilot alphabetically), Space ticks copilot, then Tab to Save and press Enter.
-    keys = [b"n", b"Fix it", b"\t", SGR_DOWN, SGR_DOWN, SGR_DOWN, b" ", b"\t", b"\t", b"\t", b"\r", b"\x04"]
-    output = pty_session(DRIVER, env, keys, cwd=work, gap=0.2)
+    keys = [b"n", b"Fix it", b"\t", SGR_DOWN, SGR_DOWN, SGR_DOWN, b" ", b"\t", b"\t", b"\t", b"\r"]
+    output = pty_session(DRIVER, env, keys, cwd=work, gap=0.2, wait_for_output=b"Choose a mission", output_count=2, exit_key=b"q")
     creation = (tmp_path / "dispatch.log").read_text().splitlines()[0]
     assert "mission" in creation and "'codex,copilot'" in creation, output
 

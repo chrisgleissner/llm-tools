@@ -5,13 +5,18 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use rand::rngs::SysRng;
 use rand::TryRng;
+use ring::hmac;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub const MIN_PASSWORD_LEN: usize = 12;
+pub const MIN_PASSWORD_LEN: usize = 15;
 pub const MAX_PASSWORD_LEN: usize = 256;
+const COMMON_PASSWORDS: &str = include_str!("../data/common-passwords.txt");
+const _: () = assert!(COMMON_PASSWORDS.len() <= 64 * 1024, "bundled password blocklist exceeds 64 KiB");
+pub const GLOBAL_MUTATION_BUDGET_KEY: &str = "global:mutations";
+pub const DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE: usize = 600;
 
 fn argon() -> Argon2<'static> {
     // 19 MiB, t=2, p=1 (coordinator.md "Storage").
@@ -28,6 +33,110 @@ pub fn hash_password(password: &str) -> String {
 
 pub fn verify_password(password: &str, phc: &str) -> bool {
     argon().verify_password(password.as_bytes(), phc).is_ok()
+}
+
+/// Produce an RFC 6238 SHA-1 TOTP secret (160 random bits, Base32 without padding).
+pub fn new_totp_secret() -> String {
+    let mut bytes = [0u8; 20];
+    SysRng.try_fill_bytes(&mut bytes).expect("operating system random source");
+    base32_encode(&bytes)
+}
+
+/// Calculate the six-digit SHA-1 TOTP value for an explicit Unix timestamp.
+pub fn totp_code(secret: &str, unix_time: i64) -> Option<String> {
+    let key = base32_decode(secret)?;
+    if unix_time < 0 {
+        return None;
+    }
+    let counter = (unix_time as u64) / 30;
+    let counter = counter.to_be_bytes();
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &key);
+    let mac = hmac::sign(&key, &counter);
+    let bytes = mac.as_ref();
+    let offset = usize::from(bytes[bytes.len() - 1] & 0x0f);
+    let binary =
+        (u32::from(bytes[offset] & 0x7f) << 24) | (u32::from(bytes[offset + 1]) << 16) | (u32::from(bytes[offset + 2]) << 8) | u32::from(bytes[offset + 3]);
+    Some(format!("{:06}", binary % 1_000_000))
+}
+
+/// Accept the current 30-second step and one step on either side for clock skew.
+pub fn verify_totp(secret: &str, code: &str, unix_time: i64) -> bool {
+    matching_totp_step(secret, code, unix_time).is_some()
+}
+
+pub fn matching_totp_step(secret: &str, code: &str, unix_time: i64) -> Option<i64> {
+    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) || unix_time < 0 {
+        return None;
+    }
+    [0, -30, 30].into_iter().find_map(|delta| {
+        (unix_time + delta >= 0 && totp_code(secret, unix_time + delta).is_some_and(|candidate| ct_eq(&candidate, code))).then_some((unix_time + delta) / 30)
+    })
+}
+
+/// Hash recovery codes using the same memory-hard Argon2id parameters as passwords.
+pub fn hash_recovery_code(code: &str) -> String {
+    hash_password(&normalize_recovery_code(code))
+}
+
+pub fn verify_recovery_code(code: &str, phc: &str) -> bool {
+    verify_password(&normalize_recovery_code(code), phc)
+}
+
+pub fn new_recovery_code() -> String {
+    let mut bytes = [0u8; 8];
+    SysRng.try_fill_bytes(&mut bytes).expect("operating system random source");
+    let value = hex::encode_upper(bytes);
+    format!("{}-{}-{}-{}", &value[0..4], &value[4..8], &value[8..12], &value[12..16])
+}
+
+fn normalize_recovery_code(code: &str) -> String {
+    code.bytes()
+        .filter(|b| b.is_ascii_alphanumeric())
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect()
+}
+
+fn base32_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut output = String::new();
+    let mut buffer = 0u16;
+    let mut bits = 0u8;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(ALPHABET[usize::from((buffer >> bits) & 31)] as char);
+        }
+    }
+    if bits > 0 {
+        output.push(ALPHABET[usize::from((buffer << (5 - bits)) & 31)] as char);
+    }
+    output
+}
+
+fn base32_decode(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(value.len() * 5 / 8);
+    let mut buffer = 0u16;
+    let mut bits = 0u8;
+    for byte in value.bytes() {
+        let byte = byte.to_ascii_uppercase();
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'2'..=b'7' => byte - b'2' + 26,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | u16::from(digit);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+        }
+    }
+    Some(output)
 }
 
 /// 32 random bytes, URL-safe base64 without padding (43 characters).
@@ -58,7 +167,17 @@ pub fn valid_password(p: &str) -> Result<(), String> {
     if p.len() > MAX_PASSWORD_LEN {
         return Err(format!("password must be at most {MAX_PASSWORD_LEN} bytes"));
     }
+    if is_common_password(p) {
+        return Err("password is on the bundled common-password blocklist".to_string());
+    }
     Ok(())
+}
+
+/// The small offline blocklist is bundled with the coordinator and bounded at build time.
+/// Matching is ASCII case-insensitive; passwords themselves are never logged or persisted here.
+fn is_common_password(password: &str) -> bool {
+    let candidate = password.to_ascii_lowercase();
+    COMMON_PASSWORDS.lines().any(|blocked| !blocked.is_empty() && candidate == blocked)
 }
 
 /// Rate-limit key for a client address. IPv6 clients are keyed by their /64 (a single subscriber
@@ -78,6 +197,9 @@ pub fn addr_key(ip: &std::net::IpAddr) -> String {
 struct Entry {
     failures: VecDeque<Instant>,
     in_flight: usize,
+    strikes: u32,
+    strike_expires: Option<Instant>,
+    blocked_until: Option<Instant>,
 }
 
 /// Sliding-window limiter: at most `limit` failures per `window` per key. An attempt reserves a
@@ -177,8 +299,17 @@ impl RateLimiter {
     fn prune(map: &mut HashMap<String, Entry>, now: Instant, window: Duration) {
         map.retain(|_, e| {
             Self::expire(e, now, window);
-            !e.failures.is_empty() || e.in_flight > 0
+            if e.strike_expires.is_some_and(|expires| expires <= now) {
+                e.strikes = 0;
+                e.strike_expires = None;
+                e.blocked_until = None;
+            }
+            !e.failures.is_empty() || e.in_flight > 0 || e.blocked_until.is_some_and(|until| until > now) || e.strikes > 0
         });
+    }
+
+    fn retry_seconds(duration: Duration) -> u64 {
+        duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
     }
 
     /// Reserve one attempt on every key, or return the seconds to wait. `privileged` callers may
@@ -191,11 +322,27 @@ impl RateLimiter {
             match m.get_mut(k) {
                 Some(e) => {
                     Self::expire(e, now, self.window);
+                    if e.strike_expires.is_some_and(|expires| expires <= now) {
+                        e.strikes = 0;
+                        e.strike_expires = None;
+                        e.blocked_until = None;
+                    }
+                    if let Some(until) = e.blocked_until.filter(|until| *until > now) {
+                        return Err(Self::retry_seconds(until.duration_since(now)).max(1));
+                    }
+                    if e.failures.len() >= self.limit {
+                        e.strikes = e.strikes.saturating_add(1).max(1);
+                        e.strike_expires = Some(now + Duration::from_secs(3600));
+                        let multiplier = 1u32 << e.strikes.saturating_sub(1).min(6);
+                        let backoff = self.window.max(Duration::from_secs(1)).saturating_mul(multiplier).min(Duration::from_secs(900));
+                        e.blocked_until = Some(now + backoff);
+                        return Err(Self::retry_seconds(backoff).max(1));
+                    }
                     if e.failures.len() + e.in_flight >= self.limit {
-                        return Err(match e.failures.front() {
-                            Some(oldest) => self.window.saturating_sub(now.duration_since(*oldest)).as_secs() + 1,
-                            None => 1, // only in-flight attempts: they finish within seconds
-                        });
+                        // In-flight attempts are reserved capacity, not evidence of a failed
+                        // sign-in. Refuse excess work without installing a persistent lockout:
+                        // one of the active attempts may succeed and free the slot immediately.
+                        return Err(Self::retry_seconds(self.window).max(1));
                     }
                 }
                 None => new_keys += 1,
@@ -234,7 +381,7 @@ impl RateLimiter {
                         e.failures.pop_front();
                     }
                 }
-                if e.failures.is_empty() && e.in_flight == 0 {
+                if e.failures.is_empty() && e.in_flight == 0 && e.strikes == 0 && e.blocked_until.is_none_or(|until| until <= now) {
                     m.remove(k);
                 }
             }
@@ -275,5 +422,44 @@ impl Drop for Attempt<'_> {
             let keys = std::mem::take(&mut self.keys);
             self.limiter.finish(&keys, true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_policy_uses_the_single_factor_minimum_and_allows_long_passphrases() {
+        assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN - 1)).is_err());
+        assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN)).is_ok());
+        assert!(valid_password(&"correct horse battery staple".repeat(8)).is_ok());
+        assert!(valid_password(&"x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn password_policy_rejects_bundled_common_passwords_case_insensitively() {
+        assert!(COMMON_PASSWORDS.len() <= 64 * 1024);
+        assert!(valid_password("correcthorsebatterystaple").is_err());
+        assert!(valid_password("CorrectHorseBatteryStaple").is_err());
+        assert!(valid_password("a less common passphrase").is_ok());
+    }
+
+    #[test]
+    fn totp_matches_rfc_6238_sha1_vector_and_accepts_only_adjacent_steps() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        assert_eq!(totp_code(secret, 59).as_deref(), Some("287082"));
+        assert!(verify_totp(secret, "287082", 59));
+        assert!(!verify_totp(secret, "287082", 120));
+        assert!(!verify_totp(secret, "28708", 59));
+    }
+
+    #[test]
+    fn recovery_codes_are_argon2id_hashed_and_verified_without_plaintext_storage() {
+        let code = "B72F-9C15-114A-CC33";
+        let hash = hash_recovery_code(code);
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_recovery_code(code, &hash));
+        assert!(!verify_recovery_code("B72F-9C15-114A-CC34", &hash));
     }
 }

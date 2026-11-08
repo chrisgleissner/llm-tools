@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 24);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -61,6 +61,91 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .webauthn_challenge_take("challenge-2", "admin", "session-a", "registration")
         .unwrap()
         .is_none());
+
+    let step_up = WebauthnChallengeRow {
+        principal_id: "admin".into(),
+        binding: "session-hash".into(),
+        kind: "step-up".into(),
+        state: "{}".into(),
+        expires_at: bridge_coordinator::now() + 300,
+    };
+    db.webauthn_challenge_put("challenge-step-up", &step_up).unwrap();
+    assert!(db
+        .webauthn_challenge_take("challenge-step-up", "admin", "another-session", "step-up")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.webauthn_challenge_take("challenge-step-up", "admin", "session-hash", "step-up").unwrap(),
+        Some(step_up)
+    );
+    drop(db);
+    remove_database(&path);
+}
+
+#[test]
+fn schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal() {
+    let path = db_path();
+    {
+        let db = Db::open(&path).unwrap();
+        assert!(db.admin_create("operator", "password-hash").unwrap());
+        let row = bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "legacy-key".into(),
+            principal_id: "operator".into(),
+            credential: "{}".into(),
+            user_name: "phone".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        };
+        db.passkey_put_at_origin(&row, "https://bridge.example.test").unwrap();
+    }
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.passkeys_for_principal("operator").unwrap().len(), 0);
+    assert_eq!(db.passkeys_for_principal("admin").unwrap()[0].credential_id, "legacy-key");
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://bridge.example.test"));
+    drop(db);
+    remove_database(&path);
+}
+
+#[test]
+fn schema_20_migration_adds_a_disabled_by_default_fresh_auth_marker() {
+    let path = db_path();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions(
+               token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created_at INTEGER NOT NULL,
+               last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, remember INTEGER NOT NULL DEFAULT 1,
+               principal_id TEXT NOT NULL DEFAULT 'admin', session_id TEXT);
+             PRAGMA user_version=20;",
+        )
+        .unwrap();
+        let now = bridge_coordinator::now();
+        conn.execute(
+            "INSERT INTO sessions(token_hash,csrf,created_at,last_seen,expires_at,remember,principal_id,session_id)
+             VALUES('legacy-hash','legacy-csrf',?1,?1,?2,1,'admin','legacy-session-id')",
+            rusqlite::params![now, now + 86_400],
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert!(!db.session_is_freshly_authenticated("legacy-hash").unwrap());
+    let legacy_session = db.session_get("legacy-hash").unwrap().unwrap();
+    assert!(
+        legacy_session.fresh_auth_method.is_empty(),
+        "old freshness cannot be reinterpreted as passkey step-up"
+    );
+    let version: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
     drop(db);
     remove_database(&path);
 }
@@ -88,6 +173,10 @@ fn schema_10_tokens_migrate_with_empty_last_use_addresses() {
     assert_eq!(tokens[0].last_used, Some(20));
     assert_eq!(tokens[0].last_address, None);
     assert_eq!(tokens[0].expires_at, Some(30));
+    assert!(
+        db.audit_chain_valid().unwrap(),
+        "a legacy schema without an audit table migrates to an empty valid chain"
+    );
     remove_database(&path);
 }
 

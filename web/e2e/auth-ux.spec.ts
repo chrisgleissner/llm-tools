@@ -1,5 +1,5 @@
 // First-run registration, sign-in, sessions and the account menu (AUTH-002, AUTH-005, AUTH-006, WEB-003, WEB-009).
-import { expect, expectAccessible, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test } from "./fixtures";
+import { expect, expectAccessible, loginViaUi, navTo, PASSWORD, setupViaUi, setupWithVirtualPasskey, signOutViaUi, stepUpViaUi, test } from "./fixtures";
 
 test.describe("first-run registration", () => {
   test("explains the setup token, states the policy, shows strength live and validates inline", async ({ page, coord }) => {
@@ -9,14 +9,14 @@ test.describe("first-run registration", () => {
     await expect(page.locator("#token-help")).toContainText("bridge-coordinator setup-token");
     await expect(page.locator("#token-help")).toContainText("setup-token");
     await expect(page.locator("#policy-list li")).toHaveCount(2);
-    await expect(page.locator('#policy-list li[data-rule="min"]')).toContainText("At least 12 characters");
+    await expect(page.locator('#policy-list li[data-rule="min"]')).toContainText("At least 15 characters");
     await expect(page.locator('#policy-list li[data-rule="min"]')).not.toHaveClass(/met/);
 
     const pass = page.getByLabel("New password", { exact: true });
     const strengthText = page.locator("#strength-text");
     await pass.fill("short");
     await expect(strengthText).toContainText("Too short");
-    await expect(strengthText).toContainText("5 of 12");
+    await expect(strengthText).toContainText("5 of 15");
     await expect(page.locator(".meter")).toHaveAttribute("data-level", "0");
     await pass.fill("aaaaaaaaaaaaaaaa");
     await expect(strengthText).toContainText("Weak");
@@ -42,7 +42,7 @@ test.describe("first-run registration", () => {
     await expect(page.locator("#setup-token-error")).toHaveAttribute("role", "alert");
     await expect(token).toHaveAttribute("aria-describedby", /setup-token-error/);
     await expect(page.locator("#username-error")).toContainText("Choose a username");
-    await expect(page.locator("#password-error")).toContainText("at least 12 characters");
+    await expect(page.locator("#password-error")).toContainText("at least 15 characters");
     await expect(page.locator("#form-error")).toContainText("Fix the highlighted fields");
     await expectAccessible(page, "setup with validation errors");
 
@@ -90,6 +90,25 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("an administrator can revoke another active browser session", async ({ page, browser, coord }) => {
+    await setupViaUi(page, coord);
+    const otherContext = await browser.newContext({ baseURL: coord.url });
+    try {
+      const otherPage = await otherContext.newPage();
+      await loginViaUi(otherPage);
+      await page.goto("/account");
+      const sessions = page.getByRole("list", { name: "Active sessions" });
+      await expect(sessions).toContainText("This device");
+      await expect(sessions).toContainText("Other device");
+      await sessions.getByRole("button", { name: /^Revoke session created/ }).click();
+      await expect(sessions).not.toContainText("Other device");
+      await otherPage.reload();
+      await expect(otherPage.getByRole("heading", { name: "Sign in" })).toBeVisible();
+    } finally {
+      await otherContext.close();
+    }
+  });
+
   test("account lists passkey metadata without exposing credential material", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await page.route("**/api/v1/auth/state", async (route) => {
@@ -118,6 +137,9 @@ test.describe("sign-in", () => {
     await expect(list).not.toContainText("00112233-4455-6677-8899-aabbccddeeff");
     await expect(list).toContainText("Synced passkey");
     await expect(list).not.toContainText("private-credential");
+    await expect(list.getByLabel("New name for Phone")).toHaveValue("Phone");
+    await expect(list.getByRole("button", { name: "Remove Phone" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add passkey" })).toBeVisible();
   });
 
   test("passkey re-enrolment requires a password and explicit reset confirmation", async ({ page, coord }) => {
@@ -141,12 +163,13 @@ test.describe("sign-in", () => {
     await expect(page.getByRole("status").filter({ hasText: "Passkeys were removed" })).toContainText("Register a new passkey");
   });
 
-  test("creating a token produces a dismissible security banner", async ({ page, coord }) => {
-    await setupViaUi(page, coord);
-    await page.goto("/account");
+  test("creating a token produces a dismissible security banner", async ({ page, coord, browserName }) => {
+    test.skip(browserName !== "chromium", "this flow needs Chromium's virtual authenticator");
+    const detach = await setupWithVirtualPasskey(page, coord);
     await page.getByLabel("Token name").fill("banner-test");
     await page.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
     const banner = page.getByRole("region", { name: "Security notifications" });
     await expect(banner).toContainText("An API token was created.");
@@ -154,6 +177,7 @@ test.describe("sign-in", () => {
     const count = await dismiss.count();
     await dismiss.first().click();
     await expect(dismiss).toHaveCount(count - 1);
+    await detach();
   });
 
   test("slow password sign-in shows visible announced progress until the server responds", async ({ page, coord }) => {
@@ -348,35 +372,50 @@ test.describe("account menu and password change", () => {
     await loginViaUi(page, "admin", "another long passphrase");
   });
 
-  test("API tokens can be scoped, shown once, listed and revoked from account settings", async ({ page, coord }) => {
-    await setupViaUi(page, coord);
-    await navTo(page, "Account");
+  test("API tokens can be scoped, shown once, listed and revoked from account settings", async ({ page, coord, browserName }) => {
+    test.skip(browserName !== "chromium", "this flow needs Chromium's virtual authenticator");
+    const detach = await setupWithVirtualPasskey(page, coord);
     await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
+    const sessions = page.getByRole("list", { name: "Active sessions" });
+    await expect(sessions).toContainText("This device");
+    await expect(sessions.getByRole("button", { name: /Current session/ })).toBeDisabled();
     await page.getByLabel("Token name").fill("automation-key");
     await page.getByLabel("read", { exact: true }).uncheck();
     await page.getByLabel("operate", { exact: true }).check();
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     const secret = page.locator(".token-secret code");
     await expect(secret).toContainText(/^.{30,}$/);
+    const secretValue = await secret.textContent();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Not used yet");
+    const activity = page.getByRole("list", { name: "Security activity" });
+    await expect(activity).toContainText("token.create");
+    await expect(activity).toContainText("By admin");
+    await expect(page.getByText("Audit integrity verified.")).toBeVisible();
+    await expect(activity).not.toContainText(secretValue ?? "");
     await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);
+    await detach();
   });
 
-  test("API tokens can be restricted to selected workers", async ({ page, coord }) => {
-    await setupViaUi(page, coord);
+  test("API tokens can be restricted to selected workers", async ({ page, coord, browserName }) => {
+    test.skip(browserName !== "chromium", "this flow needs Chromium's virtual authenticator");
+    const detach = await setupWithVirtualPasskey(page, coord);
     coord.cli("worker", "add", "token-worker-a");
     coord.cli("worker", "add", "token-worker-b");
-    await page.goto("/account");
+    await page.goto(new URL("/account", page.url()).toString());
     const workers = page.getByLabel("Allowed workers (optional)");
     await expect(workers.locator("option")).toHaveCount(2);
     await workers.selectOption("token-worker-a");
     await page.getByLabel("Token name").fill("worker-limited-key");
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Workers token-worker-a");
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("Workers token-worker-b");
+    await detach();
   });
 });

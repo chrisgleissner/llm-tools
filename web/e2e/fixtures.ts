@@ -89,6 +89,75 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible({ timeout: 30_000 });
 }
 
+/** Set up at the DNS localhost origin and enroll a real CTAP2 virtual passkey for passkey-gated UI tests. */
+export async function setupWithVirtualPasskey(page: Page, coord: Coordinator, username = "admin"): Promise<() => Promise<void>> {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  });
+  await page.addInitScript(() => {
+    const pk = window.PublicKeyCredential as typeof PublicKeyCredential & {
+      isConditionalMediationAvailable?: () => Promise<boolean>;
+      getClientCapabilities?: () => Promise<{ conditionalGet?: boolean }>;
+    };
+    Object.defineProperty(pk, "isConditionalMediationAvailable", { configurable: true, value: async () => false });
+    Object.defineProperty(pk, "getClientCapabilities", { configurable: true, value: async () => ({ conditionalGet: false }) });
+  });
+  const origin = coord.url.replace("127.0.0.1", "localhost");
+  await page.goto(origin);
+  await expect(page.getByRole("heading", { name: "First-run setup" })).toBeVisible();
+  await page.getByLabel("Setup token").fill(coord.setupToken());
+  await page.getByLabel("Administrator username").fill(username);
+  await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
+  await page.getByLabel("Repeat password").fill(PASSWORD);
+  const setupResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/auth/setup") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Create administrator" }).click();
+  expect((await setupResponse).ok()).toBe(true);
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  const registration = await page.evaluate(async (password) => {
+    const state = await fetch("/api/v1/auth/state").then((response) => response.json()) as { csrf_token: string };
+    const stepped = await fetch("/api/v1/auth/step-up", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf_token }, body: JSON.stringify({ password }),
+    });
+    if (!stepped.ok) throw new Error(`step-up failed: ${stepped.status} ${await stepped.text()}`);
+    const fresh = await stepped.json() as { csrf_token: string };
+    const started = await fetch("/api/v1/auth/passkeys/registration/start", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": fresh.csrf_token }, body: JSON.stringify({ name: "UI test passkey" }),
+    });
+    if (!started.ok) throw new Error(`registration start failed: ${started.status} ${await started.text()}`);
+    const ceremony = await started.json() as { challenge_id: string; options: { publicKey: Record<string, unknown> } };
+    const publicKey = ceremony.options.publicKey as Record<string, unknown> & { challenge: string; user: { id: string }; excludeCredentials?: Array<{ id: string; type: "public-key"; transports?: AuthenticatorTransport[] }> };
+    const decode = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+    const credential = await navigator.credentials.create({ publicKey: {
+      ...publicKey,
+      challenge: decode(publicKey.challenge),
+      user: { ...publicKey.user, id: decode(publicKey.user.id) },
+      excludeCredentials: publicKey.excludeCredentials?.map((item) => ({ ...item, id: decode(item.id) })),
+    } as unknown as PublicKeyCredentialCreationOptions }) as PublicKeyCredential;
+    const response = credential.response as AuthenticatorAttestationResponse;
+    const encode = (value: ArrayBuffer | ArrayBufferView) => {
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    };
+    const finished = await fetch("/api/v1/auth/passkeys/registration/finish", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": fresh.csrf_token },
+      body: JSON.stringify({ challenge_id: ceremony.challenge_id, credential: {
+        id: credential.id, rawId: encode(credential.rawId), type: credential.type,
+        response: { clientDataJSON: encode(response.clientDataJSON), attestationObject: encode(response.attestationObject), transports: response.getTransports() },
+        clientExtensionResults: credential.getClientExtensionResults(),
+      } }),
+    });
+    return { status: finished.status, body: await finished.text() };
+  }, PASSWORD);
+  expect(registration.status, registration.body).toBe(201);
+  await page.goto(`${origin}/account`);
+  await expect(page.getByRole("list", { name: "Registered passkeys" })).toContainText("UI test passkey");
+  return () => cdp.detach();
+}
+
 /** Open the account menu and sign out. */
 export async function signOutViaUi(page: Page): Promise<void> {
   await page.locator("#account-button").click();
@@ -123,6 +192,21 @@ export async function loginViaUi(page: Page, username = "admin", password = PASS
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+}
+
+/** Complete the password/MFA prompt shown when a sensitive browser mutation needs step-up. */
+export async function stepUpViaUi(page: Page, password = PASSWORD): Promise<void> {
+  const passkeyDialog = page.getByRole("dialog", { name: "Use a passkey to continue" });
+  if (await passkeyDialog.isVisible().catch(() => false)) {
+    await passkeyDialog.getByRole("button", { name: "Use a passkey instead" }).click();
+    await expect(passkeyDialog).toHaveCount(0);
+    return;
+  }
+  const dialog = page.getByRole("dialog", { name: "Verify it is you" });
+  if (!(await dialog.isVisible().catch(() => false))) return;
+  await dialog.getByLabel("Current password").fill(password);
+  await dialog.getByRole("button", { name: "Verify and continue" }).click();
+  await expect(dialog).toHaveCount(0);
 }
 
 /** WCAG 2.x A/AA axe scan in both colour schemes; fails on any violation and prints the details. */

@@ -247,11 +247,11 @@ def test_reads_for_an_offline_worker_are_refused_and_a_reconnect_replays_only_wr
     refused = 0
     for number in range(200):
         status, body = coordinator.request("GET", f"/api/v1/missions/{running[number % RUNNING]}?worker=ws&wait_ms=1000")
-        refused += status == 503 and body["error"]["code"] == "worker-offline"
+        refused += status == 503 and body["error"]["code"] == "internal" and bool(body.get("correlation_id"))
     status, body = coordinator.request("POST", "/api/v1/commands", {"target": "ws", "request": CommandRequest(
         "mission.status", mission_id=running[0], target="ws", request_id="stale-read-posted").to_json()})
-    assert (status, body["error"]["code"]) == (503, "worker-offline")
-    assert refused == 200, "reads for an offline worker must be refused with 503 worker-offline"
+    assert status == 503 and body["error"]["code"] == "internal" and body["correlation_id"]
+    assert refused == 200, "reads for an offline worker must be refused with the generic 503 problem"
 
     writes = [f"queued-write-{number}" for number in range(20)]
     for request_id in writes:

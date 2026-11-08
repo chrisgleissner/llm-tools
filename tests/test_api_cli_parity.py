@@ -53,23 +53,63 @@ def _rust_routes() -> set[tuple[str, str]]:
     return routes
 
 
+def _parity_rows(section: str, header: str) -> list[tuple[str, str]]:
+    table = section.split(header, 1)[1]
+    return re.findall(r"^\| `([^`]+)` \| ([^|]*) \|$", table, re.MULTILINE)
+
+
+def _decision_routes(rows: list[tuple[str, str]]) -> set[tuple[str, str]]:
+    return {
+        (method, path)
+        for _name, decision in rows
+        for method, path in re.findall(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/api/v1/[^ ;,`.)]+)", decision)
+    }
+
+
+def _assert_decisions_are_present(rows: list[tuple[str, str]], kind: str) -> None:
+    missing = [name for name, decision in rows if not decision.strip() or decision.strip() in {"-", "TBD", "TODO", "N/A"}]
+    assert not missing, f"every CLI {kind} needs a parity decision; blank or placeholder decisions: {missing}"
+    unclassified = [
+        name
+        for name, decision in rows
+        if not any(
+            marker in decision.lower()
+            for marker in (
+                "typed", "resource", "rest", "operation", "maps to", "mapping", "exclusion", "local", "alias", "short form",
+                "body", "field", "internal", "never remote", "client-side",
+            )
+        )
+    ]
+    assert not unclassified, f"every CLI {kind} decision must identify a mapping or exclusion: {unclassified}"
+
+
+def test_parity_decision_requires_mapping_or_exclusion_language() -> None:
+    _assert_decisions_are_present([("mission list", "Typed operation `mission.list` maps to GET /api/v1/missions.")], "leaf")
+    _assert_decisions_are_present([("view", "Exclusion: opens a local artifact; no REST operation.")], "leaf")
+    try:
+        _assert_decisions_are_present([("new command", "Covered by the API.")], "leaf")
+    except AssertionError as exc:
+        assert "new command" in str(exc)
+    else:
+        raise AssertionError("an unclassified parity statement must fail")
+
+
 def test_cli_commands_and_options_are_listed_in_parity_table() -> None:
     doc = API_DOC.read_text()
     section = doc.split("## API-015 parity table", 1)[1].split("Coordinator router declarations", 1)[0]
     actual_commands = set(_leaves(_build_parser()))
     assert actual_commands == COMMANDS, f"update API-015 command inventory; missing={actual_commands-COMMANDS}, stale={COMMANDS-actual_commands}"
     command_table = section.split("| CLI option |", 1)[0]
-    command_rows = re.findall(r"^\| `([^`]+)` \| ([^|]+) \|$", command_table, re.MULTILINE)
+    command_rows = re.findall(r"^\| `([^`]+)` \| ([^|]*) \|$", command_table, re.MULTILINE)
     documented_commands = {name for name, _decision in command_rows}
     assert len(documented_commands) == len(command_rows), "each CLI leaf must have exactly one parity decision"
     assert documented_commands == actual_commands, (
         f"update API-015 command decisions; missing={actual_commands-documented_commands}, "
         f"stale={documented_commands-actual_commands}"
     )
-    assert all(decision.strip() for _name, decision in command_rows), "every CLI leaf needs a parity decision"
+    _assert_decisions_are_present(command_rows, "leaf")
 
-    option_table = section.split("| CLI option |", 1)[1]
-    option_rows = re.findall(r"^\| `([^`]+)` \| ([^|]+) \|$", option_table, re.MULTILINE)
+    option_rows = _parity_rows(section, "| CLI option |")
     actual_options = _options(_build_parser())
     documented_options = {name for name, _decision in option_rows}
     assert len(documented_options) == len(option_rows), "each CLI option must have exactly one parity decision"
@@ -77,7 +117,14 @@ def test_cli_commands_and_options_are_listed_in_parity_table() -> None:
         f"update API-015 option decisions; missing={actual_options-documented_options}, "
         f"stale={documented_options-actual_options}"
     )
-    assert all(decision.strip() for _name, decision in option_rows), "every CLI option needs a mapping or exclusion"
+    _assert_decisions_are_present(option_rows, "option")
+
+    actual_routes = _rust_routes()
+    referenced_routes = _decision_routes([*command_rows, *option_rows])
+    assert referenced_routes <= actual_routes, (
+        "API-015 decisions name routes absent from http::ROUTES; "
+        f"missing={referenced_routes-actual_routes}. Exclusions without a route are valid."
+    )
 
 
 def test_coordinator_routes_are_listed_in_parity_table() -> None:

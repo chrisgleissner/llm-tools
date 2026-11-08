@@ -1,6 +1,8 @@
 import * as api from "../api";
 import { field, h, relFromMs, timeEl } from "../dom";
 import { passkeyProviderName } from "../passkey-provider";
+import { creationOptions, serializeRegistration } from "../passkeys";
+import { withStepUp } from "../step-up";
 import { minutes } from "./login";
 import { passwordForm } from "./password-form";
 
@@ -62,7 +64,7 @@ function tokenManagement(): HTMLElement {
         revoke.addEventListener("click", async () => {
           revoke.disabled = true;
           try {
-            await api.del(`/api/v1/tokens/${encodeURIComponent(token.name)}`);
+            await withStepUp(() => api.del(`/api/v1/tokens/${encodeURIComponent(token.name)}`));
             status.textContent = `Token ${token.name} revoked.`;
             await refresh();
           } catch (err) {
@@ -98,11 +100,11 @@ function tokenManagement(): HTMLElement {
     }
     create.disabled = true;
     try {
-      const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
+      const created = await withStepUp(() => api.post<api.ApiTokenCreated>("/api/v1/tokens", {
         name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
         allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
         allowed_workers: Array.from(allowedWorkers.selectedOptions, (option) => option.value),
-      });
+      }));
       oneTime.hidden = false;
       oneTime.replaceChildren(
         h("p", {}, `Copy this secret for ${created.token.name}. It will not be shown again.`),
@@ -121,6 +123,50 @@ function tokenManagement(): HTMLElement {
     }
   });
   section.append(h("h2", { id: "api-tokens-title" }, "API tokens"), h("p", { class: "muted" }, "Use tokens for scripts and tools. Grant only the permissions they need."), rows, form, oneTime);
+  void refresh();
+  return section;
+}
+
+function activeSessions(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "active-sessions-title" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading sessions…");
+  const rows = h("ul", { class: "token-list", "aria-label": "Active sessions" });
+  const refresh = async (): Promise<void> => {
+    try {
+      const result = await api.get<{ sessions: Array<{ id: string; created_at: string; last_seen: string; expires_at: string; remember: boolean; current: boolean }> }>("/api/v1/auth/sessions");
+      rows.replaceChildren(...result.sessions.map((session) => {
+        const created = new Date(session.created_at).toLocaleString();
+        const revoke = h("button", {
+          class: "btn small", type: "button",
+          "aria-label": session.current ? "Current session" : `Revoke session created ${created}`,
+        }, session.current ? "Current session" : "Revoke");
+        revoke.disabled = session.current;
+        revoke.addEventListener("click", async () => {
+          revoke.disabled = true;
+          try {
+            await api.del(`/api/v1/auth/sessions/${encodeURIComponent(session.id)}`);
+            window.dispatchEvent(new Event("bridge-security-notification"));
+            status.textContent = "Session revoked.";
+            await refresh();
+          } catch (error) {
+            revoke.disabled = false;
+            status.textContent = error instanceof api.ApiError ? error.message : "Could not revoke session.";
+          }
+        });
+        return h("li", {}, h("strong", {}, session.current ? "This device" : "Other device"),
+          h("span", {}, session.remember ? "Remembered device" : "Browser session"),
+          h("span", {}, `Signed in ${created}`),
+          h("span", {}, `Last active ${new Date(session.last_seen).toLocaleString()}`),
+          h("span", {}, `Expires ${new Date(session.expires_at).toLocaleString()}`), revoke);
+      }));
+      if (!result.sessions.length) rows.append(h("li", { class: "muted" }, "No active sessions."));
+      status.textContent = "";
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : "Could not load sessions.";
+    }
+  };
+  section.append(h("h2", { id: "active-sessions-title" }, "Active sessions"),
+    h("p", { class: "muted" }, "Review signed-in browsers and revoke sessions you no longer use. The current session cannot revoke itself here; use Sign out."), status, rows);
   void refresh();
   return section;
 }
@@ -164,31 +210,146 @@ function passkeyList(): HTMLElement {
   const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-list-title" });
   const rows = h("ul", { class: "token-list", "aria-label": "Registered passkeys" });
   const status = h("p", { role: "status", "aria-live": "polite" }, "Loading passkeys…");
-  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows);
-  void api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys")
-    .then(({ passkeys }) => {
+  const addName = h("input", { type: "text", maxlength: 64, required: true, autocomplete: "off", "aria-label": "New passkey name", placeholder: "e.g. Laptop" });
+  const add = h("button", { type: "submit", class: "btn primary" }, "Add passkey");
+  const addForm = h("form", { class: "token-create", "aria-label": "Register another passkey" }, h("h3", {}, "Add another passkey"), addName, add, h("p", { class: "hint" }, "Passkeys add another sign-in option. Password sign-in follows the coordinator's MFA policy."));
+  const refresh = async (): Promise<void> => {
+    try {
+      const { passkeys } = await api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys");
       status.textContent = "";
       if (!passkeys.length) {
         rows.replaceChildren(h("li", { class: "muted" }, "No passkeys registered."));
-        return;
+      } else {
+        rows.replaceChildren(...passkeys.map((passkey) => {
+          const renameName = h("input", { type: "text", maxlength: 64, required: true, value: passkey.name, "aria-label": `New name for ${passkey.name}` });
+          const rename = h("button", { class: "btn small", type: "submit" }, "Rename");
+          const renameForm = h("form", { class: "actions" }, renameName, rename);
+          renameForm.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            rename.disabled = true;
+            try {
+              await withStepUp(() => api.patch(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}`, { name: renameName.value.trim() }));
+              status.textContent = `Passkey renamed to ${renameName.value.trim()}.`;
+              await refresh();
+            } catch (error) {
+              status.textContent = error instanceof api.ApiError ? error.message : "Could not rename this passkey.";
+              rename.disabled = false;
+            }
+          });
+          const remove = h("button", { class: "btn small danger", type: "button", "aria-label": `Remove ${passkey.name}` }, "Remove");
+          remove.addEventListener("click", async () => {
+            if (!window.confirm(`Remove ${passkey.name}? The coordinator will protect the last available sign-in method.`)) return;
+            remove.disabled = true;
+            try {
+              await withStepUp(() => api.del(`/api/v1/auth/passkeys/${encodeURIComponent(passkey.id)}`));
+              status.textContent = `Passkey ${passkey.name} removed.`;
+              await refresh();
+            } catch (error) {
+              status.textContent = error instanceof api.ApiError ? error.message : "Could not remove this passkey.";
+              remove.disabled = false;
+            }
+          });
+          return h("li", {},
+            h("strong", {}, passkey.name),
+            h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
+            h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
+            h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
+            h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
+            renameForm, remove,
+          );
+        }));
       }
-      rows.replaceChildren(...passkeys.map((passkey) => h("li", {},
-        h("strong", {}, passkey.name),
-        h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
-        h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
-        h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
-        h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
-      )));
-    })
-    .catch((error) => { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; });
+    } catch (error) { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; }
+  };
+  addForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = addName.value.trim();
+    if (!name || !navigator.credentials?.create) { status.textContent = "Passkey registration is unavailable in this browser."; return; }
+    add.disabled = true;
+    try {
+      await withStepUp(async () => {
+        const start = await api.post<{ challenge_id: string; options: { publicKey: Record<string, unknown> } }>("/api/v1/auth/passkeys/registration/start", { name });
+        const credential = await navigator.credentials.create({ publicKey: creationOptions(start.options) });
+        if (!credential) throw new Error("Passkey registration was cancelled.");
+        await api.post("/api/v1/auth/passkeys/registration/finish", { challenge_id: start.challenge_id, credential: serializeRegistration(credential) });
+      });
+      addName.value = "";
+      status.textContent = `Passkey ${name} registered.`;
+      await refresh();
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : error instanceof Error ? error.message : "Could not register this passkey.";
+    } finally { add.disabled = false; }
+  });
+  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows, addForm);
+  void refresh();
   return section;
+}
+
+function securityActivity(): { element: HTMLElement; dispose: () => void } {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "security-activity-title" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading security activity…");
+  const chain = h("p", { class: "muted small", "aria-live": "polite" });
+  const rows = h("ul", { class: "token-list", "aria-label": "Security activity" });
+  const older = h("button", { class: "btn", type: "button", hidden: true }, "Load older activity");
+  let cursor: string | null = null;
+  let loading = false;
+  let reloadAfterLoad = false;
+  const load = async (next: string | null, append: boolean): Promise<void> => {
+    if (loading) return;
+    loading = true;
+    status.textContent = "Loading security activity…";
+    older.disabled = true;
+    try {
+      const query = new URLSearchParams({ limit: "50" });
+      if (next) query.set("cursor", next);
+      const page = await api.get<{
+        entries: Array<{ id: number; ts: string; actor: string; action: string; remote: string }>;
+        chain_valid: boolean;
+        next_cursor: string | null;
+      }>(`/api/v1/audit?${query}`);
+      const items = page.entries.map((entry) => h("li", {},
+        h("strong", {}, entry.action),
+        h("span", {}, `By ${entry.actor}`),
+        h("span", {}, entry.remote ? `From ${entry.remote}` : "Address unavailable"),
+        h("time", { datetime: entry.ts }, new Date(entry.ts).toLocaleString()),
+      ));
+      if (append) rows.append(...items);
+      else rows.replaceChildren(...items);
+      if (!rows.childElementCount) rows.append(h("li", { class: "muted" }, "No security activity yet."));
+      cursor = page.next_cursor;
+      older.hidden = !cursor;
+      chain.textContent = page.chain_valid ? "Audit integrity verified." : "Audit integrity check failed.";
+      chain.className = page.chain_valid ? "muted small" : "form-error";
+      status.textContent = "";
+    } catch (err) {
+      status.textContent = err instanceof api.ApiError ? err.message : "Could not load security activity.";
+    } finally {
+      loading = false;
+      older.disabled = false;
+      if (reloadAfterLoad) {
+        reloadAfterLoad = false;
+        void load(null, false);
+      }
+    }
+  };
+  older.addEventListener("click", () => { void load(cursor, true); });
+  const events = new AbortController();
+  window.addEventListener("bridge-security-notification", () => {
+    if (loading) reloadAfterLoad = true;
+    else void load(null, false);
+  }, { signal: events.signal });
+  section.append(h("h2", { id: "security-activity-title" }, "Security activity"),
+    h("p", { class: "muted" }, "Recent sign-ins, token activity and security changes. Sensitive request details and credential material are not shown."),
+    chain, status, rows, older);
+  void load(null, false);
+  return { element: section, dispose: () => events.abort() };
 }
 
 export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const me = opts.me;
   const s = me?.session;
   const form = passwordForm({ me, onPasswordChanged: opts.onPasswordChanged });
-  const exp = s ? new Date(s.expires_at * 1000) : null;
+  const exp = s ? new Date(s.expires_at) : null;
   const session = h(
     "section",
     { class: "card narrow", "aria-labelledby": "acct-session" },
@@ -225,8 +386,9 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       );
     }
   }).catch(() => {});
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(),
-    me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
+  const activity = securityActivity();
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), activeSessions(), tokenManagement(),
+    activity.element, me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
     me?.passkey_canonical_origin ? passkeyReenrollment() : h("div", {}), passkeyGuidance);
-  return () => {};
+  return activity.dispose;
 }

@@ -108,6 +108,38 @@ async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn global_mutation_budget_limits_writes_across_all_addresses_and_tokens() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let key = [(
+        bridge_coordinator::auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(),
+        bridge_coordinator::auth::DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE,
+    )];
+    let mut admitted = 0;
+    while admitted <= bridge_coordinator::auth::DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE {
+        if env.srv.state.mutation_limiter.check(&key).is_some() {
+            break;
+        }
+        admitted += 1;
+    }
+    assert!(
+        (1..=bridge_coordinator::auth::DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE).contains(&admitted),
+        "setup may consume a global slot; admitted {admitted} direct reservations"
+    );
+    let response = api
+        .rb(Method::POST, "/api/v1/tokens")
+        .json(&json!({"name":"global-limited","scopes":["read"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 429);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "mutation-rate-limit");
+    env.stop().await;
+}
+
 #[test]
 fn ipv6_clients_are_keyed_by_their_64() {
     let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
@@ -131,6 +163,20 @@ fn mutation_limiter_enforces_token_and_address_budgets_with_retry_delay() {
     // A rejected combined request must not consume budget on the still-available address key.
     assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), None);
     assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), Some(60));
+}
+
+#[test]
+fn authentication_limiter_increases_retry_after_for_repeated_bursts() {
+    let limiter = RateLimiter::new(1, Duration::from_secs(1), 8);
+    let key = ["ip:192.0.2.44".to_string()];
+    limiter.acquire(&key, false).unwrap().fail();
+    assert!(matches!(limiter.acquire(&key, false), Err(1)));
+
+    // Let the first window and its first one-second backoff expire, then create another failed
+    // burst. The second lockout must be longer than the first one.
+    std::thread::sleep(Duration::from_millis(1100));
+    limiter.acquire(&key, false).unwrap().fail();
+    assert!(matches!(limiter.acquire(&key, false), Err(2)));
 }
 
 #[test]
@@ -364,7 +410,7 @@ async fn connections_per_address_are_capped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_reserve_admits_workers_when_general_slots_are_full() {
     let env = boot_with(|t| set("worker_reserve_connections", "2")(set("max_connections", "8")(set("max_connections_per_ip", "100")(t)))).await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     // Take every general slot. The test client's own keep-alive connections already occupy an
     // unknown number of general slots (one or two, depending on whether the previous request's
@@ -405,7 +451,7 @@ fn hello_payload(worker_id: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn one_pending_connection_per_worker_token() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let first = Fw::raw(&env, &token).await.unwrap();
     // The first connection has not sent hello: a second one with the same token is refused.
@@ -450,7 +496,7 @@ fn error_message(worker_id: &str, generation: u64, in_reply_to: &str) -> String 
 #[tokio::test(flavor = "multi_thread")]
 async fn error_messages_are_never_answered_with_errors() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _welcome) = Fw::connect(&env, &token, "wid-1", 0).await;
     // An error carrying the wrong generation and the wrong worker id: no reply of any kind.
@@ -465,7 +511,7 @@ async fn error_messages_are_never_answered_with_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_generation_reply_to_welcome_closes_the_connection() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, welcome) = Fw::connect(&env, &token, "wid-1", 0).await;
     // A stale-generation error about some other message does not close the connection.
@@ -484,7 +530,7 @@ async fn stale_generation_reply_to_welcome_closes_the_connection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn re_added_worker_gets_a_generation_above_every_earlier_one() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut a, _) = Fw::connect(&env, &token, "wid-1", 0).await;
     a.barrier().await;
@@ -646,7 +692,20 @@ fn version_1_database_is_migrated_in_place() {
         .query_row("SELECT principal_id FROM audit WHERE action='old-action'", [], |row| row.get(0))
         .unwrap();
     assert_eq!(session_principal, "admin");
+    let migrated_session_id: String = connection
+        .query_row("SELECT session_id FROM sessions WHERE token_hash='old-session'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(migrated_session_id.len(), 32, "legacy sessions receive a distinct public identifier");
+    assert_ne!(migrated_session_id, "old-session", "the cookie hash is not exposed as the session identifier");
     assert_eq!(audit_principal, "admin");
+    assert!(
+        db.audit_chain_valid().unwrap(),
+        "version-one audit history is backfilled into a valid hash chain"
+    );
+    let audit_entry = db.audit_list(1).unwrap().remove(0);
+    assert_eq!(audit_entry["action"], "old-action");
+    assert_eq!(audit_entry["prev_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(audit_entry["entry_hash"].as_str().unwrap().len(), 64);
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))

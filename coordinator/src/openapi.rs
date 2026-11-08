@@ -22,6 +22,8 @@ struct ProblemDetails {
     detail: String,
     code: String,
     error: ErrorDetail,
+    #[schema(required = false)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -35,8 +37,8 @@ struct CommandOutcome {
     operation: String,
     #[schema(value_type = Option<Object>)]
     result: Option<Value>,
-    created_at: i64,
-    updated_at: i64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -111,6 +113,18 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/auth/passkeys/step-up/start" && method == "POST" {
+        return json!({
+            "type":"object","required":["challenge_id","options"],"additionalProperties":false,
+            "properties":{"challenge_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},"options":{"type":"object","required":["publicKey"],"properties":{"publicKey":{"type":"object"}}}}
+        });
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        return json!({
+            "type":"object","required":["csrf_token","fresh_auth_until"],"additionalProperties":false,
+            "properties":{"csrf_token":{"type":"string","minLength":32,"maxLength":128},"fresh_auth_until":{"type":"string","format":"date-time"}}
+        });
+    }
     if path == "/api/v1/auth/passkeys" && method == "GET" {
         return json!({
             "type":"object","required":["passkeys"],"additionalProperties":false,
@@ -135,10 +149,55 @@ fn response_schema(path: &str, method: &str) -> Value {
                 "setup_required":{"type":"boolean"},
                 "authenticated":{"type":"boolean"},
                 "passkey_sign_in_available":{"type":"boolean"},
-                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"}
+                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"},
+                "session":{"type":"object","required":["remember","expires_at","idle_timeout_secs"],"properties":{
+                    "remember":{"type":"boolean"},
+                    "expires_at":{"type":"string","format":"date-time"},
+                    "idle_timeout_secs":{"type":"integer","minimum":1}
+                },"additionalProperties":false}
             },
             "additionalProperties":true
         });
+    }
+    if path == "/api/v1/auth/sessions" && method == "GET" {
+        return json!({"type":"object","required":["sessions"],"properties":{"sessions":{"type":"array","maxItems":100,"items":{
+            "type":"object","required":["id","created_at","last_seen","expires_at","remember","current"],"additionalProperties":false,
+            "properties":{"id":{"type":"string","minLength":32,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"},
+                "created_at":{"type":"string","format":"date-time"},"last_seen":{"type":"string","format":"date-time"},
+                "expires_at":{"type":"string","format":"date-time"},"remember":{"type":"boolean"},"current":{"type":"boolean"}}
+        }}},"additionalProperties":false});
+    }
+    if path == "/api/v1/workers" && method == "GET" {
+        return json!({"type":"object","required":["workers"],"properties":{"workers":{"type":"array","items":{
+            "type":"object","required":["name","state","last_seen"],"properties":{
+                "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+                "last_seen":{"type":["string","null"],"format":"date-time"}
+            },"additionalProperties":true
+        }}},"additionalProperties":false});
+    }
+    if path == "/api/v1/workers/{name}" && method == "GET" {
+        return json!({"type":"object","required":["name","state","last_seen"],"properties":{
+            "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+            "last_seen":{"type":["string","null"],"format":"date-time"}
+        },"additionalProperties":true});
+    }
+    if path == "/api/v1/security/notifications" && method == "GET" {
+        return json!({"type":"object","required":["notifications"],"properties":{"notifications":{"type":"array","items":{
+            "type":"object","required":["id","category","created_at"],"properties":{
+                "id":{"type":"string"},"category":{"type":"string"},"created_at":{"type":"string","format":"date-time"}
+            },"additionalProperties":false
+        }}},"additionalProperties":false});
+    }
+    if path == "/api/v1/audit" && method == "GET" {
+        return json!({"type":"object","required":["entries","chain_valid","next_cursor"],"properties":{
+            "entries":{"type":"array","items":{"type":"object","required":["id","ts","actor","action","detail","remote","principal_id","prev_hash","entry_hash"],"properties":{
+                "id":{"type":"integer","minimum":1},"ts":{"type":"string","format":"date-time"},
+                "actor":{"type":"string"},"action":{"type":"string"},"detail":{"type":"string"},"remote":{"type":"string"},
+                "principal_id":{"type":"string"},"prev_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                "entry_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+            },"additionalProperties":false}},
+            "chain_valid":{"type":"boolean"},"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor bound to the page size."}
+        },"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
@@ -157,6 +216,8 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
     if path == "/api/v1/commands/{id}"
         || path == "/api/v1/commands"
+        || matches!(path, "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage")
+        || path == "/api/v1/missions/{id}/station"
         || (matches!(
             path,
             "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
@@ -166,6 +227,25 @@ fn response_schema(path: &str, method: &str) -> Value {
     } else {
         json!({"type":"object","additionalProperties":true})
     }
+}
+
+fn request_schema(path: &str, method: &str) -> Option<Value> {
+    if path == "/api/v1/auth/passkeys/step-up/start" && method == "POST" {
+        return Some(json!({"type":"object","additionalProperties":false,"maxProperties":0}));
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        return Some(json!({
+            "type":"object","additionalProperties":false,"required":["challenge_id","credential"],
+            "properties":{"challenge_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},"credential":{"type":"object"}}
+        }));
+    }
+    if path == "/api/v1/auth/passkeys/{id}" && method == "PATCH" {
+        return Some(json!({
+            "type":"object","additionalProperties":false,"required":["name"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[^\\u0000-\\u001f\\u007f]+$"}}
+        }));
+    }
+    None
 }
 
 fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
@@ -183,7 +263,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
-            "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "409": {"description":"The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying","headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -191,6 +271,14 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "500": {"description":"Internal server error","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
         }
+    });
+    op["responses"]["400"]["content"]["application/problem+json"]["example"] = json!({
+        "type":"https://llm-tools.dev/problems/invalid-request",
+        "title":"Invalid request",
+        "status":400,
+        "detail":"The request does not match the documented fields.",
+        "code":"invalid-request",
+        "error":{"code":"invalid-request","message":"The request does not match the documented fields."}
     });
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
@@ -201,6 +289,22 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "description":"Token created; secret is returned once",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreated"}}}
         });
+    }
+    if path == "/api/v1/auth/step-up" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object","additionalProperties":false,"required":["password"],
+                "properties":{
+                    "password":{"type":"string","maxLength":256},
+                    "totp_code":{"type":"string","maxLength":16},
+                    "recovery_code":{"type":"string","maxLength":64}
+                },
+                "not":{"required":["totp_code","recovery_code"]}
+            }}}
+        });
+        op["responses"]["200"]["description"] =
+            json!("Credentials verified; session cookie, CSRF token and public session ID rotated. Fresh authentication lasts 10 minutes.");
     }
     if path == "/api/v1/commands" {
         op["parameters"] = json!([{
@@ -227,11 +331,29 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"cursor","in":"query","required":false,"description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.","schema":{"type":"string","maxLength":2048}},
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
+        op["responses"]["200"]["content"]["application/json"]["example"] = json!({
+            "missions":[],"total":0,"offset":0,"next_cursor":null,"statuses":{}
+        });
+    }
+    if path == "/api/v1/audit" && method == "GET" {
+        op["parameters"] = json!([
+            {"name":"limit","in":"query","required":false,"description":"Maximum audit entries, default 100, maximum 500.","schema":{"type":"integer","minimum":1,"maximum":500}},
+            {"name":"cursor","in":"query","required":false,"description":"Authenticated encrypted opaque cursor from next_cursor, bound to the page size.","schema":{"type":"string","maxLength":2048}}
+        ]);
     }
     if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({
             "required": method == "POST" || method == "PUT",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
+        });
+    }
+    if path == "/api/v1/missions/{id}/tasks" && method == "POST" {
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "title":"Review API behavior",
+            "prompt":"Check the resource endpoint and report any mismatch.",
+            "priority":0,
+            "depends_on":[],
+            "acceptance":["The documented response matches the CLI contract."]
         });
     }
     if path == "/api/docs" && method == "GET" {
@@ -257,7 +379,10 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
-            "content":{"application/json":{"schema":token_create_schema()}}
+            "content":{"application/json":{
+                "schema":token_create_schema(),
+                "example":{"name":"automation-read","scopes":["read"],"expires_days":30}
+            }}
         });
     }
     if path == "/api/v1/auth/login" && method == "POST" {
@@ -269,11 +394,29 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "required":["username","password"],
                 "properties":{
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
-                    "password":{"type":"string","minLength":12,"maxLength":256},
-                    "remember":{"type":"boolean"}
+                    "password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
+                    "remember":{"type":"boolean"},
+                    "totp_code":{"type":"string","pattern":"^[0-9]{6}$"},
+                    "recovery_code":{"type":"string","minLength":1,"maxLength":64}
                 }
             }}}
         });
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "username":"operator","password":"replace-with-your-password","remember":false
+        });
+    }
+    if path == "/api/v1/auth/totp/enroll" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["current_password"],"properties":{"current_password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] = json!({"type":"object","required":["secret","otpauth_uri","confirmed"],"properties":{"secret":{"type":"string","minLength":32,"maxLength":64},"otpauth_uri":{"type":"string","format":"uri"},"confirmed":{"const":false}},"additionalProperties":false});
+    }
+    if path == "/api/v1/auth/totp/confirm" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string","pattern":"^[0-9]{6}$"}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] = json!({"type":"object","required":["ok","recovery_codes"],"properties":{"ok":{"const":true},"recovery_codes":{"type":"array","minItems":10,"maxItems":10,"items":{"type":"string","pattern":"^[A-F0-9]{4}(-[A-F0-9]{4}){3}$"}}},"additionalProperties":false});
+    }
+    if path == "/api/v1/auth/totp/disable" && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["current_password","code"],"properties":{"current_password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},"code":{"type":"string","pattern":"^[0-9]{6}$"}}}}}});
+        op["responses"]["200"]["content"]["application/json"]["schema"] =
+            json!({"type":"object","required":["ok"],"properties":{"ok":{"const":true}},"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
         op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string","minLength":1,"maxLength":64}}}}}});
@@ -295,8 +438,8 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "additionalProperties":false,
                 "required":["current","new"],
                 "properties":{
-                    "current":{"type":"string","minLength":12,"maxLength":256},
-                    "new":{"type":"string","minLength":12,"maxLength":256},
+                    "current":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
+                    "new":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
                     "keep_api_tokens":{"type":"boolean"}
                 }
             }}}
@@ -312,7 +455,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "properties":{
                     "setup_token":{"type":"string","minLength":1,"maxLength":256},
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
-                    "password":{"type":"string","minLength":12,"maxLength":256}
+                    "password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256}
                 }
             }}}
         });
@@ -351,6 +494,18 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/workers/{name}/doctor" || path == "/api/v1/workers/{name}/agents" {
         op["parameters"] = json!([{"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
                                   {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/workers/{name}/sessions" {
+        op["parameters"] = json!([
+            {"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63,"description":"Optional mission selector; omitted lists sessions across the worker."}},
+            {"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":1000,"default":100}},
+            {"name":"cursor","in":"query","required":false,"schema":{"type":"string","maxLength":2048,"description":"Opaque continuation cursor; cannot be combined with offset."}},
+            {"name":"offset","in":"query","required":false,"schema":{"type":"integer","minimum":0,"default":0,"description":"Legacy numeric position; use cursor for continuation."}},
+            {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}
+        ]);
+    }
+    if path == "/api/v1/workers/{name}/usage" {
+        op["parameters"] = json!([{"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
     }
     if path == "/api/v1/workers/{name}/audit" {
         op["parameters"] = json!([{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":10000}},
@@ -473,6 +628,32 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     } else {
         op["security"] = json!([]);
     }
+    let fresh_step_up = (path == "/api/v1/auth/passkeys/{id}" && matches!(method, "PATCH" | "DELETE"))
+        || matches!(path, "/api/v1/auth/passkeys/registration/start" | "/api/v1/auth/passkeys/registration/finish")
+        || (path == "/api/v1/tokens" && method == "POST")
+        || (path == "/api/v1/tokens/{name}" && method == "DELETE")
+        || (path == "/api/v1/workers" && method == "POST")
+        || (path == "/api/v1/workers/{name}" && method == "DELETE")
+        || (path == "/api/v1/workers/{name}/restore" && method == "POST")
+        || (path == "/api/v1/missions" && method == "POST")
+        || (path == "/api/v1/missions/{id}/suspend-until-credits" && method == "POST");
+    if fresh_step_up {
+        op["x-fresh-auth"] = json!({"required":true,"max_age_seconds":600,"credentials":["password","totp","recovery-code","passkey"]});
+        op["responses"]["403"]["description"] = json!("Fresh browser-session authentication is required; bearer tokens are not accepted.");
+    }
+    if path == "/api/v1/tokens" && method == "POST" {
+        op["x-fresh-auth"]["credentials"] = json!(["passkey"]);
+        op["responses"]["403"]["description"] =
+            json!("A fresh passkey assertion in a browser session is required; password-only step-up and bearer tokens are refused.");
+    }
+    if path == "/api/v1/auth/passkeys/step-up/finish" && method == "POST" {
+        op["x-fresh-auth"] = json!({"grants":true,"max_age_seconds":600,"credentials":["passkey"]});
+        op["responses"]["200"]["description"] =
+            json!("Passkey assertion verified; session cookie, CSRF token and public session ID rotate. Fresh authentication lasts 10 minutes.");
+    }
+    if let Some(schema) = request_schema(path, method) {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":schema}}});
+    }
     op
 }
 
@@ -532,6 +713,12 @@ pub fn openapi_value() -> Value {
                             "type":"object",
                             "additionalProperties":true,
                             "properties":{
+                                "id":{"type":"string"},
+                                "name":{"type":"string"},
+                                "status":{"type":"string"},
+                                "created_at":{"type":"string","format":"date-time"},
+                                "updated_at":{"type":"string","format":"date-time"},
+                                "controller_running":{"type":"boolean"},
                                 "needs_you":{
                                     "oneOf":[
                                         {
@@ -563,6 +750,16 @@ pub fn openapi_value() -> Value {
         "additionalProperties":true,
         "properties":{"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor for task, event, or operation list results."}}
     });
+    for field in ["created_at", "updated_at"] {
+        doc["components"]["schemas"]["CommandOutcome"]["properties"][field] = json!({"type":"string","format":"date-time"});
+    }
+    for field in ["created_at", "last_used", "expires_at"] {
+        doc["components"]["schemas"]["TokenInfo"]["properties"][field] = if field == "created_at" {
+            json!({"type":"string","format":"date-time"})
+        } else {
+            json!({"type":["string","null"],"format":"date-time"})
+        };
+    }
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
     }
@@ -641,6 +838,10 @@ mod tests {
             assert!(ROUTES.iter().any(|(declared, _, _, _)| declared == path));
         }
         assert!(doc["components"]["schemas"]["ProblemDetails"].is_object());
+        for field in ["created_at", "updated_at"] {
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["type"], "string");
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["format"], "date-time");
+        }
         let mission_list = &doc["paths"]["/api/v1/missions"]["get"];
         let params = mission_list["parameters"].as_array().expect("mission list query parameters");
         let cursor = params
@@ -657,6 +858,15 @@ mod tests {
         assert_eq!(
             doc["components"]["schemas"]["MissionListPage"]["properties"]["next_cursor"]["type"],
             json!(["string", "null"])
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["MissionListPage"]["properties"]["missions"]["items"]["properties"]["mission"]["properties"]["created_at"]["format"],
+            "date-time"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["MissionListPage"]["properties"]["missions"]["items"]["properties"]["mission"]["properties"]["controller_running"]
+                ["type"],
+            "boolean"
         );
         let create = &doc["paths"]["/api/v1/missions"]["post"];
         let body_schema = &create["requestBody"]["content"]["application/json"]["schema"];
@@ -675,8 +885,15 @@ mod tests {
 
     #[test]
     fn generated_openapi_matches_committed_snapshot() {
+        let generated = openapi_value();
+        if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+            let mut bytes = serde_json::to_vec_pretty(&generated).expect("serialize generated OpenAPI");
+            bytes.push(b'\n');
+            std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"), bytes).expect("write OpenAPI snapshot");
+            return;
+        }
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");
-        assert_eq!(openapi_value(), snapshot);
+        assert_eq!(generated, snapshot);
     }
 
     #[test]
@@ -692,6 +909,26 @@ mod tests {
     }
 
     #[test]
+    fn openapi_documents_safe_request_and_response_examples() {
+        let doc = openapi_value();
+        let mission_list = &doc["paths"]["/api/v1/missions"]["get"]["responses"]["200"]["content"]["application/json"];
+        assert_eq!(mission_list["example"]["missions"], json!([]));
+        assert_eq!(mission_list["example"]["next_cursor"], Value::Null);
+
+        let task_add = &doc["paths"]["/api/v1/missions/{id}/tasks"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(task_add["example"]["title"], "Review API behavior");
+        assert_eq!(task_add["example"]["depends_on"], json!([]));
+
+        let token_create = &doc["paths"]["/api/v1/tokens"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(token_create["example"]["scopes"], json!(["read"]));
+        assert!(token_create["example"].get("secret").is_none());
+
+        let problem = &doc["paths"]["/api/v1/missions"]["post"]["responses"]["400"]["content"]["application/problem+json"]["example"];
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+        assert_eq!(problem["status"], 400);
+    }
+
+    #[test]
     fn logout_has_no_request_body() {
         let doc = openapi_value();
         assert!(doc["paths"]["/api/v1/auth/logout"]["post"]["requestBody"].is_null());
@@ -704,8 +941,124 @@ mod tests {
         assert_eq!(schema["required"], json!(["current", "new"]));
         assert_eq!(schema["properties"]["current"]["type"], "string");
         assert_eq!(schema["properties"]["new"]["type"], "string");
+        assert_eq!(schema["properties"]["current"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
+        assert_eq!(schema["properties"]["new"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["properties"]["keep_api_tokens"]["type"], "boolean");
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn public_timestamp_fields_are_declared_as_rfc3339_date_time() {
+        let auth = response_schema("/api/v1/auth/state", "GET");
+        assert_eq!(auth["properties"]["session"]["properties"]["expires_at"]["format"], "date-time");
+        let workers = response_schema("/api/v1/workers", "GET");
+        assert_eq!(workers["properties"]["workers"]["items"]["properties"]["last_seen"]["format"], "date-time");
+        let worker = response_schema("/api/v1/workers/{name}", "GET");
+        assert_eq!(worker["properties"]["last_seen"]["format"], "date-time");
+        let notifications = response_schema("/api/v1/security/notifications", "GET");
+        assert_eq!(
+            notifications["properties"]["notifications"]["items"]["properties"]["created_at"]["format"],
+            "date-time"
+        );
+        let document = openapi_value();
+        for field in ["created_at", "last_used", "expires_at"] {
+            assert_eq!(document["components"]["schemas"]["TokenInfo"]["properties"][field]["format"], "date-time");
+        }
+    }
+
+    #[test]
+    fn audit_api_documents_opaque_cursor_pagination() {
+        let doc = openapi_value();
+        let operation = &doc["paths"]["/api/v1/audit"]["get"];
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["next_cursor"]["maxLength"],
+            2048
+        );
+        let parameters = operation["parameters"].as_array().unwrap();
+        assert!(parameters.iter().any(|param| param["name"] == "cursor" && param["in"] == "query"));
+        assert!(parameters.iter().any(|param| param["name"] == "limit" && param["schema"]["maximum"] == 500));
+    }
+
+    #[test]
+    fn active_session_management_is_session_only_and_documents_public_timestamps() {
+        let doc = openapi_value();
+        let list = &doc["paths"]["/api/v1/auth/sessions"]["get"];
+        let revoke = &doc["paths"]["/api/v1/auth/sessions/{id}"]["delete"];
+        assert!(list.is_object());
+        assert!(revoke.is_object());
+        assert_eq!(list["security"][0]["cookieSession"], json!([]));
+        let schema = &list["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["properties"]["sessions"]["maxItems"], 100);
+        for field in ["created_at", "last_seen", "expires_at"] {
+            assert_eq!(schema["properties"]["sessions"]["items"]["properties"][field]["format"], "date-time");
+        }
+        assert!(schema["properties"]["sessions"]["items"]["properties"]["id"]["pattern"].is_string());
+    }
+
+    #[test]
+    fn passkey_management_is_session_only_and_requires_fresh_authentication() {
+        let doc = openapi_value();
+        for method in ["patch", "delete"] {
+            let operation = &doc["paths"]["/api/v1/auth/passkeys/{id}"][method];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]}]));
+            assert_eq!(operation["x-principal-type"], "browser-session");
+            assert_eq!(operation["x-fresh-auth"]["required"], true);
+            assert_eq!(operation["x-fresh-auth"]["max_age_seconds"], 600);
+        }
+        let patch = &doc["paths"]["/api/v1/auth/passkeys/{id}"]["patch"];
+        assert_eq!(
+            patch["requestBody"]["content"]["application/json"]["schema"]["properties"]["name"]["maxLength"],
+            64
+        );
+        assert!(ROUTES.iter().any(|(path, methods, access, _)| {
+            *path == "/api/v1/auth/passkeys/{id}" && methods.contains(&"PATCH") && methods.contains(&"DELETE") && *access == Access::Session
+        }));
+        for path in ["/api/v1/auth/passkeys/step-up/start", "/api/v1/auth/passkeys/step-up/finish"] {
+            let operation = &doc["paths"][path]["post"];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]} ]));
+            assert_eq!(operation["x-principal-type"], "browser-session");
+            assert!(ROUTES
+                .iter()
+                .any(|(route, methods, access, _)| *route == path && methods.contains(&"POST") && *access == Access::Session));
+        }
+        assert_eq!(doc["paths"]["/api/v1/auth/passkeys/step-up/finish"]["post"]["x-fresh-auth"]["grants"], true);
+        assert_eq!(doc["paths"]["/api/v1/tokens"]["post"]["x-fresh-auth"]["credentials"], json!(["passkey"]));
+    }
+
+    #[test]
+    fn fresh_auth_mutations_are_cookie_only_in_the_scope_matrix() {
+        let doc = openapi_value();
+        let fresh = [
+            ("/api/v1/tokens", "post"),
+            ("/api/v1/tokens/{name}", "delete"),
+            ("/api/v1/workers", "post"),
+            ("/api/v1/workers/{name}", "delete"),
+            ("/api/v1/workers/{name}/restore", "post"),
+            ("/api/v1/missions", "post"),
+            ("/api/v1/missions/{id}/suspend-until-credits", "post"),
+            ("/api/v1/auth/passkeys/registration/start", "post"),
+            ("/api/v1/auth/passkeys/registration/finish", "post"),
+            ("/api/v1/auth/passkeys/{id}", "patch"),
+            ("/api/v1/auth/passkeys/{id}", "delete"),
+        ];
+        for (path, method) in fresh {
+            let operation = &doc["paths"][path][method];
+            assert_eq!(operation["security"], json!([{"cookieSession":[]}]), "{method} {path}");
+            assert_eq!(operation["x-principal-type"], "browser-session", "{method} {path}");
+            assert_eq!(operation["x-fresh-auth"]["required"], true, "{method} {path}");
+            assert_eq!(operation["x-fresh-auth"]["max_age_seconds"], 600, "{method} {path}");
+            assert!(
+                ROUTES.iter().any(|(route, methods, access, _)| {
+                    *route == path && methods.iter().any(|candidate| candidate.eq_ignore_ascii_case(method)) && *access == Access::Session
+                }),
+                "{method} {path} route scope must reject bearer tokens"
+            );
+        }
+        assert!(doc["paths"]["/api/v1/auth/passkeys/registration/start"]["post"]["x-fresh-auth"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|credential| credential == "passkey"));
     }
 
     #[test]
@@ -715,7 +1068,7 @@ mod tests {
         assert_eq!(schema["required"], json!(["setup_token", "username", "password"]));
         assert_eq!(schema["properties"]["setup_token"]["type"], "string");
         assert_eq!(schema["properties"]["username"]["type"], "string");
-        assert_eq!(schema["properties"]["password"]["minLength"], 12);
+        assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["additionalProperties"], false);
     }
 

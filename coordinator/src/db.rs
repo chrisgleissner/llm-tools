@@ -409,6 +409,13 @@ pub struct PasskeyCredentialRow {
     pub sign_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyRemoval {
+    Removed,
+    NotFound,
+    LastSignInMethod,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerRow {
     pub name: String,
@@ -508,6 +515,8 @@ pub struct Session {
     pub remember: bool,
     pub expires_at: i64,
     pub idle_secs: i64,
+    pub fresh_auth_until: i64,
+    pub fresh_auth_method: String,
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +600,8 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 24;
+pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -661,6 +671,32 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// Version 17: durable principal ownership for security records and reserved sender-binding
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
+const MIGRATE_V18: &str = "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE audit ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';";
+/// Version 20: per-principal TOTP verifier state and one-time Argon2id recovery-code hashes.
+const MIGRATE_V20: &str = "CREATE TABLE totp_auth(principal_id TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),last_step INTEGER NOT NULL DEFAULT -1); CREATE TABLE recovery_codes(principal_id TEXT NOT NULL, code_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(principal_id,code_hash)); CREATE INDEX recovery_codes_principal ON recovery_codes(principal_id);";
+/// Version 21: a short-lived step-up marker belongs to the rotated browser session.
+/// Version 22: passkey credentials and canonical origins are keyed by stable principal ID.
+const MIGRATE_V21: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_until INTEGER NOT NULL DEFAULT 0;";
+const MIGRATE_V22_PASSKEYS: &str = "UPDATE passkeys SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+const MIGRATE_V22_POLICY: &str = "UPDATE auth_policy SET principal_id=(SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1) WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+const MIGRATE_V22_CHALLENGES: &str = "DELETE FROM webauthn_challenges WHERE principal_id=(SELECT username FROM admin WHERE id=1);";
+/// Version 23 adds a distinct kind for session-bound passkey step-up ceremonies. The rows are
+/// short-lived, but preserve valid login/registration ceremonies across this schema upgrade.
+const MIGRATE_V23_CHALLENGES: &str = "
+DROP INDEX IF EXISTS webauthn_challenges_expiry;
+ALTER TABLE webauthn_challenges RENAME TO webauthn_challenges_old;
+CREATE TABLE webauthn_challenges(
+  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, binding TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('registration','authentication','step-up')),
+  state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  CHECK(expires_at > created_at AND expires_at <= created_at + 300));
+INSERT INTO webauthn_challenges SELECT * FROM webauthn_challenges_old;
+DROP TABLE webauthn_challenges_old;
+CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires_at);
+";
+/// Version 24 distinguishes passkey step-up from password/TOTP step-up. Existing freshness
+/// markers intentionally do not satisfy passkey-only token creation.
+const MIGRATE_V24_SESSION_AUTH_METHOD: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_method TEXT NOT NULL DEFAULT '';";
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -682,10 +718,15 @@ pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 type R<T> = rusqlite::Result<T>;
 type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String, String);
 
+fn audit_entry_hash(prev_hash: &str, ts: i64, actor: &str, action: &str, detail: &str, remote: &str, principal_id: &str) -> String {
+    let canonical = serde_json::to_string(&(prev_hash, ts, actor, action, detail, remote, principal_id)).expect("audit fields serialize");
+    crate::auth::sha256_hex(&canonical)
+}
+
 impl Db {
     offload_impl! {
     pub fn open(path: &Path) -> R<Db> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // Incremental auto-vacuum has to be chosen before the first table exists; an existing
         // database keeps its mode until `bridge-coordinator compact` (or a restore of a backup,
@@ -858,6 +899,126 @@ impl Db {
             }
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
         }
+        if version < 18 {
+            let tx = conn.transaction()?;
+            let has_audit: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit')", [], |row| {
+                row.get(0)
+            })?;
+            if has_audit {
+                tx.execute_batch(MIGRATE_V18)?;
+            } else {
+                tx.execute_batch("CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT,ts INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL,remote TEXT NOT NULL,principal_id TEXT NOT NULL DEFAULT 'system',prev_hash TEXT NOT NULL DEFAULT '',entry_hash TEXT NOT NULL DEFAULT '');")?;
+            }
+            let mut stmt = tx.prepare("SELECT id,ts,actor,action,detail,remote,principal_id FROM audit ORDER BY id")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<R<Vec<_>>>()?;
+            drop(stmt);
+            let mut previous = "0".repeat(64);
+            for (id, ts, actor, action, detail, remote, principal_id) in rows {
+                let entry_hash = audit_entry_hash(&previous, ts, &actor, &action, &detail, &remote, &principal_id);
+                tx.execute("UPDATE audit SET prev_hash=?,entry_hash=? WHERE id=?", params![previous, entry_hash, id])?;
+                previous = entry_hash;
+            }
+            tx.execute(
+                "DELETE FROM audit WHERE id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                [MAX_AUDIT_ROWS],
+            )?;
+            tx.pragma_update(None, "user_version", 18)?;
+            tx.commit()?;
+        }
+        if version < 19 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            if has_sessions {
+                let has_session_id: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='session_id')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let tx = conn.transaction()?;
+                if !has_session_id {
+                    tx.execute_batch("ALTER TABLE sessions ADD COLUMN session_id TEXT;")?;
+                    tx.execute("UPDATE sessions SET session_id=lower(hex(randomblob(16))) WHERE session_id IS NULL", [])?;
+                }
+                tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS sessions_public_id ON sessions(session_id) WHERE session_id IS NOT NULL;")?;
+                tx.pragma_update(None, "user_version", 19)?;
+                tx.commit()?;
+            } else {
+                conn.pragma_update(None, "user_version", 19)?;
+            }
+        }
+        if version < 20 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V20} PRAGMA user_version = 20; COMMIT;"))?;
+        }
+        if version < 21 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            let has_column = has_sessions
+                && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='fresh_auth_until')",
+                    [],
+                    |row| row.get(0),
+                )?;
+            let alter = if has_sessions && !has_column { MIGRATE_V21 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 21; COMMIT;"))?;
+        }
+        if version < 22 {
+            let table_exists = |name: &str| -> R<bool> {
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |row| {
+                    row.get(0)
+                })
+            };
+            let mut migration = String::new();
+            if table_exists("passkeys")? && table_exists("principals")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_PASSKEYS);
+            }
+            if table_exists("auth_policy")? && table_exists("principals")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_POLICY);
+            }
+            if table_exists("webauthn_challenges")? && table_exists("admin")? {
+                migration.push_str(MIGRATE_V22_CHALLENGES);
+            }
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 22; COMMIT;"))?;
+        }
+        if version < 23 {
+            let has_challenges: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='webauthn_challenges')",
+                [],
+                |row| row.get(0),
+            )?;
+            let migration = if has_challenges { MIGRATE_V23_CHALLENGES } else { "" };
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 23; COMMIT;"))?;
+        }
+        if version < 24 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            let has_auth_method = has_sessions
+                && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='fresh_auth_method')",
+                    [],
+                    |row| row.get(0),
+                )?;
+            let migration = if has_sessions && !has_auth_method {
+                MIGRATE_V24_SESSION_AUTH_METHOD
+            } else {
+                ""
+            };
+            conn.execute_batch(&format!("BEGIN; {migration} PRAGMA user_version = 24; COMMIT;"))?;
+        }
         conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -947,7 +1108,7 @@ impl Db {
         if id.is_empty()
             || row.principal_id.is_empty()
             || row.binding.is_empty()
-            || !matches!(row.kind.as_str(), "registration" | "authentication")
+            || !matches!(row.kind.as_str(), "registration" | "authentication" | "step-up")
             || row.expires_at <= now
             || row.expires_at > now + 300
         {
@@ -1083,6 +1244,42 @@ impl Db {
         )? == 1)
     }
 
+    /// Rename or remove a credential only when it belongs to the supplied principal.
+    pub fn passkey_rename(&self, principal: &str, credential_id: &str, name: &str) -> R<bool> {
+        Ok(self.c()?.execute(
+            "UPDATE passkeys SET user_name=? WHERE principal_id=? AND credential_id=?",
+            params![name, principal, credential_id],
+        )? == 1)
+    }
+
+    pub fn passkey_remove_with_policy(&self, principal: &str, credential_id: &str, protect_last: bool) -> R<PasskeyRemoval> {
+        let mut c = self.c()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM passkeys WHERE principal_id=?1 AND credential_id=?2)",
+            params![principal, credential_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(PasskeyRemoval::NotFound);
+        }
+        if protect_last {
+            let totp_enabled: Option<i64> = tx
+                .query_row("SELECT enabled FROM totp_auth WHERE principal_id=?1", [principal], |row| row.get(0))
+                .optional()?;
+            let count: i64 = tx.query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?1", [principal], |row| row.get(0))?;
+            if totp_enabled.unwrap_or(0) == 0 && count <= 1 {
+                return Ok(PasskeyRemoval::LastSignInMethod);
+            }
+        }
+        tx.execute(
+            "DELETE FROM passkeys WHERE principal_id=?1 AND credential_id=?2",
+            params![principal, credential_id],
+        )?;
+        tx.commit()?;
+        Ok(PasskeyRemoval::Removed)
+    }
+
     /// Bind the first passkey to the canonical origin. A caller cannot silently move an existing
     /// principal's credentials to a different RP ID; explicit re-enrolment must clear them first.
     pub fn passkey_origin_bind(&self, principal: &str, origin: &str) -> R<bool> {
@@ -1128,6 +1325,89 @@ impl Db {
             .query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?", [principal], |r| r.get(0))
     }
 
+    pub fn totp_get(&self, principal: &str) -> R<Option<(String, bool, i64)>> {
+        self.c()?
+            .query_row("SELECT secret,enabled,last_step FROM totp_auth WHERE principal_id=?", [principal], |r| {
+                Ok((r.get(0)?, r.get::<_, bool>(1)?, r.get(2)?))
+            })
+            .optional()
+    }
+
+    pub fn totp_step_consume(&self, principal: &str, step: i64) -> R<bool> {
+        Ok(self.c()?.execute(
+            "UPDATE totp_auth SET last_step=? WHERE principal_id=? AND enabled=1 AND last_step<?",
+            params![step, principal, step],
+        )? == 1)
+    }
+
+    pub fn totp_pending_set(&self, principal: &str, secret: &str) -> R<()> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT INTO totp_auth(principal_id,secret,enabled) VALUES(?,?,0) ON CONFLICT(principal_id) DO UPDATE SET secret=excluded.secret,enabled=0",
+            params![principal, secret],
+        )?;
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        tx.commit()
+    }
+
+    pub fn totp_enable_with_recovery_codes(&self, principal: &str, hashes: &[String], step: i64) -> R<()> {
+        if hashes.is_empty() || hashes.len() > 20 {
+            return Err(rusqlite::Error::InvalidParameterName("invalid recovery-code set".into()));
+        }
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        let changed = tx.execute(
+            "UPDATE totp_auth SET enabled=1,last_step=? WHERE principal_id=? AND enabled=0 AND last_step<?",
+            params![step, principal, step],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidParameterName("no pending TOTP enrollment".into()));
+        }
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        for hash in hashes {
+            tx.execute(
+                "INSERT INTO recovery_codes(principal_id,code_hash,created_at) VALUES(?,?,?)",
+                params![principal, hash, crate::now()],
+            )?;
+        }
+        tx.commit()
+    }
+
+    pub fn recovery_code_hashes(&self, principal: &str) -> R<Vec<String>> {
+        let c = self.c()?;
+        let mut stmt = c.prepare("SELECT code_hash FROM recovery_codes WHERE principal_id=? ORDER BY code_hash")?;
+        let rows = stmt.query_map([principal], |r| r.get(0))?.collect();
+        rows
+    }
+
+    pub fn recovery_code_consume(&self, principal: &str, hash: &str) -> R<bool> {
+        Ok(self
+            .c()?
+            .execute("DELETE FROM recovery_codes WHERE principal_id=? AND code_hash=?", params![principal, hash])?
+            == 1)
+    }
+
+    pub fn totp_disable(&self, principal: &str) -> R<()> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM totp_auth WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [principal])?;
+        tx.commit()
+    }
+
+    /// Local operator recovery: delete credentials, challenges, origin binding and sessions atomically.
+    pub fn admin_reset_passkeys(&self, principal: &str) -> R<usize> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        let removed = tx.execute("DELETE FROM passkeys WHERE principal_id=?", [principal])?;
+        tx.execute("UPDATE auth_policy SET passkey_origin=NULL WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM webauthn_challenges WHERE principal_id=?", [principal])?;
+        tx.execute("DELETE FROM sessions", [])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     // ---- admin ----
     pub fn admin_get(&self) -> R<Option<(String, String)>> {
         self.r()?
@@ -1169,10 +1449,25 @@ impl Db {
     /// Set the password and delete every session in one transaction. Unless `keep_api_tokens`,
     /// every API token is revoked in the same transaction; returns how many were revoked.
     pub fn admin_set_password(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
+        self.admin_set_password_inner(hash, keep_api_tokens, false)
+    }
+
+    /// Local shell recovery also clears TOTP and recovery codes so a lost authenticator cannot
+    /// permanently lock out the administrator. Normal browser password changes preserve MFA.
+    pub fn admin_reset_password_local(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
+        self.admin_set_password_inner(hash, keep_api_tokens, true)
+    }
+
+    fn admin_set_password_inner(&self, hash: &str, keep_api_tokens: bool, clear_mfa: bool) -> R<usize> {
+        let principal = self.admin_principal_id()?.unwrap_or_else(|| "admin".into());
         let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
+        if clear_mfa {
+            tx.execute("DELETE FROM totp_auth WHERE principal_id=?", [&principal])?;
+            tx.execute("DELETE FROM recovery_codes WHERE principal_id=?", [&principal])?;
+        }
         let revoked = if keep_api_tokens { 0 } else { tx.execute("DELETE FROM api_tokens", [])? };
         // A new password ends a host reset (admin_reset.rs): no more change-required flag or notice.
         tx.execute("DELETE FROM meta WHERE key IN ('password_change_required', 'password_reset_at')", [])?;
@@ -1191,25 +1486,86 @@ impl Db {
     pub fn session_create_for(&self, principal_id: &str, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
         let now = crate::now();
         let (_, absolute) = session_policy(remember);
+        let session_id = crate::auth::random_token();
         self.c()?.execute(
-            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id) VALUES(?,?,?,?,?,?,?)",
-            params![token_hash, csrf, now, now, now + absolute, remember, principal_id],
+            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id,session_id,fresh_auth_until) VALUES(?,?,?,?,?,?,?,?,0)",
+            params![token_hash, csrf, now, now, now + absolute, remember, principal_id, session_id],
         )?;
         Ok(())
     }
-    pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
+    /// Rotate a session's bearer secret, CSRF token, and public ID while marking fresh
+    /// authentication for a bounded interval. The previous credentials stop working atomically.
+    pub fn session_step_up_rotate(&self, principal_id: &str, old_hash: &str, new_hash: &str, csrf: &str, fresh_until: i64, auth_method: &str) -> R<bool> {
+        let session_id = crate::auth::random_token();
+        let changed = self.c()?.execute(
+            "UPDATE sessions SET token_hash=?1,csrf=?2,session_id=?3,fresh_auth_until=?4,fresh_auth_method=?5
+             WHERE principal_id=?6 AND token_hash=?7 AND expires_at>?8",
+            params![new_hash, csrf, session_id, fresh_until, auth_method, principal_id, old_hash, crate::now()],
+        )?;
+        Ok(changed == 1)
+    }
+    pub fn session_is_freshly_authenticated(&self, token_hash: &str) -> R<bool> {
+        let until = self
+            .c()?
+            .query_row("SELECT fresh_auth_until FROM sessions WHERE token_hash=?1", [token_hash], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+        Ok(until.is_some_and(|until| until > crate::now()))
+    }
+    pub fn session_list_for(&self, principal_id: &str, current_token_hash: &str) -> R<Vec<Value>> {
         let now = crate::now();
-        // The lookup reads from a read-only connection; the writer connection is used only for the
-        // delete of an expired session and for the occasional last-seen update.
-        let row: Option<(String, i64, i64, bool, String)> = self
-            .r()?
+        let (idle_secs, _) = session_policy(true);
+        let (short_idle_secs, _) = session_policy(false);
+        let c = self.c()?;
+        let mut stmt = c.prepare(
+            "SELECT session_id,created_at,last_seen,expires_at,remember,token_hash=?2 FROM sessions
+             WHERE principal_id=?1 AND expires_at>?3 AND
+               ((remember=1 AND last_seen>?4) OR (remember=0 AND last_seen>?5))
+             ORDER BY last_seen DESC,session_id LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![principal_id, current_token_hash, now, now - idle_secs, now - short_idle_secs], |row| {
+            Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                "created_at": row.get::<_, i64>(1)?,
+                "last_seen": row.get::<_, i64>(2)?,
+                "expires_at": row.get::<_, i64>(3)?,
+                "remember": row.get::<_, i64>(4)? != 0,
+                "current": row.get::<_, bool>(5)?,
+            }))
+        })?;
+        rows.collect()
+    }
+    pub fn session_revoke_for(&self, principal_id: &str, session_id: &str) -> R<Option<String>> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        let token_hash = tx
             .query_row(
-                "SELECT csrf, last_seen, expires_at, remember,principal_id FROM sessions WHERE token_hash=?",
-                params![token_hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?)),
+                "SELECT token_hash FROM sessions WHERE principal_id=?1 AND session_id=?2",
+                params![principal_id, session_id],
+                |row| row.get(0),
             )
             .optional()?;
-        let Some((csrf, last_seen, expires_at, remember, principal_id)) = row else {
+        if token_hash.is_some() {
+            tx.execute(
+                "DELETE FROM sessions WHERE principal_id=?1 AND session_id=?2",
+                params![principal_id, session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(token_hash)
+    }
+    pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
+        let now = crate::now();
+        // Read from the read-only connection; the writer is used only to delete an expired session
+        // and update last-seen when the touch interval has elapsed.
+        let row: Option<(String, i64, i64, bool, String, i64, String)> = self.r()?.query_row(
+                "SELECT csrf, last_seen, expires_at, remember,principal_id,fresh_auth_until,fresh_auth_method FROM sessions WHERE token_hash=?",
+                params![token_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+            .optional()?;
+        let Some((csrf, last_seen, expires_at, remember, principal_id, fresh_auth_until, fresh_auth_method)) = row else {
             return Ok(None);
         };
         let (idle_secs, _) = session_policy(remember);
@@ -1227,6 +1583,8 @@ impl Db {
             remember,
             expires_at,
             idle_secs,
+            fresh_auth_until,
+            fresh_auth_method,
         }))
     }
     pub fn session_delete(&self, token_hash: &str) -> R<()> {
@@ -2053,24 +2411,77 @@ impl Db {
     }
 
     pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
-        self.c()?.execute(
-            "INSERT INTO audit(ts, actor, action, detail, remote,principal_id) VALUES(?,?,?,?,?,COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END))",
-            params![crate::now(), actor, action, detail, remote, actor, actor, actor, actor],
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        let principal_id: String = tx.query_row(
+            "SELECT COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END)",
+            params![actor, actor, actor, actor],
+            |row| row.get(0),
         )?;
+        let previous: Option<String> = tx
+            .query_row("SELECT entry_hash FROM audit ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+            .optional()?;
+        let previous = previous.unwrap_or_else(|| "0".repeat(64));
+        let ts = crate::now();
+        let entry_hash = audit_entry_hash(&previous, ts, actor, action, detail, remote, &principal_id);
+        tx.execute(
+            "INSERT INTO audit(ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)",
+            params![ts, actor, action, detail, remote, principal_id, previous, entry_hash],
+        )?;
+        tx.execute(
+            "DELETE FROM audit WHERE id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?)",
+            [MAX_AUDIT_ROWS],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
+        self.audit_list_page(limit.clamp(1, 500), 0)
+    }
+    pub fn audit_list_page(&self, limit: i64, offset: i64) -> R<Vec<Value>> {
         let c = self.r()?;
-        let mut st = c.prepare("SELECT ts, actor, action, detail, remote FROM audit ORDER BY id DESC LIMIT ?")?;
+        let limit = limit.clamp(1, 501);
+        let offset = offset.clamp(0, MAX_AUDIT_ROWS);
+        let mut st = c.prepare("SELECT id,ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id DESC LIMIT ? OFFSET ?")?;
         let rows = st
-            .query_map(params![limit], |r| {
+            .query_map(params![limit, offset], |r| {
                 Ok(
-                    json!({"ts": r.get::<_, i64>(0)?, "actor": r.get::<_, String>(1)?, "action": r.get::<_, String>(2)?,
-            "detail": r.get::<_, String>(3)?, "remote": r.get::<_, String>(4)?}),
+                    json!({"id":r.get::<_,i64>(0)?,"ts":r.get::<_,i64>(1)?,"actor":r.get::<_,String>(2)?,"action":r.get::<_,String>(3)?,
+            "detail":r.get::<_,String>(4)?,"remote":r.get::<_,String>(5)?,"principal_id":r.get::<_,String>(6)?,"prev_hash":r.get::<_,String>(7)?,"entry_hash":r.get::<_,String>(8)?}),
                 )
             })?
             .collect();
         rows
+    }
+
+    pub fn audit_chain_valid(&self) -> R<bool> {
+        let c = self.r()?;
+        let mut st = c.prepare("SELECT ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id")?;
+        let rows = st.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut expected_previous: Option<String> = None;
+        for row in rows {
+            let (ts, actor, action, detail, remote, principal_id, previous, stored) = row?;
+            if expected_previous.as_ref().is_some_and(|expected| expected != &previous) {
+                return Ok(false);
+            }
+            let actual = audit_entry_hash(&previous, ts, &actor, &action, &detail, &remote, &principal_id);
+            if actual != stored {
+                return Ok(false);
+            }
+            expected_previous = Some(stored);
+        }
+        Ok(true)
     }
 
     /// Run `sql` (which must take `?1` = a cut-off and `?2` = the batch size) until a pass touches fewer
@@ -2379,6 +2790,118 @@ mod batch_write_cost {
         f.batch(10, 100, None);
         f.batch(10, 100, None);
         assert_eq!(f.stored().len(), 20, "a new worker of the same name starts from an empty count");
+    }
+}
+
+#[cfg(test)]
+mod passkey_removal_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
+
+    fn test_db_dir(timestamp: i64, sequence: u64) -> PathBuf {
+        std::env::temp_dir().join(format!("bridge-passkey-removal-{}-{timestamp}-{sequence}", std::process::id()))
+    }
+
+    fn unique_test_db_dir(timestamp: i64) -> PathBuf {
+        let sequence = NEXT_TEST_DB.fetch_add(1, Ordering::Relaxed);
+        test_db_dir(timestamp, sequence)
+    }
+
+    fn db() -> (Db, PathBuf) {
+        let dir = unique_test_db_dir(crate::now());
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("state.sqlite3")).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn test_database_directories_are_unique_within_the_same_second() {
+        assert_ne!(unique_test_db_dir(1_800_000_000), unique_test_db_dir(1_800_000_000));
+    }
+
+    fn credential(id: &str) -> PasskeyCredentialRow {
+        PasskeyCredentialRow {
+            credential_id: id.into(),
+            principal_id: "admin".into(),
+            credential: "{}".into(),
+            user_name: "Passkey".into(),
+            created_at: 1,
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        }
+    }
+
+    #[test]
+    fn policy_protected_removal_is_atomic_and_preserves_a_sign_in_method() {
+        let (db, dir) = db();
+        db.passkey_put(&credential("first")).unwrap();
+        db.passkey_put(&credential("second")).unwrap();
+
+        assert_eq!(db.passkey_remove_with_policy("admin", "first", true).unwrap(), PasskeyRemoval::Removed);
+        assert_eq!(
+            db.passkey_remove_with_policy("admin", "second", true).unwrap(),
+            PasskeyRemoval::LastSignInMethod
+        );
+        assert_eq!(db.passkey_count("admin").unwrap(), 1);
+
+        db.totp_pending_set("admin", "secret").unwrap();
+        db.totp_enable_with_recovery_codes("admin", &["recovery-hash".into()], 100).unwrap();
+        assert_eq!(db.passkey_remove_with_policy("admin", "second", true).unwrap(), PasskeyRemoval::Removed);
+        assert_eq!(db.passkey_count("admin").unwrap(), 0);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unprotected_local_removal_and_missing_credentials_are_distinguished() {
+        let (db, dir) = db();
+        db.passkey_put(&credential("only")).unwrap();
+        assert_eq!(db.passkey_remove_with_policy("admin", "unknown", true).unwrap(), PasskeyRemoval::NotFound);
+        assert_eq!(db.passkey_remove_with_policy("admin", "only", false).unwrap(), PasskeyRemoval::Removed);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_protected_removals_cannot_delete_the_last_two_credentials() {
+        use std::sync::{Arc, Barrier};
+
+        let (db, dir) = db();
+        db.passkey_put(&credential("first")).unwrap();
+        db.passkey_put(&credential("second")).unwrap();
+        let path = dir.join("state.sqlite3");
+        let other = Db::open(&path).unwrap();
+        let db = Arc::new(db);
+        let other = Arc::new(other);
+        let barrier = Arc::new(Barrier::new(3));
+        let first = {
+            let (db, barrier) = (db.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                db.passkey_remove_with_policy("admin", "first", true).unwrap()
+            })
+        };
+        let second = {
+            let (db, barrier) = (other.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                db.passkey_remove_with_policy("admin", "second", true).unwrap()
+            })
+        };
+        barrier.wait();
+        let outcomes = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| **result == PasskeyRemoval::Removed).count(), 1);
+        assert_eq!(outcomes.iter().filter(|result| **result == PasskeyRemoval::LastSignInMethod).count(), 1);
+        assert_eq!(db.passkey_count("admin").unwrap(), 1);
+        drop(other);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

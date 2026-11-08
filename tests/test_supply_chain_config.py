@@ -38,10 +38,29 @@ def test_container_release_emits_sbom_signature_and_provenance() -> None:
     workflow = (ROOT / ".github" / "workflows" / "container-release.yml").read_text()
     assert '      - "*.*.*"' in workflow
     assert "container/build.sh --push" in workflow
-    assert "cosign sign --yes" in workflow
+    assert "cosign sign --yes \"$IMAGE@$DIGEST\"" in workflow
+    assert "packages: write" in workflow
+    assert "id-token: write" in workflow
+    assert "attestations: write" in workflow
     assert "actions/attest-build-provenance@" in workflow
-    assert "cyclonedx-json=container.cdx.json" in workflow
-    assert "coordinator-container-cyclonedx" in workflow
+    assert "subject-name: ${{ steps.build.outputs.image }}" in workflow
+    assert "subject-digest: ${{ steps.build.outputs.digest }}" in workflow
+    assert "push-to-registry: true" in workflow
+    assert '"$RUNNER_TEMP/syft $IMAGE@$DIGEST -o cyclonedx-json=container.cdx.json"' in workflow
+    assert "sha256sum --check" in workflow
+    assert "coordinator-container-cyclonedx-${{ github.ref_name }}" in workflow
+    assert "if-no-files-found: error" in workflow
+
+
+def test_install_document_verifies_the_same_digest_and_expected_release_workflow() -> None:
+    install = (ROOT / "docs" / "distributed" / "install.md").read_text()
+    assert 'cosign verify "$IMAGE@sha256:DIGEST"' in install
+    assert "container-release.yml@refs/tags/.*" in install
+    assert "--certificate-oidc-issuer=https://token.actions.githubusercontent.com" in install
+    assert 'gh attestation verify "oci://$IMAGE@sha256:DIGEST"' in install
+    assert "--signer-workflow OWNER/REPO/.github/workflows/container-release.yml" in install
+    assert "gh run download RUN_ID -n coordinator-container-cyclonedx-VERSION" in install
+    assert "release job generates it from the immutable image digest" in install
 
 
 def test_release_workflow_tag_filter_matches_plain_semver_tags() -> None:
@@ -100,10 +119,21 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
         assert f"-J {report}" in workflow or f"-r {report}" in workflow
     assert "/zap/wrk/zap-console-report" not in workflow
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
-    assert "--severity CRITICAL" in workflow
+    assert "--severity MEDIUM" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow
+    assert "SERVER_CERT_VALID_DAYS: i64 = 365" in (ROOT / "coordinator" / "src" / "certs.rs").read_text()
+    assert "internal_server_certificate_validity_stays_below_398_days" in (
+        ROOT / "coordinator" / "tests" / "certs.rs"
+    ).read_text()
+    assert "openssl ca -batch -config \"$pki/openssl.cnf\" -gencrl" in workflow
+    assert "crlDistributionPoints = URI:http://127.0.0.1:18444/ca.crl" in workflow
+    assert "tls_cert_file =" in workflow and "tls_key_file =" in workflow
+    assert 'python -m http.server 18444 --bind 127.0.0.1 --directory "$pki"' in workflow
+    assert 'if [ "$crl_server_ready" -ne 1 ]; then' in workflow
+    assert "The local CA-signed CRL endpoint did not become ready" in workflow
     assert 'mutation_limit_per_token = 10000' in workflow
     assert 'mutation_limit_per_address = 10000' in workflow
+    assert 'mutation_limit_global = 10000' in workflow
 
 
 def test_openapi_json_depth_schema_stays_within_scanner_budget() -> None:

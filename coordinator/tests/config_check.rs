@@ -22,7 +22,7 @@ const STRICT: CheckOptions = CheckOptions {
 
 const ALL_KEYS: &str = "bind, exposure, lan_enabled, listener_groups, worker_mtls, tls_terminator, security_webhook_url, trusted_proxies, public_origin, max_token_lifetime_days, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
 max_connections, max_connections_per_ip, worker_reserve_connections, request_body_timeout_secs, http_idle_timeout_secs, ws_ping_interval_secs, \
-ws_idle_timeout_secs, mutation_limit_per_token, mutation_limit_per_address";
+ws_idle_timeout_secs, mutation_limit_per_token, mutation_limit_per_address, mutation_limit_global";
 
 const ROWS: &[Row] = &[
     Row {

@@ -723,13 +723,16 @@ IMAGE=ghcr.io/OWNER/REPO/coordinator
 cosign verify "$IMAGE@sha256:DIGEST" \
   --certificate-identity-regexp="https://github.com/OWNER/REPO/.github/workflows/container-release.yml@refs/tags/.*" \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com
-gh attestation verify "oci://$IMAGE:VERSION" --repo OWNER/REPO
+gh attestation verify "oci://$IMAGE@sha256:DIGEST" \
+  --repo OWNER/REPO \
+  --signer-workflow OWNER/REPO/.github/workflows/container-release.yml
 gh run download RUN_ID -n coordinator-container-cyclonedx-VERSION
 ```
 
 The first command checks the signature for the exact digest and the expected release
-workflow identity. The second verifies GitHub's provenance attestation; download the
-SBOM artifact from the same release workflow run.
+workflow identity. The second verifies GitHub's provenance for that same digest and
+requires the release workflow as signer. Download the SBOM artifact from the same
+release workflow run; the release job generates it from the immutable image digest.
 
 Verification commands for the deployed container:
 

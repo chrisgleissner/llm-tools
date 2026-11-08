@@ -12,7 +12,7 @@ use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use base64::Engine;
 use serde_json::{json, Map, Value};
@@ -76,20 +76,25 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     retry_after: Option<u64>,
+    correlation_id: Option<String>,
 }
 
 pub fn err(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
+    let correlation_id = status.is_server_error().then(auth::random_token);
+    if let Some(id) = &correlation_id {
+        eprintln!("coordinator internal error correlation_id={id}");
+    }
     ApiError {
         status,
         code,
         message: message.into(),
         retry_after: None,
+        correlation_id,
     }
 }
 
 impl From<rusqlite::Error> for ApiError {
     fn from(e: rusqlite::Error) -> Self {
-        eprintln!("database error: {e}");
         if crate::db::is_busy(&e) {
             let mut busy = err(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -99,6 +104,8 @@ impl From<rusqlite::Error> for ApiError {
             busy.retry_after = Some(2);
             return busy;
         }
+        // `err` emits only a correlation ID. SQLite error values can include paths or query
+        // details, so keep them out of logs and the public problem response.
         err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
 }
@@ -106,18 +113,26 @@ impl From<rusqlite::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status;
-        let mut r = (
-            status,
-            axum::Json(json!({
-                "type": format!("https://llm-tools.dev/problems/{}", self.code),
-                "title": "Coordinator request failed",
-                "status": status.as_u16(),
-                "detail": self.message,
-                "code": self.code,
-                "error": {"code": self.code, "message": self.message}
-            })),
-        )
-            .into_response();
+        let is_internal = status.is_server_error();
+        let code = if is_internal { "internal" } else { self.code };
+        let message = if is_internal { "internal server error" } else { &self.message };
+        let mut problem = json!({
+            "type": format!("https://llm-tools.dev/problems/{code}"),
+            "title": "Coordinator request failed",
+            "status": status.as_u16(),
+            "detail": message,
+            "code": code,
+            "error": {"code": code, "message": message}
+        });
+        if let Some(id) = &self.correlation_id {
+            problem["correlation_id"] = json!(id);
+        }
+        let mut r = (status, axum::Json(problem)).into_response();
+        if let Some(id) = self.correlation_id {
+            if let Ok(value) = id.parse::<header::HeaderValue>() {
+                r.headers_mut().insert("x-correlation-id", value);
+            }
+        }
         r.headers_mut()
             .insert(header::CONTENT_TYPE, "application/problem+json".parse().expect("static content type"));
         if let Some(s) = self.retry_after {
@@ -133,8 +148,40 @@ impl IntoResponse for ApiError {
 
 type ApiResult = Result<Response, ApiError>;
 
-fn json_ok(status: StatusCode, v: Value) -> Response {
+fn json_ok(status: StatusCode, mut v: Value) -> Response {
+    normalize_api_timestamps(&mut v);
     (status, axum::Json(v)).into_response()
+}
+
+/// Persisted times are Unix seconds, but timestamps crossing the public JSON API use RFC 3339 UTC.
+/// The field-name allowlist also normalizes timestamps inside worker-provided resource projections.
+fn normalize_api_timestamps(value: &mut Value) {
+    const FIELDS: &[&str] = &[
+        "created_at",
+        "updated_at",
+        "last_seen",
+        "expires_at",
+        "last_used",
+        "last_used_at",
+        "occurred_at",
+        "timestamp",
+        "ts",
+    ];
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if FIELDS.contains(&name.as_str()) {
+                    if let Some(epoch) = value.as_i64() {
+                        *value = json!(timestamp(Some(epoch)));
+                    }
+                } else {
+                    normalize_api_timestamps(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_api_timestamps),
+        _ => {}
+    }
 }
 
 fn unauthorized() -> ApiError {
@@ -294,6 +341,8 @@ pub enum Principal {
         remember: bool,
         expires_at: i64,
         idle_secs: i64,
+        fresh_auth_until: i64,
+        fresh_auth_method: String,
     },
     Token {
         name: String,
@@ -355,6 +404,8 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
             remember: s.remember,
             expires_at: s.expires_at,
             idle_secs: s.idle_secs,
+            fresh_auth_until: s.fresh_auth_until,
+            fresh_auth_method: s.fresh_auth_method,
         }),
         None => Err(unauthorized()),
     }
@@ -593,6 +644,7 @@ impl FromRequestParts<St> for Authed {
                 let keys = [
                     (format!("token:{name}"), st.cfg.mutation_limit_per_token),
                     (format!("address:{address_key}"), st.cfg.mutation_limit_per_address),
+                    (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), st.cfg.mutation_limit_global),
                 ];
                 if let Some(retry_after) = st.mutation_limiter.check(&keys) {
                     let mut error = err(
@@ -632,6 +684,50 @@ async fn verify_blocking(st: &AppState, password: String, phc: String) -> bool {
         .expect("verify task")
 }
 
+async fn hash_recovery_blocking(st: &AppState, code: String) -> String {
+    let _slot = st.argon_slots.acquire().await.expect("semaphore open");
+    tokio::task::spawn_blocking(move || auth::hash_recovery_code(&code)).await.expect("hash task")
+}
+
+async fn verify_recovery_blocking(st: &AppState, code: String, phc: String) -> bool {
+    let _slot = st.argon_slots.acquire().await.expect("semaphore open");
+    tokio::task::spawn_blocking(move || auth::verify_recovery_code(&code, &phc))
+        .await
+        .expect("verify task")
+}
+
+fn fresh_session_step_up(principal: &Principal) -> Result<(), ApiError> {
+    match principal {
+        Principal::Session { fresh_auth_until, .. } if *fresh_auth_until > crate::now() => Ok(()),
+        _ => Err(err(
+            StatusCode::FORBIDDEN,
+            "step-up-required",
+            "verify your credentials again before this sensitive action",
+        )),
+    }
+}
+
+fn fresh_passkey_step_up(principal: &Principal) -> Result<(), ApiError> {
+    match principal {
+        Principal::Session {
+            fresh_auth_until,
+            fresh_auth_method,
+            ..
+        } if *fresh_auth_until > crate::now() && fresh_auth_method == "passkey" => Ok(()),
+        _ => Err(err(
+            StatusCode::FORBIDDEN,
+            "passkey-step-up-required",
+            "creating an API token requires a fresh passkey assertion",
+        )),
+    }
+}
+
+/// These browser-account mutations cannot be delegated through a bearer token: step-up is
+/// session-bound, and possession of an admin token is not fresh human authentication.
+fn require_fresh_browser_session(principal: &Principal) -> Result<(), ApiError> {
+    fresh_session_step_up(principal)
+}
+
 /// `max_age: None` makes a browser-session cookie (no `Max-Age`): the browser drops it on exit.
 fn session_cookie(value: &str, max_age: Option<u64>) -> String {
     let age = max_age.map(|a| format!("; Max-Age={a}")).unwrap_or_default();
@@ -663,10 +759,11 @@ async fn healthz() -> Response {
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote) -> ApiResult {
     let admin = st.db.admin_get()?;
+    let principal_id = st.db.admin_principal_id()?;
     let setup_required = admin.is_none();
     let configured_origin = match (st.cfg.public_origin.clone(), admin.as_ref()) {
         (Some(origin), _) => Some(origin),
-        (None, Some((username, _))) => st.db.passkey_origin(username)?,
+        (None, Some(_)) => principal_id.as_deref().map(|id| st.db.passkey_origin(id)).transpose()?.flatten(),
         (None, None) => None,
     };
     let request_origin = headers
@@ -675,11 +772,11 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
         .map(str::to_owned)
         .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|host| format!("https://{host}")))
         .and_then(|origin| crate::passkeys::canonical_origin(&origin).ok());
-    let passkey_sign_in_available = if let Some((username, _)) = &admin {
+    let passkey_sign_in_available = if admin.is_some() {
         configured_origin.is_some()
             && configured_origin == request_origin
             && crate::passkeys::verifier(request_origin.as_deref().unwrap_or_default()).is_ok()
-            && st.db.passkey_count(username)? > 0
+            && principal_id.as_deref().map(|id| st.db.passkey_count(id)).transpose()?.unwrap_or(0) > 0
     } else {
         false
     };
@@ -842,16 +939,30 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         }
     };
     let parsed = parse_body(&body.bytes).and_then(|m| {
-        no_extra(&m, &["username", "password", "remember"])?;
+        no_extra(&m, &["username", "password", "remember", "totp_code", "recovery_code"])?;
         let remember = match m.get("remember") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
             _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "remember must be true or false")),
         };
-        Ok((str_field(&m, "username")?.to_string(), str_field(&m, "password")?.to_string(), remember))
+        let totp = m.get("totp_code").and_then(Value::as_str).map(str::to_owned);
+        let recovery = m.get("recovery_code").and_then(Value::as_str).map(str::to_owned);
+        if totp.is_some() && recovery.is_some() {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "provide one MFA code"));
+        }
+        if totp.as_ref().is_some_and(|v| v.len() > 16) || recovery.as_ref().is_some_and(|v| v.len() > 64) {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "MFA code is too long"));
+        }
+        Ok((
+            str_field(&m, "username")?.to_string(),
+            str_field(&m, "password")?.to_string(),
+            remember,
+            totp,
+            recovery,
+        ))
     });
     drop(body);
-    let (username, password, remember) = match parsed {
+    let (username, password, remember, totp_code, recovery_code) = match parsed {
         Ok(c) => c,
         Err(e) => {
             attempt.release();
@@ -880,6 +991,51 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         st.db.audit(&clean(&username), "login.failure", "invalid credentials", &ip);
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
     }
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let totp = st.db.totp_get(&principal)?;
+    let totp_enabled = totp.as_ref().is_some_and(|(_, enabled, _)| *enabled);
+    if password_login_blocked(st.cfg.exposure, totp_enabled) {
+        attempt.fail();
+        st.db
+            .audit(&clean(&username), "login.failure", "Internet exposure requires TOTP for password sign-in", &ip);
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "invalid-credentials",
+            "password sign-in requires a second factor in Internet mode; use a passkey or enable TOTP",
+        ));
+    }
+    let mut used_recovery_code = false;
+    if let Some((secret, enabled, _)) = totp {
+        if enabled {
+            let mut mfa_ok = false;
+            if let Some(code) = totp_code.as_deref() {
+                if let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) {
+                    mfa_ok = st.db.totp_step_consume(&principal, step)?;
+                }
+            } else if let Some(code) = recovery_code.as_deref() {
+                let hashes = st.db.recovery_code_hashes(&principal)?;
+                let mut matched = None;
+                // Check the whole bounded set so the matching code's position is not exposed.
+                for hash in hashes {
+                    if verify_recovery_blocking(&st, code.to_string(), hash.clone()).await && matched.is_none() {
+                        matched = Some(hash);
+                    }
+                }
+                if let Some(hash) = matched {
+                    mfa_ok = st.db.recovery_code_consume(&principal, &hash)?;
+                    used_recovery_code = mfa_ok;
+                }
+            }
+            if !mfa_ok {
+                attempt.fail();
+                st.db.audit(&clean(&username), "login.failure", "invalid credentials", &ip);
+                return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
+            }
+        }
+    } else if totp_code.is_some() || recovery_code.is_some() {
+        attempt.fail();
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
+    }
     attempt.succeed();
     st.db.known_addr_remember(&addr)?;
     if !known_addr {
@@ -887,13 +1043,12 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     }
     remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_for(
-        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
-        &auth::sha256_hex(&token),
-        &csrf,
-        remember,
-    )?;
-    st.db.audit(&username, "login.success", "", &ip);
+    st.db.session_create_for(&principal, &auth::sha256_hex(&token), &csrf, remember)?;
+    st.db
+        .audit(&username, "login.success", if used_recovery_code { "recovery code" } else { "" }, &ip);
+    if used_recovery_code {
+        security_notification(&st, &principal, "recovery_code_used");
+    }
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
         header::SET_COOKIE,
@@ -902,6 +1057,122 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
             .expect("cookie"),
     );
     Ok(r)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepUpBody {
+    password: String,
+    #[serde(default)]
+    totp_code: Option<String>,
+    #[serde(default)]
+    recovery_code: Option<String>,
+}
+
+/// Reauthenticate and atomically rotate the current browser session. The replacement
+/// cookie, CSRF token, and public session ID are new; the fresh marker lasts ten minutes.
+async fn step_up(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let Principal::Session {
+        principal_id,
+        token_hash: old_hash,
+        remember,
+        ..
+    } = p
+    else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "step-up requires a browser session"));
+    };
+    let parsed = parse_body(&body.bytes)?;
+    let body: StepUpBody = serde_json::from_value(Value::Object(parsed))
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "password is required; provide at most one MFA code"))?;
+    if body.password.len() > auth::MAX_PASSWORD_LEN
+        || body.totp_code.as_ref().is_some_and(|code| code.len() > 16)
+        || body.recovery_code.as_ref().is_some_and(|code| code.len() > 64)
+        || (body.totp_code.is_some() && body.recovery_code.is_some())
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "credential input is invalid"));
+    }
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref().unwrap_or("admin") != principal_id {
+        return Err(unauthorized());
+    }
+    let attempt = st
+        .limiter
+        .acquire(&["step-up".to_string(), format!("user:{}", clean(&username.to_lowercase()))], true)
+        .map_err(limited)?;
+    if !verify_blocking(&st, body.password, password_hash).await {
+        attempt.fail();
+        st.db.audit(&username, "step-up.failure", "password verification failed", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+    }
+    let totp = st.db.totp_get(&principal_id)?;
+    let totp_enabled = totp.as_ref().is_some_and(|(_, enabled, _)| *enabled);
+    if password_login_blocked(st.cfg.exposure, totp_enabled) {
+        attempt.fail();
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "step-up-unavailable",
+            "Internet exposure requires an enabled second factor for password step-up",
+        ));
+    }
+    if let Some((secret, enabled, _)) = totp {
+        if enabled {
+            let verified = if let Some(code) = body.totp_code.as_deref() {
+                if let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) {
+                    st.db.totp_step_consume(&principal_id, step)?
+                } else {
+                    false
+                }
+            } else if let Some(code) = body.recovery_code.as_deref() {
+                let mut matched = None;
+                for hash in st.db.recovery_code_hashes(&principal_id)? {
+                    if verify_recovery_blocking(&st, code.to_owned(), hash.clone()).await && matched.is_none() {
+                        matched = Some(hash);
+                    }
+                }
+                if let Some(hash) = matched {
+                    st.db.recovery_code_consume(&principal_id, &hash)?
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !verified {
+                attempt.fail();
+                st.db.audit(&username, "step-up.failure", "second-factor verification failed", &ip);
+                return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+            }
+        }
+    } else if body.totp_code.is_some() || body.recovery_code.is_some() {
+        attempt.fail();
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+    }
+    attempt.succeed();
+    let token = auth::random_token();
+    let csrf = auth::random_token();
+    let fresh_until = crate::now() + 10 * 60;
+    if !st
+        .db
+        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until, "password")?
+    {
+        return Err(unauthorized());
+    }
+    st.db
+        .audit(&username, "session.step-up", "session rotated; fresh authentication valid for 10 minutes", &ip);
+    let mut response = json_ok(StatusCode::OK, json!({"csrf_token":csrf,"fresh_auth_until":timestamp(Some(fresh_until))}));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, remember.then_some(crate::db::SESSION_ABSOLUTE_SECS as u64))
+            .parse()
+            .expect("session cookie"),
+    );
+    Ok(response)
+}
+
+fn password_login_blocked(exposure: crate::config::Exposure, totp_enabled: bool) -> bool {
+    exposure == crate::config::Exposure::Internet && !totp_enabled
 }
 
 fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
@@ -915,15 +1186,15 @@ fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
     let canonical = crate::passkeys::canonical_origin(origin)
         .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
-    let principal = st.db.admin_get()?.map(|(username, _)| username);
+    let principal = st.db.admin_principal_id()?;
     let stored = match principal.as_deref() {
-        Some(username) => st.db.passkey_origin(username)?,
+        Some(id) => st.db.passkey_origin(id)?,
         None => None,
     };
     let expected = st.cfg.public_origin.as_deref().or(stored.as_deref());
     if expected.is_none() {
-        if let Some(username) = principal.as_deref() {
-            if st.db.passkey_count(username)? > 0 {
+        if let Some(id) = principal.as_deref() {
+            if st.db.passkey_count(id)? > 0 {
                 return Err(err(
                     StatusCode::CONFLICT,
                     "canonical-origin-required",
@@ -963,9 +1234,19 @@ fn passkey_ticket_cookie(token: &str) -> String {
     format!("__Host-bridge_passkey={token}; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict")
 }
 
+fn valid_challenge_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegisterStartBody {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyRenameBody {
     name: String,
 }
 
@@ -983,6 +1264,107 @@ struct AssertFinishBody {
     credential: webauthn_rs::prelude::PublicKeyCredential,
 }
 
+async fn passkey_step_up_start(State(st): State<St>, Remote(ip): Remote, Authed(p, _): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey step-up requires a browser session"));
+    };
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &[])?;
+    let records = st.db.passkeys_for_principal(&principal_id)?;
+    let credentials = records
+        .iter()
+        .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
+        .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
+    if credentials.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-credential", "no passkeys are registered"));
+    }
+    let wa = crate::passkeys::verifier(&origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let (options, state) = crate::passkeys::begin_authentication(&wa, &credentials)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "could not start passkey step-up"))?;
+    let challenge =
+        crate::passkeys::new_challenge(crate::now()).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not generate challenge"))?;
+    let stored = crate::passkeys::StoredCeremony {
+        origin,
+        credential_name: None,
+        state,
+    };
+    let row = crate::db::WebauthnChallengeRow {
+        principal_id: principal_id.clone(),
+        binding: token_hash,
+        kind: "step-up".into(),
+        state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
+        expires_at: challenge.expires_at,
+    };
+    st.db.webauthn_challenge_put(&challenge.id, &row)?;
+    st.db.audit(&principal_id, "passkey.step-up.start", "session-bound challenge issued", &ip);
+    Ok(json_ok(StatusCode::OK, json!({"challenge_id":challenge.id,"options":options})))
+}
+
+async fn passkey_step_up_finish(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session {
+        principal_id,
+        token_hash: old_hash,
+        remember,
+        ..
+    } = p
+    else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey step-up requires a browser session"));
+    };
+    check_address_mutation_limit(&st, &ip)?;
+    check_address_mutation_limit(&st, &ip)?;
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    let body: AssertFinishBody =
+        serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &principal_id, &old_hash, "step-up")? else {
+        return Err(err(
+            StatusCode::GONE,
+            "challenge-expired",
+            "challenge is expired, consumed or bound to another session",
+        ));
+    };
+    let stored: crate::passkeys::StoredCeremony =
+        serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    let credential_id = match verify_and_record_passkey_assertion(&st, &principal_id, &origin, &stored, &body.credential) {
+        Ok(credential_id) => credential_id,
+        Err(error) => {
+            st.db.audit(&principal_id, "passkey.step-up.failure", "assertion could not be verified", &ip);
+            return Err(error);
+        }
+    };
+    let (token, csrf) = (auth::random_token(), auth::random_token());
+    let fresh_until = crate::now() + 10 * 60;
+    if !st
+        .db
+        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until, "passkey")?
+    {
+        return Err(unauthorized());
+    }
+    st.db.audit(
+        &principal_id,
+        "session.step-up.passkey",
+        &format!("credential_id={credential_id}; fresh authentication valid for 10 minutes"),
+        &ip,
+    );
+    let mut response = json_ok(StatusCode::OK, json!({"csrf_token":csrf,"fresh_auth_until":timestamp(Some(fresh_until))}));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, remember.then_some(crate::db::SESSION_ABSOLUTE_SECS as u64))
+            .parse()
+            .expect("session cookie"),
+    );
+    Ok(response)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyReenrollBody {
@@ -992,6 +1374,7 @@ struct PasskeyReenrollBody {
 }
 
 async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
     let Principal::Session { token_hash, .. } = p else {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -1018,6 +1401,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let wa = crate::passkeys::verifier(&origin)
         .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
     let (options, state) = crate::passkeys::begin_registration(&wa, &username, &username, &body.name)
@@ -1030,7 +1414,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
         state,
     };
     let row = crate::db::WebauthnChallengeRow {
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         binding: token_hash,
         kind: "registration".into(),
         state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
@@ -1043,6 +1427,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
 }
 
 async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
     let Principal::Session { token_hash, .. } = p else {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -1053,10 +1438,18 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
     let m = parse_body(&body.bytes)?;
     let body: RegisterFinishBody =
         serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
-    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &username, &token_hash, "registration")? else {
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &principal_id, &token_hash, "registration")? else {
         return Err(err(
             StatusCode::GONE,
             "challenge-expired",
@@ -1077,7 +1470,7 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
     let passkey_json = serde_json::to_string(&credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store passkey"))?;
     let row = crate::db::PasskeyCredentialRow {
         credential_id,
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         credential: passkey_json,
         user_name: stored.credential_name.unwrap_or_else(|| "Passkey".into()),
         created_at: crate::now(),
@@ -1165,16 +1558,108 @@ async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: 
         st.db.audit(&username, "passkey.reenrol.failure", "current password did not verify", &ip);
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
     }
-    st.db.passkey_rebind_origin(&username, &origin)?;
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    st.db.passkey_rebind_origin(&principal_id, &origin)?;
     st.db.audit(&username, "passkey.origin.reenrolled", &clean(&origin), &ip);
     security_notification(&st, &username, "passkey_origin_reenrolled");
     Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
 }
 
-async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
-    let Some((principal, _)) = st.db.admin_get()? else {
+async fn totp_enroll(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP enrollment requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["current_password"])?;
+    let current = str_field(&m, "current_password")?;
+    let Some((username, password_hash)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    if current.len() > auth::MAX_PASSWORD_LEN || !verify_blocking(&st, current.to_string(), password_hash).await {
+        st.db.audit(&username, "totp.enrollment.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    if st.db.totp_get(&principal)?.is_some_and(|(_, enabled, _)| enabled) {
+        return Err(err(StatusCode::CONFLICT, "totp-already-enabled", "disable TOTP before enrolling a replacement"));
+    }
+    let secret = auth::new_totp_secret();
+    st.db.totp_pending_set(&principal, &secret)?;
+    st.db.audit(&username, "totp.enrollment.started", "", &ip);
+    let label = format!("LLM%20Bridge:{}", username.replace('@', "%40"));
+    let uri = format!("otpauth://totp/{label}?secret={secret}&issuer=LLM%20Bridge&algorithm=SHA1&digits=6&period=30");
+    Ok(json_ok(StatusCode::OK, json!({"secret":secret,"otpauth_uri":uri,"confirmed":false})))
+}
+
+async fn totp_confirm(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP enrollment requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["code"])?;
+    let code = str_field(&m, "code")?;
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some((secret, enabled, _)) = st.db.totp_get(&principal)? else {
+        return Err(err(StatusCode::CONFLICT, "totp-enrollment-missing", "start TOTP enrollment first"));
+    };
+    if enabled {
+        return Err(err(StatusCode::CONFLICT, "totp-already-enabled", "TOTP is already enabled"));
+    }
+    let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) else {
+        st.db.audit(&username, "totp.enrollment.failure", "invalid verification code", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    };
+    let codes: Vec<String> = (0..10).map(|_| auth::new_recovery_code()).collect();
+    let mut hashes = Vec::with_capacity(codes.len());
+    for code in &codes {
+        hashes.push(hash_recovery_blocking(&st, code.clone()).await);
+    }
+    st.db.totp_enable_with_recovery_codes(&principal, &hashes, step)?;
+    st.db.audit(&username, "totp.enabled", "10 recovery codes generated", &ip);
+    security_notification(&st, &principal, "totp_enabled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true,"recovery_codes":codes})))
+}
+
+async fn totp_disable(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    if !matches!(p, Principal::Session { .. }) {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "TOTP management requires a browser session"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["current_password", "code"])?;
+    let current = str_field(&m, "current_password")?;
+    let code = str_field(&m, "code")?;
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let Some((secret, enabled, _)) = st.db.totp_get(&principal)? else {
+        return Err(err(StatusCode::CONFLICT, "totp-not-enabled", "TOTP is not enabled"));
+    };
+    if current.len() > auth::MAX_PASSWORD_LEN || !verify_blocking(&st, current.to_string(), password_hash).await {
+        st.db.audit(&username, "totp.disable.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    let Some(step) = enabled.then(|| auth::matching_totp_step(&secret, code, crate::now())).flatten() else {
+        st.db.audit(&username, "totp.disable.failure", "invalid verification code", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    };
+    if !st.db.totp_step_consume(&principal, step)? {
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-mfa-code", "invalid verification code"));
+    }
+    st.db.totp_disable(&principal)?;
+    st.db.audit(&username, "totp.disabled", "recovery codes deleted", &ip);
+    security_notification(&st, &principal, "totp_disabled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
+}
+
+async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
+    if st.db.admin_get()?.is_none() {
+        return Err(unauthorized());
+    }
+    let principal = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let passkeys = st
         .db
         .passkeys_for_principal(&principal)?
@@ -1194,16 +1679,95 @@ async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
     Ok(json_ok(StatusCode::OK, json!({"passkeys":passkeys})))
 }
 
+fn valid_passkey_handle(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 1024 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+async fn rename_passkey(State(st): State<St>, Path(id): Path<String>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
+    let Principal::Session { principal_id, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey management requires a browser session"));
+    };
+    if !valid_passkey_handle(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "passkey id is invalid"));
+    }
+    let m = parse_body(&body.bytes)?;
+    let body: PasskeyRenameBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "name is required and unknown fields are not allowed",
+        )
+    })?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "passkey name must be 1-64 printable characters",
+        ));
+    }
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref() != Some(principal_id.as_str()) || !st.db.passkey_rename(&principal_id, &id, name)? {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found"));
+    }
+    st.db.audit(&username, "passkey.renamed", "passkey display name changed", &ip);
+    security_notification(&st, &username, "passkey_renamed");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
+}
+
+async fn remove_passkey(State(st): State<St>, Path(id): Path<String>, Authed(p, ip): Authed) -> ApiResult {
+    fresh_session_step_up(&p)?;
+    let Principal::Session { principal_id, .. } = p else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "passkey management requires a browser session"));
+    };
+    if !valid_passkey_handle(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "passkey id is invalid"));
+    }
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref() != Some(principal_id.as_str()) {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found"));
+    }
+    match st
+        .db
+        .passkey_remove_with_policy(&principal_id, &id, st.cfg.exposure == crate::config::Exposure::Internet)?
+    {
+        crate::db::PasskeyRemoval::NotFound => return Err(err(StatusCode::NOT_FOUND, "not-found", "passkey not found")),
+        crate::db::PasskeyRemoval::LastSignInMethod => {
+            st.db
+                .audit(&username, "passkey.removal.denied", "would remove the last available sign-in method", &ip);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "last-sign-in-method",
+                "add another passkey or enable TOTP before removing the last passkey",
+            ));
+        }
+        crate::db::PasskeyRemoval::Removed => {}
+    }
+    let totp_enabled = st.db.totp_get(&principal_id)?.is_some_and(|(_, enabled, _)| enabled);
+    st.db.audit(&username, "passkey.removed", "passkey removed", &ip);
+    security_notification(&st, &username, "passkey_removed");
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"ok":true,"password_sign_in_available":!password_login_blocked(st.cfg.exposure, totp_enabled)}),
+    ))
+}
+
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
     check_public_origin(&st, &headers)?;
     check_address_mutation_limit(&st, &ip)?;
     let origin = webauthn_origin(&st, &headers)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &[])?;
-    let Some((username, _)) = st.db.admin_get()? else {
+    if st.db.admin_get()?.is_none() {
         return Err(unauthorized());
-    };
-    let records = st.db.passkeys_for_principal(&username)?;
+    }
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
+    let records = st.db.passkeys_for_principal(&principal_id)?;
     let credentials = records
         .iter()
         .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
@@ -1224,7 +1788,7 @@ async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers:
         state,
     };
     let row = crate::db::WebauthnChallengeRow {
-        principal_id: username.clone(),
+        principal_id: principal_id.clone(),
         binding: auth::sha256_hex(&ticket),
         kind: "authentication".into(),
         state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
@@ -1246,12 +1810,20 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     let m = parse_body(&body.bytes)?;
     let body: AssertFinishBody =
         serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    if !valid_challenge_id(&body.challenge_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "challenge_id must be 64 lowercase hexadecimal characters",
+        ));
+    }
     let Some((username, _)) = st.db.admin_get()? else {
         return Err(unauthorized());
     };
+    let principal_id = st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into());
     let Some(row) = st
         .db
-        .webauthn_challenge_take(&body.challenge_id, &username, &auth::sha256_hex(&ticket), "authentication")?
+        .webauthn_challenge_take(&body.challenge_id, &principal_id, &auth::sha256_hex(&ticket), "authentication")?
     else {
         return Err(err(
             StatusCode::GONE,
@@ -1261,16 +1833,46 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     };
     let stored: crate::passkeys::StoredCeremony =
         serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    let credential_id = verify_and_record_passkey_assertion(&st, &principal_id, &origin, &stored, &body.credential)?;
+    remember_login_device(&st, &username, &headers)?;
+    let (token, csrf) = (auth::random_token(), auth::random_token());
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        false,
+    )?;
+    st.db
+        .audit(&username, "passkey.authentication.success", &format!("credential_id={credential_id}"), &ip);
+    let mut r = json_ok(StatusCode::OK, json!({"csrf_token":csrf}));
+    r.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie(&token, None).parse().expect("session cookie"));
+    r.headers_mut().append(
+        header::SET_COOKIE,
+        "__Host-bridge_passkey=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+            .parse()
+            .expect("static cookie"),
+    );
+    Ok(r)
+}
+
+fn verify_and_record_passkey_assertion(
+    st: &St,
+    principal_id: &str,
+    origin: &str,
+    stored: &crate::passkeys::StoredCeremony,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+) -> Result<String, ApiError> {
     if origin != stored.origin {
         return Err(err(StatusCode::FORBIDDEN, "bad-origin", "ceremony origin changed"));
     }
     let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
-    let mut records = st.db.passkeys_for_principal(&username)?;
+    let mut records = st.db.passkeys_for_principal(principal_id)?;
     let credentials = records
         .iter()
         .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
         .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
-    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential, &credentials)
+    let result = crate::passkeys::finish_authentication(&wa, &stored.state, assertion, &credentials)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "webauthn-error", "passkey assertion could not be verified"))?;
     if !result.user_verified() {
         return Err(err(StatusCode::UNAUTHORIZED, "user-verification-required", "passkey did not verify the user"));
@@ -1291,31 +1893,9 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     records[index].backup_eligible = result.backup_eligible();
     records[index].backed_up = result.backup_state();
     records[index].sign_count = result.counter();
+    let credential_id = records[index].credential_id.clone();
     st.db.passkey_update(&records[index])?;
-    remember_login_device(&st, &username, &headers)?;
-    let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_for(
-        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
-        &auth::sha256_hex(&token),
-        &csrf,
-        false,
-    )?;
-    st.db.audit(
-        &username,
-        "passkey.authentication.success",
-        &format!("credential_id={}", records[index].credential_id),
-        &ip,
-    );
-    let mut r = json_ok(StatusCode::OK, json!({"csrf_token":csrf}));
-    r.headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(&token, None).parse().expect("session cookie"));
-    r.headers_mut().append(
-        header::SET_COOKIE,
-        "__Host-bridge_passkey=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
-            .parse()
-            .expect("static cookie"),
-    );
-    Ok(r)
+    Ok(credential_id)
 }
 
 /// Session mutations and public passkey ceremonies have no token-specific budget. Share the
@@ -1325,7 +1905,10 @@ fn check_address_mutation_limit(st: &St, remote: &str) -> Result<(), ApiError> {
         .parse::<std::net::IpAddr>()
         .map(|ip| auth::addr_key(&ip))
         .unwrap_or_else(|_| "unknown".to_string());
-    if let Some(retry_after) = st.mutation_limiter.check(&[(format!("address:{address}"), st.cfg.mutation_limit_per_address)]) {
+    if let Some(retry_after) = st.mutation_limiter.check(&[
+        (format!("address:{address}"), st.cfg.mutation_limit_per_address),
+        (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), st.cfg.mutation_limit_global),
+    ]) {
         let mut error = err(
             StatusCode::TOO_MANY_REQUESTS,
             "mutation-rate-limit",
@@ -1345,6 +1928,40 @@ async fn logout(State(st): State<St>, Authed(p, ip): Authed) -> ApiResult {
     let mut r = json_ok(StatusCode::OK, json!({"ok": true}));
     r.headers_mut().insert(header::SET_COOKIE, session_cookie("", Some(0)).parse().expect("cookie"));
     Ok(r)
+}
+
+async fn list_sessions(State(st): State<St>, Authed(p, _): Authed) -> ApiResult {
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(unauthorized());
+    };
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"sessions": st.db.session_list_for(&principal_id, &token_hash)?}),
+    ))
+}
+
+async fn revoke_session(State(st): State<St>, Authed(p, ip): Authed, Path(id): Path<String>) -> ApiResult {
+    let actor = p.actor();
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(unauthorized());
+    };
+    if !(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+        || (32..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "session not found"));
+    }
+    let revoked_hash = st.db.session_revoke_for(&principal_id, &id)?;
+    let Some(revoked_hash) = revoked_hash else {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "session not found"));
+    };
+    st.db.audit(&actor, "session.revoke", &format!("session {id}"), &ip);
+    let mut response = json_ok(StatusCode::OK, json!({"ok":true}));
+    if revoked_hash == token_hash {
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, session_cookie("", Some(0)).parse().expect("cookie"));
+    }
+    Ok(response)
 }
 
 async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
@@ -1385,6 +2002,9 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 
 fn timestamp(epoch: Option<i64>) -> Option<String> {
     let epoch = epoch?;
+    if !(0..=253_402_300_799).contains(&epoch) {
+        return None;
+    }
     let days = epoch.div_euclid(86_400);
     let seconds = epoch.rem_euclid(86_400);
     let (year, month, day) = crate::certs::civil_from_days(days);
@@ -1418,7 +2038,43 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
     Ok(json_ok(StatusCode::OK, json!({"tokens": tokens})))
 }
 
+async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    if q.keys().any(|key| !matches!(key.as_str(), "limit" | "cursor")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let limit = q.get("limit").map_or(Ok(100_i64), |value| {
+        value
+            .parse::<i64>()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be an integer between 1 and 500"))
+    })?;
+    if !(1..=500).contains(&limit) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be between 1 and 500"));
+    }
+    let filters = format!("limit={limit}");
+    let offset = match q.get("cursor") {
+        Some(cursor) => crate::cursor::read(&st.cursor_key, "audit", &filters, cursor).map_err(|_| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "invalid-cursor",
+                "cursor is invalid or belongs to different audit filters",
+            )
+        })?,
+        None => 0,
+    };
+    let mut entries = st.db.audit_list_page(limit + 1, offset.min(crate::db::MAX_AUDIT_ROWS as usize) as i64)?;
+    let has_more = entries.len() > limit as usize;
+    if has_more {
+        entries.pop();
+    }
+    let next_cursor = has_more.then(|| crate::cursor::issue(&st.cursor_key, "audit", &filters, offset.saturating_add(entries.len())));
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"entries":entries,"chain_valid":st.db.audit_chain_valid()?,"next_cursor":next_cursor}),
+    ))
+}
+
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    fresh_passkey_step_up(&p)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs", "allowed_workers"])?;
     let name = str_field(&m, "name")?;
@@ -1629,6 +2285,7 @@ async fn dismiss_security_notification(State(st): State<St>, Authed(p, ip): Auth
 }
 
 async fn revoke_token(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
+    fresh_session_step_up(&p)?;
     if !st.db.token_revoke(&name)? {
         return Err(err(StatusCode::NOT_FOUND, "unknown-token", "no such token"));
     }
@@ -1678,6 +2335,7 @@ async fn get_worker(State(st): State<St>, Path(name): Path<String>, _a: Authed) 
 }
 
 async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name"])?;
     let name = str_field(&m, "name")?;
@@ -1719,6 +2377,7 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
 }
 
 async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     if !st.db.worker_revoke(&name)? {
         return Err(err(StatusCode::NOT_FOUND, "unknown-target", "no such worker"));
     }
@@ -1876,6 +2535,7 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
     let (operation, allowed, position_key, default_limit): (&str, &[&str], Option<&str>, u64) = match resource {
         "mission" => ("mission.status", &["task_limit", "prompt_chars", "event_limit"], None, 0),
+        "station" => ("mission.station", &[], None, 0),
         "tasks" => ("task.list", &["limit", "cursor", "offset", "prompt_chars"], Some("offset"), 50),
         "events" => ("mission.events", &["limit", "cursor", "after"], Some("after"), 50),
         "operations" => ("session.list", &["limit", "cursor", "offset"], Some("offset"), 100),
@@ -2009,7 +2669,32 @@ async fn mission_status_resource(
     .await
 }
 
+async fn mission_station_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "station",
+            query: q,
+        },
+    )
+    .await
+}
+
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    // Remote mission creation is a worker opt-in operation (`--allow-create`), so it
+    // requires the same fresh human authentication as the other API-016 opt-in actions.
+    require_fresh_browser_session(&p)?;
     let mut params = parse_body(&body.bytes)?;
     let worker = str_field(&params, "worker")?.to_string();
     if !p.allows_worker(&worker) {
@@ -2080,6 +2765,7 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
 }
 
 async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Path(worker): Path<String>, headers: HeaderMap, body: Buffered) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let mut params = parse_body(&body.bytes)?;
     no_extra(&params, &["input", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&params)?;
@@ -2440,6 +3126,38 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
             }
             "mission.agents"
         }
+        "sessions" => {
+            let limit = q.get("limit").map_or(Ok(100), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| (1..=1000).contains(n))
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be an integer from 1 to 1000"))
+            })?;
+            let mut offset = q.get("offset").map_or(Ok(0), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "offset must be a non-negative integer"))
+            })?;
+            let mission = q.get("mission").map(String::as_str).unwrap_or("");
+            if let Some(cursor) = q.get("cursor") {
+                if q.contains_key("offset") {
+                    return Err(err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor cannot be combined with offset"));
+                }
+                let filters = format!("worker={worker};mission={mission};resource=operations;limit={limit}");
+                offset = u64::try_from(
+                    crate::cursor::read(&st.cursor_key, "missions/operations", &filters, cursor)
+                        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "invalid or mismatched page cursor"))?,
+                )
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "page cursor is out of range"))?;
+            }
+            params.insert("mission".into(), json!(mission));
+            params.insert("limit".into(), json!(limit));
+            params.insert("offset".into(), json!(offset));
+            "session.list"
+        }
+        "usage" => "usage.snapshot",
         "gc" => {
             params = parse_body(&body.bytes)?;
             no_extra(&params, &["wait_ms"])?;
@@ -2459,6 +3177,10 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
         &["limit", "wait_ms"][..]
     } else if matches!(action.as_str(), "doctor" | "agents") {
         &["mission", "wait_ms"][..]
+    } else if action == "sessions" {
+        &["mission", "limit", "offset", "cursor", "wait_ms"][..]
+    } else if action == "usage" {
+        &["wait_ms"][..]
     } else {
         &[][..]
     };
@@ -2519,6 +3241,54 @@ async fn worker_agents_resource(
         WorkerResourceRequest {
             worker,
             action: "agents".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_sessions_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "sessions".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_usage_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "usage".into(),
             q,
             headers,
             body: Buffered {
@@ -2675,6 +3445,9 @@ async fn mission_task_show(
 }
 
 async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "after" | "limit")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
     let num = |k: &str, default: u64| -> Result<u64, ApiError> {
         q.get(k).map_or(Ok(default), |v| {
             v.parse()
@@ -2812,11 +3585,21 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
             "the task changed since the supplied revision; fetch it again and retry",
         ));
     }
-    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut value = row.to_json();
-    if status == StatusCode::OK {
-        add_next_page_cursor(&st, &row, &mut value);
+    if row.state == "done" && row.result.as_ref().and_then(|result| result.get("outcome")).and_then(Value::as_str) == Some("uncertain") {
+        let mut response = err(
+            StatusCode::CONFLICT,
+            "uncertain-outcome",
+            "the worker could not determine whether this operation completed; inspect the command before retrying",
+        )
+        .into_response();
+        response.headers_mut().insert(
+            header::LOCATION,
+            format!("/api/v1/commands/{request_id}").parse().expect("validated request id"),
+        );
+        return Ok(response);
     }
+    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
+    let value = command_response_json(&st, &row);
     let mut response = json_ok(status, value);
     if status == StatusCode::ACCEPTED {
         response.headers_mut().insert(
@@ -2870,13 +3653,70 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
     result.insert("next_cursor".into(), json!(next_cursor));
 }
 
+fn command_response_json(st: &St, row: &CommandRow) -> Value {
+    let mut value = row.to_json();
+    redact_private_api_fields(&mut value);
+    value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
+    value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
+    add_next_page_cursor(st, row, &mut value);
+    value
+}
+
+/// Command requests and worker results are durable internal records, not public API schemas.
+/// Remove known private fields recursively before exposing them through the generic command
+/// resource. Resource-specific endpoints remain the preferred, explicitly projected interface.
+fn redact_private_api_fields(value: &mut Value) {
+    const PRIVATE_FIELDS: &[&str] = &[
+        "cwd",
+        "repo_identity",
+        "objective",
+        "config",
+        "environment",
+        "env",
+        "terminal",
+        "terminal_content",
+        "terminal_screen",
+        "terminal_output",
+        "screen",
+        "transcript",
+        "output",
+        "raw_output",
+        "stdout",
+        "stderr",
+        "secret",
+        "api_key",
+        "provider_api_key",
+        "provider_key",
+        "provider_credentials",
+        "token",
+        "access_token",
+        "refresh_token",
+        "token_hash",
+        "password",
+        "credential",
+        "credentials",
+        "authorization",
+        "cookie",
+    ];
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, _| !PRIVATE_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private)));
+            for child in fields.values_mut() {
+                redact_private_api_fields(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                redact_private_api_fields(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(r) => {
-            let mut value = r.to_json();
-            add_next_page_cursor(&st, &r, &mut value);
-            Ok(json_ok(StatusCode::OK, value))
-        }
+        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row))),
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }
@@ -3039,6 +3879,7 @@ async fn suspend_until_credits_resource(
     headers: HeaderMap,
     body: Buffered,
 ) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let worker = q
         .get("worker")
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
@@ -3371,15 +4212,15 @@ async fn security_headers(mut r: Response) -> Response {
         r = err(StatusCode::BAD_REQUEST, "invalid-request", "a request path or parameter has an invalid format").into_response();
     }
     let h = r.headers_mut();
-    // The static handler sets its own Content-Security-Policy and cache policy.
-    for (k, v) in [
-        ("cache-control", "no-store"),
-        ("content-security-policy", "default-src 'none'; form-action 'none'; frame-ancestors 'none'"),
-    ] {
-        if !h.contains_key(k) {
-            h.insert(k, v.parse().expect("static header"));
-        }
+    // Static pages keep their tailored CSP, but every response must be non-cacheable because
+    // responses can contain session state or security decisions.
+    if !h.contains_key("content-security-policy") {
+        h.insert(
+            "content-security-policy",
+            "default-src 'none'; form-action 'none'; frame-ancestors 'none'".parse().expect("static header"),
+        );
     }
+    h.insert("cache-control", "no-store".parse().expect("static header"));
     for (k, v) in [
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
@@ -3419,31 +4260,47 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/state", &["GET"], Access::Public, ""),
     ("/api/v1/auth/setup", &["POST"], Access::Public, ""),
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/step-up", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/totp/enroll", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/totp/confirm", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/totp/disable", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/{id}", &["PATCH", "DELETE"], Access::Session, ""),
+    ("/api/v1/auth/sessions", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/sessions/{id}", &["DELETE"], Access::Session, ""),
     ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/step-up/start", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/step-up/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
-    ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
-    ("/api/v1/workers/{name}", &["GET", "DELETE"], Access::Authed, "admin"),
-    ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/workers", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/workers", &["POST"], Access::Session, ""),
+    ("/api/v1/workers/{name}", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}", &["DELETE"], Access::Session, ""),
+    ("/api/v1/workers/{name}/restore", &["POST"], Access::Session, ""),
     ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/sessions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/usage", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
-    ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
-    ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/tokens", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/tokens", &["POST"], Access::Session, ""),
+    ("/api/v1/audit", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/tokens/{name}", &["DELETE"], Access::Session, ""),
     ("/api/v1/security/notifications", &["GET"], Access::Authed, "admin"),
     ("/api/v1/security/notifications/{id}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
-    ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions", &["POST"], Access::Session, ""),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}", &["DELETE"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/station", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/agents", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["PATCH"], Access::Authed, "operate"),
@@ -3452,7 +4309,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}/proposals", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/proposals", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/proposals/{n}/{action}", &["POST"], Access::Authed, "operate"),
-    ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Session, ""),
     ("/api/v1/missions/{id}/steer", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/finish", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
@@ -3477,6 +4334,34 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[test]
+    fn internet_mode_never_allows_password_only_sign_in() {
+        assert!(password_login_blocked(crate::config::Exposure::Internet, false));
+        assert!(!password_login_blocked(crate::config::Exposure::Internet, true));
+        assert!(!password_login_blocked(crate::config::Exposure::Lan, false));
+        assert!(!password_login_blocked(crate::config::Exposure::Loopback, false));
+    }
+
+    #[tokio::test]
+    async fn internal_problem_is_generic_and_has_a_correlation_id() {
+        let response = err(StatusCode::INTERNAL_SERVER_ERROR, "database", "/private/path: secret detail").into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+        let id = response
+            .headers()
+            .get("x-correlation-id")
+            .expect("correlation header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/internal");
+        assert_eq!(problem["detail"], "internal server error");
+        assert_eq!(problem["correlation_id"], id);
+        assert!(!body.windows(b"/private/path".len()).any(|part| part == b"/private/path"));
+    }
 
     #[test]
     fn internet_exposure_never_allows_minting_a_non_expiring_token() {
@@ -3559,6 +4444,21 @@ mod problem_tests {
         assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_site));
     }
 
+    #[test]
+    fn public_json_timestamp_normalization_is_recursive_and_bounded() {
+        let mut value = json!({
+            "session":{"expires_at":0},
+            "worker":{"last_seen":1},
+            "created_at":i64::MAX,
+            "unrelated_number":123
+        });
+        normalize_api_timestamps(&mut value);
+        assert_eq!(value["session"]["expires_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(value["worker"]["last_seen"], "1970-01-01T00:00:01Z");
+        assert!(value["created_at"].is_null(), "out-of-range epochs are never formatted");
+        assert_eq!(value["unrelated_number"], 123);
+    }
+
     #[tokio::test]
     async fn api_errors_use_stable_rfc9457_problem_details() {
         let response = err(StatusCode::CONFLICT, "request-id-conflict", "request id was reused").into_response();
@@ -3614,7 +4514,17 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/step-up", post(step_up).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/enroll", post(totp_enroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/confirm", post(totp_confirm).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/totp/disable", post(totp_disable).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/passkeys", get(list_passkeys))
+        .route(
+            "/api/v1/auth/passkeys/{id}",
+            patch(rename_passkey).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)).delete(remove_passkey),
+        )
+        .route("/api/v1/auth/sessions", get(list_sessions))
+        .route("/api/v1/auth/sessions/{id}", delete(revoke_session))
         .route(
             "/api/v1/auth/passkeys/registration/start",
             post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
@@ -3624,6 +4534,11 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
             "/api/v1/auth/passkeys/re-enroll",
             post(passkey_reenroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
         )
+        .route(
+            "/api/v1/auth/passkeys/step-up/start",
+            post(passkey_step_up_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
+        .route("/api/v1/auth/passkeys/step-up/finish", post(passkey_step_up_finish))
         .route(
             "/api/v1/auth/passkeys/assertion/start",
             post(passkey_assert_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
@@ -3636,9 +4551,12 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
         .route("/api/v1/workers/{name}/doctor", get(worker_doctor_resource))
         .route("/api/v1/workers/{name}/agents", get(worker_agents_resource))
+        .route("/api/v1/workers/{name}/sessions", get(worker_sessions_resource))
+        .route("/api/v1/workers/{name}/usage", get(worker_usage_resource))
         .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
+        .route("/api/v1/audit", get(audit_resource))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/security/notifications", get(list_security_notifications))
         .route("/api/v1/security/notifications/{id}", delete(dismiss_security_notification))
@@ -3646,6 +4564,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/missions/{id}", get(mission_status_resource).delete(mission_delete_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/station", get(mission_station_resource))
         .route("/api/v1/missions/{id}/agents", get(mission_agents_resource))
         .route(
             "/api/v1/missions/{id}/settings",
@@ -3683,6 +4602,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
     };
     app.layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
+        .layer(axum::middleware::from_fn(reject_method_override))
         .layer(axum::middleware::from_fn(fetch_metadata_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
@@ -3702,6 +4622,14 @@ fn listener_group_allows(group: crate::config::ListenerGroup, path: &str) -> boo
 async fn listener_group_gate(State(group): State<crate::config::ListenerGroup>, req: Request, next: axum::middleware::Next) -> Response {
     if !listener_group_allows(group, req.uri().path()) {
         return err(StatusCode::NOT_FOUND, "route-not-found", "route is not available on this listener").into_response();
+    }
+    next.run(req).await
+}
+
+async fn reject_method_override(req: Request, next: axum::middleware::Next) -> Response {
+    const OVERRIDE_HEADERS: [&str; 3] = ["x-http-method-override", "x-method-override", "x-http-method"];
+    if OVERRIDE_HEADERS.iter().any(|name| req.headers().contains_key(*name)) {
+        return err(StatusCode::BAD_REQUEST, "invalid-request", "method override headers are not supported").into_response();
     }
     next.run(req).await
 }

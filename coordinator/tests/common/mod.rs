@@ -102,6 +102,38 @@ impl Env {
             bearer: None,
         }
     }
+    /// Seed a short-lived API token directly for tests whose subject is route authentication rather
+    /// than token issuance. Token creation itself requires fresh passkey step-up.
+    pub fn test_api_token(&self, name: &str, scopes: &[&str]) -> String {
+        let secret = "integration-test-secret";
+        let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_string()).collect();
+        let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&self.dir)).unwrap();
+        assert!(db
+            .token_create_scoped(
+                name,
+                &bridge_coordinator::auth::sha256_hex(secret),
+                Some(bridge_coordinator::now() + 3600),
+                &scopes,
+            )
+            .unwrap());
+        secret.to_string()
+    }
+
+    /// Mark the current session as freshly stepped up with a passkey for route tests that exercise
+    /// the operation behind that gate. Ceremony verification is tested separately end to end.
+    pub fn test_passkey_step_up(&self, api: &Api) {
+        let cookie = api.cookie.as_deref().expect("authenticated test session");
+        let token_hash = bridge_coordinator::auth::sha256_hex(cookie);
+        let connection = rusqlite::Connection::open(bridge_coordinator::db_path(&self.dir)).unwrap();
+        let changed = connection
+            .execute(
+                "UPDATE sessions SET fresh_auth_until=?1,fresh_auth_method='passkey' WHERE token_hash=?2 AND expires_at>?3",
+                rusqlite::params![bridge_coordinator::now() + 600, token_hash, bridge_coordinator::now()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "test session must be marked with passkey step-up");
+    }
+
     pub async fn stop(self) {
         tokio::time::timeout(Duration::from_secs(10), self.srv.stop())
             .await
@@ -110,6 +142,13 @@ impl Env {
     }
     /// Complete first-run setup and log in; returns an authenticated session API.
     pub async fn admin(&self) -> Api {
+        let mut api = self.admin_unstepped().await;
+        let (status, body) = api.step_up(PASSWORD, None, None).await;
+        assert_eq!(status, 200, "test fixture step-up failed: {body}");
+        api
+    }
+    /// Create the first admin session without the ten-minute step-up marker, for auth regressions.
+    pub async fn admin_unstepped(&self) -> Api {
         let token = std::fs::read_to_string(self.dir.join("setup-token")).unwrap();
         let mut api = self.api();
         let (st, body) = api
@@ -194,8 +233,35 @@ impl Api {
         }
         st
     }
+    pub async fn step_up(&mut self, password: &str, totp_code: Option<&str>, recovery_code: Option<&str>) -> (u16, Value) {
+        let mut body = json!({"password":password});
+        if let Some(code) = totp_code {
+            body["totp_code"] = json!(code);
+        }
+        if let Some(code) = recovery_code {
+            body["recovery_code"] = json!(code);
+        }
+        let response = self.rb(Method::POST, "/api/v1/auth/step-up").json(&body).send().await.unwrap();
+        let status = response.status().as_u16();
+        let cookie = response.headers().get("set-cookie").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let text = response.text().await.unwrap();
+        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        if status == 200 {
+            if let Some(cookie) = cookie {
+                self.cookie = cookie
+                    .split(';')
+                    .next()
+                    .and_then(|part| part.strip_prefix("__Host-bridge_session="))
+                    .map(str::to_owned);
+            }
+            self.csrf = body["csrf_token"].as_str().map(str::to_owned);
+        }
+        (status, body)
+    }
     /// Add a worker through the API and return its token.
-    pub async fn add_worker(&self, name: &str) -> String {
+    pub async fn add_worker(&mut self, name: &str) -> String {
+        let (step_up_status, step_up_body) = self.step_up(PASSWORD, None, None).await;
+        assert_eq!(step_up_status, 200, "{step_up_body}");
         let (st, b) = self.post("/api/v1/workers", json!({"name": name})).await;
         assert_eq!(st, 201, "{b}");
         b["token"].as_str().unwrap().to_string()
@@ -206,10 +272,12 @@ pub fn caps() -> Value {
     json!([
         {"operation": "mission.list", "summary": "list", "mutating": false, "needs_mission": false, "params": {}},
         {"operation": "mission.status", "summary": "status", "mutating": false, "needs_mission": true, "params": {}},
+        {"operation": "mission.station", "summary": "station", "mutating": false, "needs_mission": true, "params": {}},
         {"operation": "task.show", "summary": "show", "mutating": false, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}}},
         {"operation": "task.list", "summary": "list tasks", "mutating": false, "needs_mission": true, "params": {"limit": {"type": "int"}, "offset": {"type": "int"}}},
         {"operation": "mission.events", "summary": "events", "mutating": false, "needs_mission": true, "params": {"after": {"type": "int"}, "limit": {"type": "int"}}},
         {"operation": "session.list", "summary": "operations", "mutating": false, "needs_mission": false, "params": {"mission": {"type": "str"}, "limit": {"type": "int"}, "offset": {"type": "int"}}},
+        {"operation": "usage.snapshot", "summary": "provider usage", "mutating": false, "needs_mission": false, "params": {}},
         {"operation": "task.amend", "summary": "amend", "mutating": true, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}, "prompt": {"type": "str", "required": true}}},
         {"operation": "task.add", "summary": "add", "mutating": true, "needs_mission": true, "params": {"title": {"type": "str", "required": true}}},
         {"operation": "mission.delete", "summary": "delete", "mutating": true, "needs_mission": true, "params": {"confirm": {"type": "bool", "required": false}}}

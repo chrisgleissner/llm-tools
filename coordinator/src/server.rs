@@ -89,7 +89,11 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         }
     }
     validate_internet_runtime(&cfg, &db)?;
-    if let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))? {
+    if db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))?.is_some() {
+        let principal = db
+            .admin_principal_id()
+            .map_err(|e| format!("cannot read coordinator principal: {e}"))?
+            .unwrap_or_else(|| "admin".into());
         let passkey_count = db.passkey_count(&principal).map_err(|e| format!("cannot count passkeys: {e}"))?;
         if let Some(configured_origin) = cfg.public_origin.as_deref() {
             let stored_origin = db
@@ -230,9 +234,17 @@ fn validate_internet_runtime(cfg: &Config, db: &Db) -> Result<(), String> {
     if cfg.exposure != crate::config::Exposure::Internet {
         return Ok(());
     }
-    let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read administrator for Internet exposure: {e}"))? else {
+    if db
+        .admin_get()
+        .map_err(|e| format!("cannot read administrator for Internet exposure: {e}"))?
+        .is_none()
+    {
         return Err("internet exposure refused: enroll a phishing-resistant passkey before enabling Internet exposure".into());
-    };
+    }
+    let principal = db
+        .admin_principal_id()
+        .map_err(|e| format!("cannot read administrator principal for Internet exposure: {e}"))?
+        .unwrap_or_else(|| "admin".into());
     if db
         .passkey_count(&principal)
         .map_err(|e| format!("cannot read passkey enrollment for Internet exposure: {e}"))?
@@ -270,7 +282,7 @@ mod internet_exposure_tests {
             ..Config::default()
         };
         let (dir, db) = temp_db();
-        db.admin_create("admin", "hash").unwrap();
+        db.admin_create("operator", "hash").unwrap();
         assert!(validate_internet_runtime(&cfg, &db).unwrap_err().contains("phishing-resistant passkey"));
 
         db.passkey_put_at_origin(

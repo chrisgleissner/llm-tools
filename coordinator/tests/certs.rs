@@ -318,6 +318,34 @@ fn ca_extensions_as_openssl_sees_them() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn internal_server_certificate_validity_stays_below_398_days() {
+    let version = Command::new("openssl").arg("version").output();
+    let has_openssl = matches!(&version, Ok(o) if o.status.success());
+    if !has_openssl {
+        if cfg!(target_os = "linux") {
+            panic!("the openssl command line tool is needed for this test on Linux");
+        }
+        eprintln!("skipped: no OpenSSL command line tool on this platform");
+        return;
+    }
+    let dir = init_with("localhost", "127.0.0.1");
+    let validity_days = |flag: &str| -> i64 {
+        let output = Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(dir.join("server.pem"))
+            .args(["-noout", flag])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let date = String::from_utf8_lossy(&output.stdout).trim().split('=').nth(1).unwrap().to_string();
+        days_since_epoch(&date)
+    };
+    let validity = validity_days("-enddate") - validity_days("-startdate");
+    assert!(validity > 0 && validity <= 398, "server leaf validity is {validity} days");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Whole days since 1970-01-01 for an OpenSSL date such as `Nov  5 22:01:59 2031 GMT`.
 fn days_since_epoch(text: &str) -> i64 {
     let parts: Vec<&str> = text.split_whitespace().collect();

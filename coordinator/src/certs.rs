@@ -52,6 +52,9 @@ fn set_validity(params: &mut CertificateParams, valid_days: i64) {
 
 /// CA validity. Browsers and workers import the CA as a trust anchor, so it is kept short.
 pub const CA_VALID_DAYS: i64 = 5 * 365;
+/// Keep local server leaves below the 398-day public certificate maximum; operators renew them
+/// with `bridge-coordinator cert renew` while the CA remains valid for five years.
+pub const SERVER_CERT_VALID_DAYS: i64 = 365;
 
 /// DNS suffix that is always permitted besides `localhost` and the names given at init time
 /// (RFC 8375: reserved for home networks, never delegated in the public DNS).
@@ -126,7 +129,7 @@ fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), 
     // and a critical basicConstraints CA:FALSE.
     params.is_ca = IsCa::ExplicitNoCa;
     params.use_authority_key_identifier_extension = true;
-    set_validity(&mut params, 825);
+    set_validity(&mut params, SERVER_CERT_VALID_DAYS);
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
     let issuer_params = ca_params(None)?;
     let issuer = Issuer::from_params(&issuer_params, ca_key);

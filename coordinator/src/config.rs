@@ -61,6 +61,8 @@ pub struct Config {
     pub mutation_limit_per_token: usize,
     /// Authenticated mutation budget per client address in a rolling 60-second window.
     pub mutation_limit_per_address: usize,
+    /// Coordinator-wide authenticated mutation budget in a rolling 60-second window.
+    pub mutation_limit_global: usize,
     /// Maximum lifetime for a newly-created API token, in days (0/no expiry remains LAN-only).
     pub max_token_lifetime_days: u32,
 }
@@ -117,6 +119,7 @@ impl Default for Config {
             ws_idle_timeout_secs: 90,
             mutation_limit_per_token: 30,
             mutation_limit_per_address: 120,
+            mutation_limit_global: 600,
             max_token_lifetime_days: 3650,
         }
     }
@@ -197,6 +200,8 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
     # Authenticated mutation budget per token and client address per rolling 60 seconds.\n\
     mutation_limit_per_token = {}\n\
     mutation_limit_per_address = {}\n\
+    # Coordinator-wide authenticated mutation budget per rolling 60 seconds.\n\
+    mutation_limit_global = {}\n\
     # Maximum lifetime for newly created API tokens, in days (up to ten years).\n\
     max_token_lifetime_days = {}\n",
         d.min_tls,
@@ -210,6 +215,7 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
         d.ws_idle_timeout_secs,
         d.mutation_limit_per_token,
         d.mutation_limit_per_address,
+        d.mutation_limit_global,
         d.max_token_lifetime_days
     )
 }
@@ -317,7 +323,12 @@ impl Config {
             crate::write_replace(&path, migrated.as_bytes(), 0o600).map_err(|e| format!("cannot migrate {}: {e}", path.display()))?;
             text = migrated;
         }
-        config_check::evaluate_env(&text, opts).map_err(|errors| errors.join("\n"))
+        let cfg = config_check::evaluate_env(&text, opts).map_err(|errors| errors.join("\n"))?;
+        if !(1..=10_000).contains(&cfg.mutation_limit_global) {
+            return Err("global mutation limit must be between 1 and 10000 per 60 seconds".into());
+        }
+        cfg.listener_binds()?;
+        Ok(cfg)
     }
 
     pub(crate) fn validate_internet_static(&self) -> Result<(), String> {
@@ -334,8 +345,8 @@ impl Config {
         if self.tls_cert_file.is_none() && !self.tls_terminator {
             missing.push("a public TLS certificate or trusted TLS terminator (tls_cert_file or tls_terminator = true)");
         }
-        if self.mutation_limit_per_token > 10 || self.mutation_limit_per_address > 60 || self.max_connections > 128 {
-            missing.push("stricter Internet rate and connection limits (per-token <= 10, per-address <= 60, max_connections <= 128)");
+        if self.mutation_limit_per_token > 10 || self.mutation_limit_per_address > 60 || self.mutation_limit_global > 300 || self.max_connections > 128 {
+            missing.push("stricter Internet rate and connection limits (per-token <= 10, per-address <= 60, global <= 300, max_connections <= 128)");
         }
         if self.security_webhook_url.is_none() {
             missing.push("security notifications (security_webhook_url)");
@@ -423,6 +434,7 @@ mod tests {
     fn mutation_limits_default_and_are_bounded() {
         let defaults = Config::default();
         assert_eq!((defaults.mutation_limit_per_token, defaults.mutation_limit_per_address), (30, 120));
+        assert_eq!(defaults.mutation_limit_global, 600);
 
         let valid = temp_config(&config_text("127.0.0.1:8443", false));
         assert_eq!(Config::load(&valid).unwrap().mutation_limit_per_token, 30);
@@ -430,6 +442,10 @@ mod tests {
 
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
         assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
+        let _ = std::fs::remove_dir_all(invalid);
+
+        let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_global = 600", "mutation_limit_global = 10001"));
+        assert!(Config::load(&invalid).unwrap_err().contains("mutation_limit_global"));
         let _ = std::fs::remove_dir_all(invalid);
     }
 
@@ -505,6 +521,7 @@ mod tests {
             tls_terminator: true,
             mutation_limit_per_token: 10,
             mutation_limit_per_address: 60,
+            mutation_limit_global: 300,
             max_connections: 128,
             security_webhook_url: Some("https://notify.example.test/events".into()),
             ..Config::default()
@@ -528,6 +545,13 @@ mod tests {
 
         let mut bad = ready.clone();
         bad.mutation_limit_per_token = 11;
+        assert!(bad
+            .validate_internet_static()
+            .unwrap_err()
+            .contains("stricter Internet rate and connection limits"));
+
+        let mut bad = ready.clone();
+        bad.mutation_limit_global = 301;
         assert!(bad
             .validate_internet_static()
             .unwrap_err()

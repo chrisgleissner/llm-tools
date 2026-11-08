@@ -60,19 +60,19 @@ def strict_context(ca: Path) -> ssl.SSLContext:
 
 
 class Coordinator:
-    def __init__(self, data: Path) -> None:
+    def __init__(self, data: Path, config_overrides: dict[str, str] | None = None) -> None:
         self.data = data
         self.run("init", "--hostname", "localhost")
         config = data / "config.toml"
         config_text = config.read_text()
         config_text = re.sub(r'bind = ".*"', 'bind = "127.0.0.1:0"', config_text)
-        # Stress the offline queue independently of the production address budget. The Rust
-        # hardening tests exercise the default per-address limit; Mac loopback does not bind
-        # arbitrary 127/8 aliases, so this integration suite uses one stable source address.
-        # Keep reconnect churn from consuming the production per-IP connection budget while
-        # the queue test launches 16 concurrent API clients.
+        # Stress the offline queue independently of production mutation limits. Rust hardening
+        # tests exercise the defaults; this integration fixture raises only its address budget
+        # because queue tests launch 16 concurrent API clients during reconnect churn.
         config_text = config_text.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2000")
         config_text = config_text.replace("max_connections_per_ip = 32", "max_connections_per_ip = 128")
+        for key, value in (config_overrides or {}).items():
+            config_text = re.sub(rf"(?m)^{re.escape(key)} = .*?$", f"{key} = {value}", config_text)
         config.write_text(config_text)
         self.process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
         line = self.process.stderr.readline()
@@ -179,7 +179,11 @@ def test_remote_commands_match_local_semantics_and_are_idempotent(system):
     assert remote["state"] == "done"
     local = commands.execute(CommandRequest("mission.status", mission_id=mission_id))
     assert remote["result"]["outcome"] == "ok"
-    assert remote["result"]["result"]["mission"] == local.result["mission"]
+    redacted = {"cwd", "repo_identity", "objective", "config"}
+    local_mission = local.result["mission"]
+    remote_mission = remote["result"]["result"]["mission"]
+    assert remote_mission == {key: value for key, value in local_mission.items() if key not in redacted}
+    assert not redacted & remote_mission.keys()
 
     cancel = CommandRequest("mission.cancel", mission_id=mission_id[:8], target="ws", request_id="remote-cancel")
     first = _submit(coordinator, cancel)
@@ -216,7 +220,7 @@ def test_worker_survives_coordinator_restart(system):
     assert result["result"]["outcome"] == "ok"
 
 
-def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
+def test_remote_cli_preserves_mission_identity_without_private_fields(system, tmp_path, capsys):
     coordinator, mission_id, state = system
     wait_for(lambda: _online(coordinator), timeout=scaled(15), interval=0.05, message="worker never came online")
     token_file = tmp_path / "api-token"
@@ -235,7 +239,14 @@ def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
         remote_code, remote_out, err = run("--target", "ws", *argv)
         assert (code, remote_code) == (0, 0), err
         local, remote = json.loads(local_out), json.loads(remote_out)
-        assert remote == local
+        if argv[0] == "mission":
+            local_row = local["missions"][0]
+            remote_row = remote["missions"][0]
+            redacted = {"cwd", "repo_identity", "objective", "config"}
+            assert remote_row == {key: value for key, value in local_row.items() if key not in redacted}
+            assert not redacted & remote_row.keys()
+        else:
+            assert remote == local
 
     code, out, _ = run("--target", "ws", "status", "--mission", mission_id[:8])
     assert code == 0 and mission_id[:8] in out

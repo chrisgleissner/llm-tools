@@ -146,6 +146,21 @@ def test_read_operations_match_cli_json_output(mission, capsys):
     assert bad_limit.error.code == "invalid-argument"
 
 
+def test_mission_station_operation_returns_only_the_bounded_station_projection(mission, monkeypatch):
+    _, mission_id = mission
+    fields = {
+        "stations": [{"id": "codex", "status": "configured"}],
+        "station_config": {"providers": ["codex"]},
+        "station_mode": {"actual_mode": "background"},
+        "station_observation": {"station": "codex"},
+        "station_context": {"provider_liveness": "unknown"},
+    }
+    monkeypatch.setattr(commands, "_mission_status", lambda _store, _request, _params: {**fields, "mission": {"folder": "/private"}, "tasks": [{"prompt": "private"}]})
+    result = commands.execute(CommandRequest("mission.station", mission_id=mission_id))
+    assert result.outcome == "ok"
+    assert result.result == {"mission_id": mission_id, **fields}
+
+
 def test_duplicate_delivery_returns_stored_outcome_without_repeating_effect(mission):
     state, mission_id = mission
     first = commands.execute(CommandRequest("mission.cancel", mission_id=mission_id, request_id="req-cancel-1"))

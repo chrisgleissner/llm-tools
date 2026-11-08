@@ -120,14 +120,17 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
     if (res.status === 403 && e?.code === "password-change-required") passwordChangeHandler();
     throw new ApiError(res.status, e?.code ?? "http", e?.message ?? `Request failed (${res.status}).`, Number.isFinite(ra) && ra > 0 ? ra : null);
   }
+  const csrf = (json as { csrf_token?: unknown } | null)?.csrf_token;
+  if (typeof csrf === "string") setCsrf(csrf);
   return json as T;
 }
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
+export const patch = <T>(path: string, body: unknown): Promise<T> => request<T>("PATCH", path, body);
 export async function post<T>(path: string, body: unknown = {}): Promise<T> {
   const result = await request<T>("POST", path, body);
-  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll") {
+  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll" || path === "/api/v1/auth/passkeys/registration/finish") {
     window.dispatchEvent(new Event("bridge-security-notification"));
   }
   return result;
@@ -167,7 +170,7 @@ export interface AuthState {
   password_change_required?: boolean;
   /** Set after the host reset the password, until it is changed or a week has passed (signed-in sessions only). */
   password_reset_notice?: { at: number; message: string };
-  session?: { remember: boolean; expires_at: number; idle_timeout_secs: number };
+  session?: { remember: boolean; expires_at: string; idle_timeout_secs: number };
 }
 
 export async function authState(): Promise<AuthState> {
@@ -197,6 +200,15 @@ export async function finishPasskeySignIn(challenge_id: string, credential: unkn
   window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
+export async function beginPasskeyStepUp(): Promise<PasskeyAssertionStart> {
+  return request<PasskeyAssertionStart>("POST", "/api/v1/auth/passkeys/step-up/start", {}, false);
+}
+
+export async function finishPasskeyStepUp(challenge_id: string, credential: unknown): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/step-up/finish", { challenge_id, credential });
+  setCsrf(r.csrf_token);
+}
+
 export const setup = (setup_token: string, username: string, password: string) =>
   request<{ username: string }>("POST", "/api/v1/auth/setup", { setup_token, username, password }, true);
 
@@ -218,11 +230,25 @@ function commandRequest(operation: string, missionId: string | null, params: Rec
 /** Submit a typed command to a worker and wait for its result. Throws ApiError on a failed outcome. */
 export async function command(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<CommandRow> {
   const row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
+  return checkedReadCommand(row);
+}
+
+function checkedReadCommand(row: CommandRow): CommandRow {
   if (row.state !== "done") throw new ApiError(202, "pending", "The worker has not answered yet; the command stays queued.");
   const r = row.result;
   if (r?.error) throw new ApiError(422, r.error.code, r.error.message);
   if (r?.outcome && ["rejected", "failed", "uncertain"].includes(r.outcome)) throw new ApiError(422, r.outcome, `The worker reported: ${r.outcome}.`);
   return row;
+}
+
+/** Read worker metadata through its documented resource endpoint. */
+export async function workerResource(target: string, resource: "sessions" | "usage", params: Record<string, unknown> = {}, waitMs = 10000): Promise<CommandRow> {
+  const query = new URLSearchParams({ wait_ms: String(waitMs) });
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) query.set(key, String(value));
+  }
+  const row = await get<CommandRow>(`/api/v1/workers/${encodeURIComponent(target)}/${resource}?${query}`);
+  return checkedReadCommand(row);
 }
 
 export interface MutationResult {

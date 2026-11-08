@@ -8,7 +8,7 @@ import { store, subscribe, worker } from "../store";
  */
 export function workerReadView(
   root: HTMLElement,
-  opts: { title: string; operation: string; query: URLSearchParams; params?: () => Record<string, unknown>; render: (result: Record<string, unknown>, workerName: string) => Node },
+  opts: { title: string; resource: "sessions" | "usage"; query: URLSearchParams; params?: () => Record<string, unknown>; render: (result: Record<string, unknown>, workerName: string) => Node },
 ): () => void {
   const select = h("select", { id: "worker-select", name: "worker" });
   const status = h("p", { class: "muted", role: "status", id: "view-status" });
@@ -51,7 +51,7 @@ export function workerReadView(
     }
     status.textContent = "Loading...";
     try {
-      const row = await api.command(target, opts.operation, null, opts.params?.() ?? {});
+      const row = await api.workerResource(target, opts.resource, opts.params?.() ?? {});
       if (disposed || mine !== seq) return;
       status.textContent = "";
       body.replaceChildren(opts.render(row.result?.result ?? {}, target));

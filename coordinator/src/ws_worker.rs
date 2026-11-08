@@ -557,11 +557,14 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             Ok(vec![])
         }
         "command.result" => {
-            let id = m.payload["request_id"].as_str().unwrap_or_default();
-            if let Some(row) = st.db.command_done(name, id, &Value::Object(m.payload.clone())).map_err(db)? {
+            // The result body can be hundreds of KiB. Reuse the parsed payload for both
+            // persistence and the mission-delete follow-up instead of cloning it twice.
+            let payload = Value::Object(m.payload);
+            let id = payload["request_id"].as_str().unwrap_or_default();
+            if let Some(row) = st.db.command_done(name, id, &payload).map_err(db)? {
                 st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
                 if row.operation == "mission.delete" {
-                    if let Some(mission_id) = deleted_mission_of(&row, &Value::Object(m.payload.clone())) {
+                    if let Some(mission_id) = deleted_mission_of(&row, &payload) {
                         apply_tombstones(st, name, &[mission_id], "command").map_err(db)?;
                     }
                 }

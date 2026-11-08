@@ -447,6 +447,57 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 
+## D23 Bounded hash-chained coordinator audit log (SEC2-013)
+
+Keep the existing audit table and append SHA-256 links in the same SQLite transaction as each
+record. Canonicalize fields as a JSON tuple before hashing to avoid delimiter ambiguity. Migration
+18 backfills the previous log in ID order; retention keeps the newest 10,000 records and preserves
+the oldest retained row's link to the preceding hash. The admin-only API returns at most 500 newest
+records and verifies the retained segment. This detects edits or deletions within the retained
+segment without storing a second audit copy or adding a write-ahead service.
+
+In the code: `coordinator/src/db.rs::audit_checked` appends, `audit_chain_valid` verifies, and
+`coordinator/src/http.rs::audit_resource` exposes the bounded admin read. Regression coverage is in
+`coordinator/tests/web_api.rs::security_audit_api_is_admin_only_and_detects_tampering` and
+`coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place`.
+
+## D24 Public session IDs are independent of browser credentials (SEC2-008)
+
+Use an independent random identifier for session listing and revocation. Do not expose the
+session cookie or its stored credential hash to let an administrator identify or revoke a row.
+Legacy rows receive random public IDs during migration; authorization always scopes lookup and
+deletion to the authenticated principal.
+
+In the code: schema migration 19 and `Db::session_list_for` / `Db::session_revoke_for` in
+`coordinator/src/db.rs`; the route handlers are in `coordinator/src/http.rs`.
+`coordinator/tests/web_api.rs::browser_sessions_can_list_and_revoke_only_their_principals_sessions`
+and `coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` cover the behavior.
+
+## D25 Configurable bounded global mutation budget (SEC2-010)
+
+Keep the global authenticated-mutation ceiling at 600 per rolling minute by default, while
+allowing operators to lower it for constrained deployments or raise it within a hard 10,000
+request maximum. Internet mode imposes a stricter 300-request ceiling. This also lets isolated
+load and security-scanner instances raise their budgets without changing production defaults.
+
+In the code: `mutation_limit_global` is loaded and validated by `coordinator/src/config.rs` and
+applied by `coordinator/src/http.rs`. Config tests cover the bound and Internet limit; the isolated
+storage-write integration test verifies the runtime setting by submitting 1,000 command requests.
+
+## D26 Test the TLS scanner with a revocable operator-file leaf (SEC2-001)
+
+Keep testssl's medium-severity gate enabled. The coordinator's private CA leaf is a local trust
+anchor and does not publish an OCSP responder or CRL, so scanning that leaf cannot exercise
+revocation lookup. In the isolated CI coordinator only, issue an ECDSA P-256 operator-file leaf
+from that same CA with a reachable, signed empty CRL. This keeps the real rustls listener, TLS
+policy, CA trust and hostname checks in the scan while making the revocation check actionable.
+Separately cap the default locally-issued server leaf at 365 days, below the 398-day medium-alert
+threshold.
+
+In the code: `.github/workflows/security-dynamic.yml` builds and serves the scan CRL and configures
+the file certificate. `coordinator/src/certs.rs::SERVER_CERT_VALID_DAYS` controls the default, and
+`coordinator/tests/certs.rs::internal_server_certificate_validity_stays_below_398_days` fails if
+the limit regresses.
 ## D27 Release decisions delegated to the lead (PRD-007, PRD-037, DOG-025)
 
 The operator delegated the remaining open questions: "All other questions answer them like a principal engineer and product owner would". The lead decided:
@@ -579,3 +630,54 @@ copy stop at 60 of 98 MiB on the macOS ARM64 runner (no progress for 80 s).
 Remaining limit: a commit that holds the writer connection for longer than the wait still makes
 requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.
+
+## D30 Measured headroom for the consolidated account view (WEB-010)
+
+After merging the active-session controls, scoped API-token management, paged audit history and
+passkey metadata, the production build measured 376,680 raw / 101,373 gzip bytes across the
+lazily-loaded JavaScript chunks (Playwright `e2e/budget.spec.ts`, Linux x86-64, 2026-11-08).
+Keep these screens on the lazy path so first-run and sign-in downloads remain unchanged; set the
+lazy cap to 377,000 raw / 102,000 gzip, under 0.7% raw headroom above the measured bundle. A later
+addition must still fit this explicit limit or record a new measurement and reason.
+
+## D31 Measured budget for passkey account management (PK-006, WEB-010)
+
+The Chromium production build with Account-screen passkey registration, rename and removal
+measured 381,268 raw / 103,006 gzip bytes across lazy JavaScript chunks (Playwright
+`e2e/budget.spec.ts`, Linux x86-64, 2026-11-08). The initial bundle stayed within its existing
+caps. Set the lazy caps to 383,000 raw / 104,000 gzip, leaving 1,732 raw and 994 gzip bytes of
+headroom; do not increase the cap again without another measured reason.
+
+In the code: `web/budget.json`, `web/src/views/account.ts`, and `web/src/passkeys.ts`.
+
+## D32 Passkey records use the stable principal ID (SEC2-019, PK-006)
+
+Passkey credentials, canonical origins and ceremonies use the stable principal ID, never the
+administrator's chosen username. The previous implementation mixed both identities, which made a
+passkey enrolled under a non-default username invisible to sign-in, account management and the
+Internet-mode startup check. Schema migration 22 rekeys the existing credential and origin rows to
+the single administrator principal and discards pending ceremonies; the coordinator has only one
+administrator, so that migration preserves the existing owner while making later role/username
+changes independent of credential ownership.
+
+In the code: `coordinator/src/db.rs::MIGRATE_V22`, `coordinator/src/http.rs`, and
+`coordinator/src/server.rs`; regressions are `coordinator/tests/passkeys.rs::schema_21_migration_rekeys_legacy_passkeys_and_origins_to_the_stable_principal` and `coordinator/tests/web_api.rs::passkey_management_requires_fresh_session_and_is_principal_scoped`.
+
+## D33 Distinguish passkey step-up from password step-up (PK-008, PK-009)
+
+Passkey step-up uses a separate five-minute WebAuthn challenge kind bound to the active
+principal and session token hash. Successful assertion rotates the session and stores
+`fresh_auth_method = "passkey"`; password/TOTP step-up stores `"password"`. API-token
+creation checks both the ten-minute freshness deadline and this method, so an old session,
+password-only reauthentication, or an administrator bearer token cannot mint another bearer
+credential. Migration 23 expands the challenge-kind constraint while preserving valid pending
+ceremonies; migration 24 adds a deny-by-default method marker to sessions. This explicit marker
+avoids inferring the authentication factor from a request path or from the mere presence of a
+freshness timestamp.
+
+In the code: `coordinator/src/db.rs::MIGRATE_V23_CHALLENGES`,
+`coordinator/src/db.rs::MIGRATE_V24_SESSION_AUTH_METHOD`, and
+`coordinator/src/http.rs::fresh_passkey_step_up`; covered by
+`coordinator/tests/passkeys.rs::migrations_add_passkey_tables_and_challenge_is_session_bound_single_use`,
+`coordinator/tests/web_api.rs::step_up_rotates_session_credentials_and_gates_api_token_lifecycle`,
+and the Chromium virtual-authenticator flow in `web/e2e/passkey-login.spec.ts`.

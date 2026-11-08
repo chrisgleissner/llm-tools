@@ -16,7 +16,7 @@ as limitations, not reported as verified. This report is derived from `SPEC_STAT
 `DECISIONS.md`.
 Standalone Bridge is unchanged and opens no network connection. This report is derived
 from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
-Main CI run 42258350255 exposed a tmux 3.4 first-run test expectation mismatch. PR #33
+Main CI run 42258200255 exposed a tmux 3.4 first-run test expectation mismatch. PR #33
 corrected it and merged; main CI run 42269767860 is green on every job.
 
 ## 1. Implementation summary
@@ -71,10 +71,10 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 262 |
-| Incomplete `[~]` | 79 |
+| Verified `[x]` | 282 |
+| Incomplete `[~]` | 63 |
 | Blocked `[!]` | 5 |
-| Not started `[ ]` | 89 |
+| Not started `[ ]` | 85 |
 | **Total** | **435** |
 
 The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Two of the verified rows (DOG-023, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 rather than by new evidence; each row says so.

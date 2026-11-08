@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Page } from "@playwright/test";
-import { expect, expectNoHorizontalScroll, navTo, setupViaUi, test } from "./fixtures";
+import { expect, expectNoHorizontalScroll, navTo, setupViaUi, stepUpViaUi, test } from "./fixtures";
 import { startStation } from "./stations";
 
 const python = join(resolve(import.meta.dirname, "../.."), ".venv", "bin", "python");
@@ -84,6 +84,7 @@ test("every page, menu and dialog fits the screen with large targets", async ({ 
   await audit(page, "add worker dialog");
   await page.locator("#add-worker").getByLabel("Worker name").fill("phone-test");
   await page.locator("#add-worker").getByRole("button", { name: "Add worker" }).click();
+  await stepUpViaUi(page);
   await expect(page.locator("#enrol-result")).toBeVisible();
   await fits("#enrol-result");
   await audit(page, "enrolment dialog");

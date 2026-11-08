@@ -130,6 +130,43 @@ async fn every_route_requires_credentials_except_the_public_ones() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_api_and_worker_credentials_cannot_cross_route_groups() {
+    let env = boot().await;
+    let mut browser = env.admin().await;
+    let worker_token = browser.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &worker_token, "principal-isolation", 0).await;
+    let api_token = env.test_api_token("admin-api", &["admin"]);
+
+    let worker_token_on_api = browser
+        .send(
+            browser
+                .bare(Method::GET, "/api/v1/workers")
+                .header("authorization", format!("Bearer {worker_token}")),
+        )
+        .await;
+    assert_eq!(worker_token_on_api.0, 401, "worker tokens must not authenticate API routes");
+
+    for (label, headers) in [
+        ("API token", vec![("authorization", format!("Bearer {api_token}"))]),
+        (
+            "browser cookie",
+            vec![("cookie", format!("__Host-bridge_session={}", browser.cookie.as_deref().unwrap()))],
+        ),
+    ] {
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
+        refused_with(env.ws("/api/v1/worker/connect", &headers).await.expect_err(label), 401);
+    }
+    let api_read = browser
+        .bare(Method::GET, "/api/v1/workers")
+        .header("authorization", format!("Bearer {api_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api_read.status().as_u16(), 200, "API token remains valid on API routes");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn openapi_route_is_public_and_matches_the_runtime_generator() {
     let env = boot().await;
     let api = env.api();
@@ -138,9 +175,35 @@ async fn openapi_route_is_public_and_matches_the_runtime_generator() {
     assert_eq!(body["openapi"], "3.1.0");
     assert!(body["paths"]["/api/v1/openapi.json"]["get"].is_object());
     assert!(body["paths"]["/api/docs"]["get"].is_object());
+    for path in ["/api/v1/workers/{name}/sessions", "/api/v1/workers/{name}/usage"] {
+        assert_eq!(
+            body["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CommandOutcome"
+        );
+    }
+    let session_parameters = body["paths"]["/api/v1/workers/{name}/sessions"]["get"]["parameters"].as_array().unwrap();
+    assert!(session_parameters
+        .iter()
+        .any(|parameter| parameter["name"] == "cursor" && parameter["in"] == "query"));
+    assert!(session_parameters
+        .iter()
+        .any(|parameter| parameter["name"] == "limit" && parameter["schema"]["maximum"] == 1000));
     let (status, html) = api.get("/api/docs").await;
     assert_eq!(status, 200);
-    assert!(html.as_str().unwrap().contains("/api/v1/openapi.json"));
+    let html = html.as_str().unwrap();
+    assert!(html.contains("/api/v1/openapi.json"));
+    assert!(!html.to_ascii_lowercase().contains("<script"), "the reference must stay script-free");
+    assert!(!html.to_ascii_lowercase().contains("<style"), "the reference must not use inline styling");
+    assert!(!html.contains("https://"), "the reference must not load or link to remote assets");
+    let operations = body["paths"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|methods| methods.keys())
+        .filter(|method| matches!(method.as_str(), "get" | "post" | "patch" | "put" | "delete" | "head" | "options"))
+        .count();
+    assert_eq!(html.matches("<tr><td>").count(), operations, "the reference lists every documented operation");
     env.stop().await;
 }
 
@@ -171,6 +234,25 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
     let head = session.rb(Method::HEAD, "/api/v1/missions").send().await.unwrap();
     assert_eq!(head.status().as_u16(), 200);
     assert!(head.bytes().await.unwrap().is_empty());
+    for header in ["x-http-method-override", "x-method-override", "x-http-method"] {
+        let before_tokens = env.srv.state.db.api_tokens_list().unwrap().len();
+        let token_override = session
+            .rb(Method::POST, "/api/v1/tokens")
+            .header(header, "GET")
+            .json(&serde_json::json!({"name":"override-must-not-create"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(token_override.status().as_u16(), 400, "{header}");
+        assert_eq!(token_override.headers()["content-type"], "application/problem+json", "{header}");
+        let problem: serde_json::Value = token_override.json().await.unwrap();
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request", "{header}");
+        assert_eq!(
+            env.srv.state.db.api_tokens_list().unwrap().len(),
+            before_tokens,
+            "{header} must not mutate state"
+        );
+    }
     env.stop().await;
 }
 
@@ -217,15 +299,8 @@ async fn fetch_metadata_blocks_cross_site_cookie_requests_except_console_navigat
         .await;
     refused_with(websocket.expect_err("cross-site WebSocket request must be rejected"), 403);
 
-    let (status, created) = admin
-        .post(
-            "/api/v1/tokens",
-            serde_json::json!({"name":"metadata-check","scopes":["admin"],"expires_days":1}),
-        )
-        .await;
-    assert_eq!(status, 201, "{created}");
     let mut bearer = env.api();
-    bearer.bearer = created["secret"].as_str().map(str::to_string);
+    bearer.bearer = Some(env.test_api_token("metadata-check", &["admin"]));
     let (status, _) = bearer
         .send(
             bearer
@@ -353,7 +428,7 @@ async fn every_authenticated_route_enforces_its_declared_token_scope() {
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_worker_token_is_refused_on_both_worker_endpoints() {
     let env = boot().await;
-    let api = env.admin().await;
+    let mut api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (st, _) = api.send(api.rb(Method::DELETE, "/api/v1/workers/w1")).await;
     assert_eq!(st, 200);
