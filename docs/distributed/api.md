@@ -43,6 +43,9 @@ offline, the command remains queued and the response has state `pending` and a
 can still report `uncertain`; clients must not treat that as success. Resource
 endpoints, `Idempotency-Key`, `If-Match` and opaque cursor pagination share this
 durable command journal. Remaining CLI parity decisions are tracked below.
+The generic journal view recursively removes private path, prompt, credential,
+environment and terminal-output fields from its stored request and result; use
+resource-specific endpoints for their bounded public projections.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
