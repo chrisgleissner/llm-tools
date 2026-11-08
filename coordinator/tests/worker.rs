@@ -367,7 +367,16 @@ async fn redelivery_after_reconnect_and_generation() {
         (Some("req-r"), Some("req-off"))
     );
     assert_eq!(first["generation"], 3);
-    assert_eq!(api.get("/api/v1/commands/req-r").await.1["state"], "sent");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if api.get("/api/v1/commands/req-r").await.1["state"] == "sent" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a delivered command is marked sent after the websocket send completes");
     // still no ack: another reconnect redelivers again (worker-side idempotence handles duplicates)
     drop(c);
     let (mut d, _) = Fw::connect(&env, &token, "wid1", 0).await;
