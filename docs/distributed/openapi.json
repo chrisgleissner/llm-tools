@@ -2838,7 +2838,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -3103,7 +3104,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -3864,7 +3866,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -4124,7 +4127,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -7968,7 +7972,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -12027,7 +12032,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -15896,7 +15902,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -16881,7 +16888,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -17121,7 +17129,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true
@@ -18641,7 +18650,8 @@
           "credentials": [
             "password",
             "totp",
-            "recovery-code"
+            "recovery-code",
+            "passkey"
           ],
           "max_age_seconds": 600,
           "required": true

@@ -624,7 +624,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         || (path == "/api/v1/missions" && method == "POST")
         || (path == "/api/v1/missions/{id}/suspend-until-credits" && method == "POST");
     if fresh_step_up {
-        op["x-fresh-auth"] = json!({"required":true,"max_age_seconds":600,"credentials":["password","totp","recovery-code"]});
+        op["x-fresh-auth"] = json!({"required":true,"max_age_seconds":600,"credentials":["password","totp","recovery-code","passkey"]});
         op["responses"]["403"]["description"] = json!("Fresh browser-session authentication is required; bearer tokens are not accepted.");
     }
     if path == "/api/v1/tokens" && method == "POST" {
@@ -1040,6 +1040,11 @@ mod tests {
                 "{method} {path} route scope must reject bearer tokens"
             );
         }
+        assert!(doc["paths"]["/api/v1/auth/passkeys/registration/start"]["post"]["x-fresh-auth"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|credential| credential == "passkey"));
     }
 
     #[test]
