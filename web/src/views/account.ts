@@ -162,7 +162,7 @@ function passkeyReenrollment(): HTMLElement {
     }
     submit.disabled = true;
     try {
-      const result = await api.reenrollPasskeys(current.input.value, confirm.checked);
+      const result = await api.post<{ origin: string }>("/api/v1/auth/passkeys/re-enroll", { current_password: current.input.value, new_origin: location.origin, confirm: confirm.checked });
       current.input.value = "";
       status.textContent = `Passkeys were removed. Register a new passkey for ${result.origin}.`;
     } catch (error) {
@@ -235,7 +235,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       passkeyGuidance.replaceChildren(
         h("h2", {}, "Passkeys"),
         h("p", { class: "muted" }, "Passkeys need a trusted address such as Tailscale."),
-        h("a", { href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#enable-passkeys-optional", target: "_blank", rel: "noopener" }, "Enable passkeys (optional)"),
+        h("a", { class: "btn", href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#enable-passkeys-optional", target: "_blank", rel: "noopener" }, "Enable passkeys (optional)"),
       );
     }
   }).catch(() => {});

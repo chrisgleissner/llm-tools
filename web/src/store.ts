@@ -54,16 +54,6 @@ function emit(): void {
   for (const l of [...listeners]) l();
 }
 
-/** New events of one worker, read from the coordinator after a change notice (`GET /api/v1/events`); the notice itself carries none. */
-const eventListeners = new Set<(events: api.BridgeEvent[]) => void>();
-export function onEvents(fn: (events: api.BridgeEvent[]) => void): () => void {
-  eventListeners.add(fn);
-  return () => eventListeners.delete(fn);
-}
-export function publishEvents(events: api.BridgeEvent[]): void {
-  for (const listener of [...eventListeners]) listener(events);
-}
-
 /** True when the worker replicated the digest (task counts, and for a live mission the current task, provider, model and needs): DOG-021. */
 export const hasDigest = (m: api.MissionInfo): boolean => m.task_counts !== undefined;
 

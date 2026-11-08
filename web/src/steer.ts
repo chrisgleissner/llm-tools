@@ -1,7 +1,7 @@
 // Steer dialogs of the session pane (loaded when the first Steer item is chosen, so they stay out of the terminal chunk).
 import * as api from "./api";
 import { h } from "./dom";
-import { onEvents } from "./store";
+import { onEvents } from "./events-bus";
 import { announce, confirmDialog, reportOutcome } from "./ui";
 
 export interface SteerTarget {

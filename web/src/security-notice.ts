@@ -6,6 +6,10 @@ import { h } from "./dom";
 import { icon } from "./icons";
 import { announce, openPanel } from "./ui";
 
+interface Notice { id: string; category: string; created_at: number }
+const read = async (): Promise<Notice[]> => (await api.get<{ notifications: Notice[] }>("/api/v1/security/notifications")).notifications;
+const dismissOne = (id: string): Promise<unknown> => api.del(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
+
 const LABELS: Record<string, string> = {
   new_sign_in_address: "A sign-in came from a new address.",
   new_sign_in_device: "A sign-in came from a new device.",
@@ -16,7 +20,7 @@ const LABELS: Record<string, string> = {
 
 /** Keep `button` (hidden while there are no notices) current: after a token or passkey change and every minute. Returns the cleanup. */
 export function mountSecurityNotice(button: HTMLElement): () => void {
-  let items: api.SecurityNotification[] = [];
+  let items: Notice[] = [];
   let panel: HTMLDialogElement | null = null;
   const list = h("section", { "aria-label": "Security notifications" });
   const paint = (): void => {
@@ -26,7 +30,7 @@ export function mountSecurityNotice(button: HTMLElement): () => void {
     list.replaceChildren(...items.map((item) => {
       const dismiss = h("button", { class: "btn small ghost", type: "button", "aria-label": "Dismiss security notification" }, "Dismiss");
       dismiss.addEventListener("click", () => {
-        void api.dismissSecurityNotification(item.id).then(() => {
+        void dismissOne(item.id).then(() => {
           items = items.filter((x) => x.id !== item.id);
           paint();
           if (items.length === 0) panel?.close();
@@ -36,7 +40,7 @@ export function mountSecurityNotice(button: HTMLElement): () => void {
     }));
   };
   const refresh = (): void => {
-    void api.securityNotifications().then((next) => {
+    void read().then((next) => {
       items = next;
       paint();
     }).catch(() => {});

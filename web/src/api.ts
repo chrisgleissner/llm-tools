@@ -144,22 +144,6 @@ export async function post<T>(path: string, body: unknown = {}): Promise<T> {
   return result;
 }
 
-export interface SecurityNotification { id: string; category: string; created_at: number }
-export async function securityNotifications(): Promise<SecurityNotification[]> {
-  return (await get<{ notifications: SecurityNotification[] }>("/api/v1/security/notifications")).notifications;
-}
-export async function dismissSecurityNotification(id: string): Promise<void> {
-  await del<{ ok: boolean }>(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
-}
-
-export function reenrollPasskeys(currentPassword: string, confirm: boolean): Promise<{ ok: boolean; origin: string; registration_required: boolean }> {
-  return post("/api/v1/auth/passkeys/re-enroll", {
-    current_password: currentPassword,
-    new_origin: location.origin,
-    confirm,
-  });
-}
-
 export interface PasswordPolicy {
   min_length: number;
   max_length: number;
@@ -464,9 +448,4 @@ export async function optimisticMutation(apply: () => void, rollback: () => void
   }
   if (result.outcome === "rejected" || result.outcome === "failed") rollback();
   return result;
-}
-
-/** Events of one worker after a cursor, read from the coordinator's own store: no command reaches the worker. Each row is `{id, event}`. */
-export function workerEvents(target: string, after: number, limit: number): Promise<{ events: Array<{ id: number; event: Record<string, unknown> }> }> {
-  return get(`/api/v1/events?worker=${encodeURIComponent(target)}&after=${after}&limit=${limit}`);
 }

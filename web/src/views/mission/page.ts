@@ -5,7 +5,8 @@ import * as api from "../../api";
 import type { BridgeEvent } from "../../api";
 import { absTime, copyText, debounce, emptyState, button, h, hooks } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
-import { hasDigest, listedNeeds, missionState, onStream, publishEvents, refresh, store, subscribe, worker } from "../../store";
+import { publishEvents } from "../../events-bus";
+import { hasDigest, listedNeeds, missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import type { DerivedState } from "../../state";
 import { announce, announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
@@ -17,6 +18,10 @@ import { sessionReserve } from "../../session-box";
 import { loadSession, type SessionHandle } from "./session";
 import { tasksPanel } from "./tasks";
 import { asOfText, type PageCtx, type Tab, type Task } from "./types";
+
+/** Events of one worker after a cursor, read from the coordinator's own store: no command reaches the worker. Each row is `{id, event}`. */
+const workerEvents = (target: string, after: number, limit: number): Promise<{ events: Array<{ id: number; event: Record<string, unknown> }> }> =>
+  api.get(`/api/v1/events?worker=${encodeURIComponent(target)}&after=${after}&limit=${limit}`);
 
 const TASK_FETCH = 500;
 const EVENT_WINDOW = 300;
@@ -440,7 +445,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const cursor = worker(workerName)?.event_cursor ?? 0;
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.workerEvents(workerName, eventStart, 1000);
+      const r = await workerEvents(workerName, eventStart, 1000);
       events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
       eventCursor = Math.max(cursor, ...r.events.map((e) => Number(e.id) || 0));
       eventError = "";
@@ -458,7 +463,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.workerEvents(workerName, from, EVENT_WINDOW);
+      const r = await workerEvents(workerName, from, EVENT_WINDOW);
       const older = r.events.filter((x) => Number(x.id) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
@@ -475,7 +480,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const after = eventCursor;
     if (cursor - after > 1000) return void (await loadEvents());
     try {
-      const r = await api.workerEvents(workerName, after, Math.min(1000, cursor - after));
+      const r = await workerEvents(workerName, after, Math.min(1000, cursor - after));
       const known = new Set(events.map((e) => e.id));
       const added = r.events.map(normalize).filter((e) => e.mission_id === missionId && !known.has(e.id));
       eventCursor = cursor;
