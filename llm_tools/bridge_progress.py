@@ -40,7 +40,56 @@ def _has_git_marker(root: Path) -> bool:
         current = parent
 
 
+MAX_DIRTY_PATHS = 50
+_MAX_DIRTY_PATH_CHARS = 240
+
+
+def _checkpoint_base(cwd: str | Path) -> dict[str, Any]:
+    """The repository root, ``HEAD`` commit and files already modified when a run starts.
+
+    ``llm-bridge task diff`` compares the working tree with this base. A
+    repository without commits has ``head`` ``unborn``. Anything that cannot be
+    read is left out, so a checkpoint never fails because of this extra data.
+    """
+    try:
+        root = Path(cwd).resolve(strict=True)
+    except (OSError, ValueError):
+        return {}
+    head = _git(root, 'rev-parse', '--verify', 'HEAD')
+    if head is None and _git(root, 'rev-parse', '--git-dir') is None:
+        return {}
+    base: dict[str, Any] = {'root': str(root), 'head': head.decode('ascii', 'replace').strip() if head else 'unborn'}
+    status = _git(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all')
+    if status is not None:
+        paths = _status_paths(status)
+        base['dirty'] = [path[:_MAX_DIRTY_PATH_CHARS] for path in paths[:MAX_DIRTY_PATHS]]
+        if len(paths) > MAX_DIRTY_PATHS:
+            base['dirty_total'] = len(paths)
+    return base
+
+
+def _status_paths(raw: bytes) -> list[str]:
+    """Paths named by ``status --porcelain=v1 -z``; a rename or copy names its new path."""
+    paths: list[str] = []
+    entries = iter(raw.split(b'\0'))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        paths.append(os.fsdecode(entry[3:]))
+        if entry[:1] in {b'R', b'C'}:
+            next(entries, None)  # the old path of a rename or copy
+    return paths
+
+
 def repository_checkpoint(cwd: str | Path, *, max_files: int = 512, max_bytes: int = 8*1024*1024) -> dict[str, Any]:
+    """Fingerprint a bounded workspace and record its ``HEAD`` and files already modified."""
+    result = _fingerprint_checkpoint(cwd, max_files=max_files, max_bytes=max_bytes)
+    if result.get('reason') != 'not a Git worktree':
+        result.update(_checkpoint_base(cwd))
+    return result
+
+
+def _fingerprint_checkpoint(cwd: str | Path, *, max_files: int = 512, max_bytes: int = 8*1024*1024) -> dict[str, Any]:
     """Hash a complete bounded tracked/untracked workspace, or report unknown.
 
     Ignored files are excluded by Git. Symlinks contribute their link text,

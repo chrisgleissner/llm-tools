@@ -26,7 +26,8 @@ def test_handoff_lists_newest_attempt_first_when_timestamps_match(tmp_path,monke
         for index,station in enumerate(['claude','codex'],1):
             operation = store.begin_operation(task,iteration=index,station=station)
             attempts.append(operation)
-            store.finish_operation(operation,exit_code=75)
+            # Status 1, not 75: since INT-004 a status 75 is requeued only within max_autonomy_aborts (default 0), and this test needs two attempts.
+            store.finish_operation(operation,exit_code=1)
             store.continue_task_after_provider_failure(operation,max_failures=3)
         hooks = BridgeMissionHooks(mid,handle=None,headless=True,controller_logs=tmp_path/'controller.log')
         hooks.bind(store)

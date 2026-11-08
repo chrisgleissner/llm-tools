@@ -2,8 +2,9 @@
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
 `feat/distributed-bridge` (pull request #30). Its original 169 specification IDs and operator
-addenda 2 to 7 remain verified. The unified register now has 344 IDs, including tracking
-requirements and the physical Pi work; current in-progress and blocked rows are listed below.
+addenda 2 to 7 remain verified. The unified register now has 434 IDs, including tracking
+requirements, the physical Pi work, the follow-up groups (`API`, `SEC2`, `PK`, `UX`, `REV`, `DOG`, `PAR`)
+the release-readiness group `PRD` and the redesign group `UXR`; current in-progress and blocked rows are listed below.
 CI run 42181869238 on c81ccde is green on every job,
 across Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64.
 ARM64 deployment was verified under emulation and on the physical Raspberry Pi Zero 2 W.
@@ -70,13 +71,13 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 257 |
-| Incomplete `[~]` | 62 |
+| Verified `[x]` | 263 |
+| Incomplete `[~]` | 78 |
 | Blocked `[!]` | 5 |
-| Not started `[ ]` | 20 |
-| **Total** | **344** |
+| Not started `[ ]` | 88 |
+| **Total** | **434** |
 
-The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.
+The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Two of the verified rows (DOG-023, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 rather than by new evidence; each row says so.
 ## 3. Test results and coverage
 
 CI run 42181869238 on c81ccde:

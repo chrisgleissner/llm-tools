@@ -296,6 +296,9 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/{action}` with `action=retry`. |
 | `task verify` | Typed `task.verify`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
 | `task reject` | Typed `task.reject`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify` with `approved:false`. |
+| `task approve` | Typed `task.verify` with `approved:true`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
+| `task output` | Typed `task.output` (end of the retained provider log of the task's last run) via `POST /api/v1/commands`; no resource path. |
+| `task diff` | Typed `task.diff` (the task's recorded change) via `POST /api/v1/commands`; no resource path. |
 | `proposal create` | Typed `proposal.create`; resource `POST /api/v1/missions/{id}/proposals`. Source operation is checked by the worker. |
 | `proposal list` | Typed `proposal.list`; resource `GET /api/v1/missions/{id}/proposals`. |
 | `proposal accept` | Typed `proposal.accept`; resource `POST /api/v1/missions/{id}/proposals/{n}/{action}` with `action=accept`. |
@@ -340,7 +343,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | CLI option | REST field/transport mapping or exclusion |
 |---|---|
 | `--file` | Local prompt/artifact input; for remote `task add`/`amend`, prompt text is sent as typed operation `prompt` (file is read client-side). |
-| `--follow` | Local file-follow behavior; no API equivalent. |
+| `--follow` | Local file-follow behavior (`view`, `events`, `task output`); no API equivalent. Remote `events --follow` and `task output --follow` are refused. |
 | `--acceptance` | `task.add` or `mission.create` resource body `acceptance`. |
 | `--auto-continue` | Local mission configuration; `mission create --target` returns the typed `unsupported-remote-option` result. |
 | `--capacity-refresh-seconds` | Local controller setting; remote mission creation returns `unsupported-remote-option`. |
@@ -410,6 +413,24 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--route` | `mission.steer` typed field `route` for handoff. |
 | `--exclude-client` | Internal local tmux cleanup selector; never remote. |
 | `--startup-token` | Internal controller startup handoff; never remote. |
+| `--after-task` | Local `pause`/`stop` timing (steering intent `pause-after-iteration` or `stop-after-task`). Refused with `--target`; use `steer` remotely. |
+| `--background` | Internal controller launch flag; never remote. |
+| `--bundle` | Local `doctor` diagnostic archive written to this host; no remote equivalent. |
+| `--colour` | Local terminal rendering for `theme`; no API field. |
+| `--hold` | `task.reject` typed field `hold`. |
+| `--mode` | `mission.create` and `mission.start` typed fields `headless` and `native_tui`, set by the client from the one choice. |
+| `--new` | Local warning suppression for a folder that already has a mission; remote creation shows no such warning. |
+| `--palette-size` | Local terminal preview for `theme`; no API field. |
+| `--requeue` | `task.amend` typed field `requeue`. |
+| `--since` | `mission.events` typed field `since_seconds`; the request uses `POST /api/v1/commands` because the events resource pages by cursor only. |
+| `--to` | `mission.steer` typed field `route` for handoff (same as `--route`). |
+| `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
+| `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
+| `--yes` | Confirmation for `cancel`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. |
+| `-f` | Short form of `--follow` for `events`. |
+| `-j` | Short form of `--json`. |
+| `-m` | Short form of `--mission`. |
+| `-t` | Short form of `--task`. |
 | `--help` | Local argparse help; no API call. |
 | `-h` | Alias for `--help`; local argparse help, no API call. |
 

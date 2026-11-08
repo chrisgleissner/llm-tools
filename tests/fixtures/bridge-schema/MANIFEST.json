@@ -1,0 +1,59 @@
+{
+  "mission_id": "0000fixture0000000000000000000001",
+  "fixtures": [
+    {
+      "version": 1,
+      "kind": "stamped",
+      "source": "schema 2 (commit 219b5f0) stamped user_version=1",
+      "file": "schema-v1.sqlite3"
+    },
+    {
+      "version": 2,
+      "kind": "history",
+      "source": "219b5f0:llm_tools/bridge_store.py",
+      "file": "schema-v2.sqlite3"
+    },
+    {
+      "version": 3,
+      "kind": "history",
+      "source": "0ace697:llm_tools/bridge_store.py",
+      "file": "schema-v3.sqlite3"
+    },
+    {
+      "version": 4,
+      "kind": "stamped",
+      "source": "schema 3 (commit 0ace697) stamped user_version=4",
+      "file": "schema-v4.sqlite3"
+    },
+    {
+      "version": 5,
+      "kind": "stamped",
+      "source": "schema 6 (commit b11b719) stamped user_version=5",
+      "file": "schema-v5.sqlite3"
+    },
+    {
+      "version": 6,
+      "kind": "history",
+      "source": "b11b719:llm_tools/bridge_store.py",
+      "file": "schema-v6.sqlite3"
+    },
+    {
+      "version": 7,
+      "kind": "derived",
+      "source": "schema 10 without the objects added for versions above 7",
+      "file": "schema-v7.sqlite3"
+    },
+    {
+      "version": 8,
+      "kind": "derived",
+      "source": "schema 10 without the objects added for versions above 8",
+      "file": "schema-v8.sqlite3"
+    },
+    {
+      "version": 9,
+      "kind": "derived",
+      "source": "schema 10 without the objects added for versions above 9",
+      "file": "schema-v9.sqlite3"
+    }
+  ]
+}

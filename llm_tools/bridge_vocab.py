@@ -15,6 +15,21 @@ from __future__ import annotations
 from enum import StrEnum
 
 
+class RunMode(StrEnum):
+    """How a mission's provider runs: in its own terminal in a station, under a controller with an activity log in a station, or with no station."""
+
+    NATIVE = "native"
+    BACKGROUND = "background"
+    HEADLESS = "headless"
+
+
+def mission_mode(config: dict[str, object]) -> str:
+    """The run mode a mission config names (the two saved booleans; Native wins when both are set, as the controller does)."""
+    if config.get("native_tui"):
+        return RunMode.NATIVE
+    return RunMode.HEADLESS if config.get("headless") else RunMode.BACKGROUND
+
+
 class MissionStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"
@@ -36,6 +51,21 @@ class TaskStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+# The word a person sees for a stored task status.  The stored value stays ``VERIFYING`` (it is the
+# database, JSON and protocol value); the task is waiting for the operator, so the user-facing word is
+# ``REVIEW``.  A mission with such a task is shown as ``NEEDS YOU``.
+TASK_STATUS_LABELS: dict[str, str] = {"VERIFYING": "REVIEW"}
+MISSION_NEEDS_YOU_LABEL = "NEEDS YOU"
+# Shown for a mission that should have a controller but has none (it stopped unexpectedly).
+MISSION_INTERRUPTED_LABEL = "INTERRUPTED"
+
+
+def status_label(status: object) -> str:
+    """The user-facing word for a task status (``VERIFYING`` is shown as ``REVIEW``); other values pass through."""
+    text = str(status)
+    return TASK_STATUS_LABELS.get(text.strip().upper(), text)
 
 
 class OperationStatus(StrEnum):
@@ -152,13 +182,16 @@ class EventKind(StrEnum):
     PROVIDER_HANDOFF = "provider-handoff"
     PROVIDER_HANDOFF_EXHAUSTED = "provider-handoff-exhausted"
     PROVIDER_HANDOFF_SELECTED = "provider-handoff-selected"
+    PROVIDER_ORPHANED = "provider-orphaned"
     PROVIDER_SELECTION = "provider-selection"
     PROVIDER_RESULT_DIAGNOSED = "provider-result-diagnosed"
     PROVIDER_SWITCHED = "provider-switched"
+    PROVIDER_USAGE_LIMIT = "provider-usage-limit"
     PROVIDER_WAIT = "provider-wait"
     REPOSITORY_CHECKPOINT = "repository-checkpoint"
     PROMPT_ASSEMBLED = "prompt-assembled"
     MISSION_POLICY_CHANGED = "mission-policy-changed"
+    MISSION_WAITING_FOR_OPERATOR = "mission-waiting-for-operator"
     REVIEW_HOLD = "review-hold"
     REVIEW_HOLD_RELEASED = "review-hold-released"
     ROTATION_APPLIED = "rotation-applied"
@@ -187,14 +220,18 @@ class EventKind(StrEnum):
     TASK_AMENDED = "task-amended"
     TASK_AMENDMENT_APPLIED = "task-amendment-applied"
     TASK_DECLINED_RELEASED = "task-declined-released"
+    TASK_INTERRUPTED_RELEASED = "task-interrupted-released"
     TASK_EVIDENCE_RECORDED = "task-evidence-recorded"
     TASK_LAUNCH_REFUSED = "task-launch-refused"
+    TASK_NOTICE_DEFERRED = "task-notice-deferred"
+    TASK_NOTICE_DELIVERED = "task-notice-delivered"
     TASK_PRIORITY = "task-priority"
     TASK_PROPOSAL_ACCEPTED = "task-proposal-accepted"
     TASK_PROPOSAL_REJECTED = "task-proposal-rejected"
     TASK_PROPOSED = "task-proposed"
     TASK_PROVIDER_CONTINUATION = "task-provider-continuation"
     TASK_READY = "task-ready"
+    TASK_AWAITING_ANSWER = "task-awaiting-answer"
     TASK_STATUS_TRANSITION = "task-status-transition"
     TASK_REJECTED = "task-rejected"
     TASK_REORDERED = "task-reordered"

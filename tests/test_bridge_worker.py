@@ -431,6 +431,8 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "current_task", "station", "model", "needs_kind", "needs_tasks"} for mission in summaries.values())
+    assert all(mission["task_counts"] == {"QUEUED": 1} for mission in summaries.values())
     assert all({"id", "name", "status", "folder", "updated_at", "task_counts", "station", "model"} <= set(mission) for mission in summaries.values())
 
 
@@ -781,3 +783,20 @@ def test_read_only_worker_shares_terminals_only_with_the_view_opt_in(state, tmp_
     token.write_text(TOKEN)
     assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:1", "--token-file", str(token), "--allow-terminal-view", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["allow_terminal_view"] is True
+
+
+def test_hello_offers_every_supported_version_and_a_welcome_must_pick_one_of_them(state, monkeypatch):
+    from llm_tools import bridge_protocol
+
+    directory, _ = state
+    monkeypatch.setattr(worker, "SUPPORTED_VERSIONS", (1, 2))
+    monkeypatch.setattr(bridge_protocol, "SUPPORTED_VERSIONS", (1, 2))
+    session, _saved = _session(directory)
+    hello = decode(session.hello().encode())
+    assert hello.payload["protocol_versions"] == [1, 2]
+    # A coordinator one version newer or older than the worker's newest answers with a version the worker offered.
+    for selected in (1, 2):
+        assert decode(Message("welcome", "c", 1, {"generation": 1, "protocol_version": selected, "event_cursor": 0}).encode()).payload["protocol_version"] == selected
+    with pytest.raises(bridge_protocol.ProtocolError, match="protocol version 3 is not supported") as caught:
+        decode(Message("welcome", "c", 1, {"generation": 1, "protocol_version": 3, "event_cursor": 0}).encode())
+    assert caught.value.code == "unsupported-version"

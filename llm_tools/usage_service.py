@@ -163,7 +163,9 @@ def _atomic_json_write(path: Path, obj: dict[str, Any]) -> None:
 
 def _append_history(path: Path, obj: dict[str, Any]) -> None:
     _mkdir_private(path.parent)
-    with path.open("a", encoding="utf-8") as fh:
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+        os.fchmod(fh.fileno(), 0o600)
         fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
@@ -638,6 +640,8 @@ Type=simple
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
 Environment=PYTHONUNBUFFERED=1
 {_systemd_assignment("PATH", path)}
 {_systemd_assignment("PYTHONPATH", root)}

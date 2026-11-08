@@ -102,14 +102,14 @@ def test_follow_up_task_reopens_a_completed_mission_and_start_runs_it(tmp_path, 
         _wait(lambda: status() == "COMPLETED")
         _wait(lambda: _released(state, mid))
         out = _call(env, "task", "add", "--mission", mid, "--prompt", "Follow-up job")
-        assert "Mission reopened · start it with: llm-bridge start" in out
-        assert status() == "STOPPED"
-        assert "STOPPED" in _call(env, "status", "--mission", mid)
+        assert f"Mission {mid[:8]} reopened · start it with: llm-bridge start" in out
+        assert status() == "CREATED"
+        assert "CREATED" in _call(env, "status", "--mission", mid)
         _call(env, "start", "--mission", mid, "--headless")
         _wait(lambda: status() == "COMPLETED")
         _wait(lambda: _released(state, mid))
         assert (tmp_path / "runs.txt").read_text().split() == ["1", "2"]  # the provider was told each task's mission number
-        assert "mission-reopened" in _call(env, "events", "--mission", mid)
+        assert "reopened" in _call(env, "events", "--mission", mid).lower()
     finally:
         if status() not in {"STOPPED", "COMPLETED", "FAILED", "CANCELLED"}:
             _call(env, "stop", "--mission", mid, "--force")

@@ -410,10 +410,11 @@ def target_event_summaries(rng: random.Random, sb: Sandbox) -> None:
     rendered = bridge_format.format_events(cli_events)
     if not isinstance(rendered, str):
         raise FuzzFailure("format_events did not return text")
-    for event in cli_events:
-        line = bridge_format._event_summary(event.get("data"))
-        if "\n" in line or len(line) > 140:
-            raise FuzzFailure(f"bridge_format._event_summary line not bounded/single: {line[:200]!r}")
+    # `events` now renders each event through the shared humaniser (bridge_event_text), which the
+    # checks above already cover; here every rendered line must stay bounded.
+    for line in rendered.splitlines():
+        if len(line) > 400:
+            raise FuzzFailure(f"format_events line not bounded: {line[:200]!r}")
 
 
 # ----------------------------------------------------------------------- regular expressions

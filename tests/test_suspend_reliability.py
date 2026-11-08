@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import common, sleep_soak
+from llm_tools import common, ralph_robin, sleep_soak
 
 
 class FakeProc:
@@ -524,7 +524,8 @@ def test_accepted_suspend_that_stays_awake_still_sees_operator_requests(monkeypa
     monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
     monkeypatch.setattr(common, "have_cmd", lambda name: True)
     monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
-    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (100.5, 90.0)]).__next__)
+    samples = iter([(100.0, 90.0)])
+    monkeypatch.setattr(common, "suspend_clock_sample", lambda: next(samples, (100.5, 90.0)))
     monkeypatch.setattr(common.subprocess, "run", lambda args, **kwargs: FakeProc(0, ""))
     polls = {"n": 0}
 
@@ -540,3 +541,179 @@ def test_accepted_suspend_that_stays_awake_still_sees_operator_requests(monkeypa
 
     assert out.suspended is False and out.reason == "sleep-not-observed"
     assert clock["t"] < 1100, "the wait ended at the operator request, not at the far reset time"
+
+
+# --------------------------------------------------------------------------- #
+# DOG-018: early wakes, boot-ID reconciliation, wake source
+# --------------------------------------------------------------------------- #
+
+
+def _boot_env(tmp_path: Path, boot_id: str = "boot-A") -> dict[str, str]:
+    boot_file = tmp_path / "boot_id"
+    boot_file.write_text(boot_id + "\n")
+    return _cache_env(tmp_path) | {"LLM_TOOLS_BOOT_ID_FILE": str(boot_file), "LLM_TOOLS_SYS_ROOT": str(tmp_path / "sys")}
+
+
+def _read_ledger(env: dict[str, str]) -> list[dict]:
+    return [json.loads(line) for line in common.suspend_ledger_path(env).read_text().splitlines()]
+
+
+def _early_wake_setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A suspend whose machine resumes at once (keyboard wake) while the target is far away."""
+    env = _boot_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10"}
+    sys_root = tmp_path / "sys"
+    (sys_root / "power").mkdir(parents=True)
+    (sys_root / "power" / "pm_wakeup_irq").write_text("18\n")
+    (sys_root / "kernel" / "irq" / "18").mkdir(parents=True)
+    (sys_root / "kernel" / "irq" / "18" / "actions").write_text("xhci_hcd\n")
+    wake_dir = sys_root / "class" / "wakeup" / "wakeup3"
+    wake_dir.mkdir(parents=True)
+    (wake_dir / "name").write_text("usb1\n")
+    (wake_dir / "event_count").write_text("3\n")
+    clock = {"t": 1000, "slept": False}
+    samples = {"n": 0}
+
+    def sample() -> tuple[float, float]:
+        samples["n"] += 1
+        if samples["n"] == 1:
+            return (100.0, 90.0)
+        (wake_dir / "event_count").write_text("4\n")  # the USB device signalled the wake
+        return (160.0, 90.0)
+
+    def fake_sleep(seconds: float) -> None:
+        clock["t"] += 60
+
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
+    monkeypatch.setattr(common, "have_cmd", lambda name: True)
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", sample)
+    monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
+    monkeypatch.setattr(common.time, "sleep", fake_sleep)
+    return env
+
+
+def test_early_wake_interrupted_still_records_suspend_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _early_wake_setup(monkeypatch, tmp_path)
+    polls = {"n": 0}
+
+    def interrupt() -> bool:
+        polls["n"] += 1
+        return polls["n"] >= 2
+
+    out = common.suspend_with_wake(5000, who="ralph-robin", cycle_id="early", env=env, should_interrupt=interrupt)
+
+    ledger = _read_ledger(env)
+    assert [r["event"] for r in ledger] == ["suspend_start", "suspend_done"]
+    done = ledger[-1]
+    assert done["early_by_seconds"] > 3000 and done["reliable"] is True
+    assert done["wake_irq"] == 18 and done["wake_irq_actions"] == "xhci_hcd" and done["wakeup_sources"] == ["usb1"]
+    assert done["boot_id"] == "boot-A" and ledger[0]["boot_id"] == "boot-A"
+    assert out.reliable is True and out.early_by_seconds > 3000
+    assert common.incomplete_suspend_cycles(common.suspend_ledger_path(env)) == []
+
+
+def test_early_wake_then_process_killed_leaves_suspend_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _early_wake_setup(monkeypatch, tmp_path)
+
+    def killed() -> bool:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        common.suspend_with_wake(5000, who="ralph-robin", cycle_id="killed", env=env, should_interrupt=killed)
+
+    done = _read_ledger(env)[-1]
+    assert done["event"] == "suspend_done" and done["cycle_id"] == "killed" and done["early_by_seconds"] > 3000
+    assert common.incomplete_suspend_cycles(common.suspend_ledger_path(env)) == []
+
+
+def test_late_wake_is_unreliable_but_early_wake_is_not(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _boot_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10", "LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE": "60"}
+    clock = {"t": 1000}
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
+    monkeypatch.setattr(common, "have_cmd", lambda name: True)
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (1120.0, 90.0)]).__next__)
+    monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
+    # The wait ended 500s before the target (interrupted after an early wake).
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None, *_i: clock.update(t=target - 500))
+    out = common.suspend_with_wake(2000, who="ralph-robin", env=env)
+    assert out.reliable is True and out.early_by_seconds == 500 and out.drift_seconds == -500
+    assert _read_ledger(env)[-1]["early_by_seconds"] == 500
+
+
+def test_wake_source_report_without_sysfs(tmp_path: Path) -> None:
+    env = {"LLM_TOOLS_SYS_ROOT": str(tmp_path / "missing")}
+    assert common.wake_source_report(common.wakeup_event_counts(env), env) == {}
+    assert common.read_suspend_success_count(env) is None
+    assert common.read_boot_id({"LLM_TOOLS_BOOT_ID_FILE": str(tmp_path / "nope")}) is None
+
+
+def test_same_boot_start_without_done_is_closed_without_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _boot_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    ledger = common.suspend_ledger_path(env)
+    sys_root = tmp_path / "sys" / "power" / "suspend_stats"
+    sys_root.mkdir(parents=True)
+    (sys_root / "success").write_text("7\n")
+    common.ledger_record_start(ledger, "ralph-robin-early", 9999, env, who="ralph-robin")
+    (sys_root / "success").write_text("8\n")  # the kernel completed a resume since
+
+    ralph_robin.report_prior_suspend_failures(common.setup_run_logs(tmp_path / "logs", "t"))
+
+    assert "warning" not in capsys.readouterr().err.lower()
+    records = _read_ledger(env)
+    assert records[-1]["event"] == "suspend_done" and records[-1]["reason"] == "process-ended-after-resume"
+    assert records[-1]["resume_confirmed"] is True
+    assert common.incomplete_suspend_cycles(ledger) == []
+
+
+def test_new_boot_id_after_start_still_warns_and_names_cycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _boot_env(tmp_path, "boot-A")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    ledger = common.suspend_ledger_path(env)
+    common.ledger_record_start(ledger, "ralph-robin-wedged", 9999, env, who="ralph-robin")
+    Path(env["LLM_TOOLS_BOOT_ID_FILE"]).write_text("boot-B\n")  # the machine rebooted
+
+    for _ in range(2):  # the warning stays until the operator clears it
+        ralph_robin.report_prior_suspend_failures(common.setup_run_logs(tmp_path / "logs", "t"))
+        err = capsys.readouterr().err
+        assert "ralph-robin-wedged" in err and "never resumed" in err and str(ledger) in err
+    assert [c["cycle_id"] for c in common.incomplete_suspend_cycles(ledger)] == ["ralph-robin-wedged"]
+
+
+def test_legacy_start_without_boot_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _boot_env(tmp_path) | {"LLM_USAGE_NOW_EPOCH": "100000"}
+    monkeypatch.setattr(common, "_boottime_seconds", lambda: 5000.0)  # this boot began at epoch 95000
+    ledger = common.suspend_ledger_path(env)
+    common.ensure_private_cache_dir(ledger.parent)
+    legacy = [
+        {"event": "suspend_start", "cycle_id": "old", "target_epoch": 1, "started_epoch": 90000},
+        {"event": "suspend_start", "cycle_id": "this-boot", "target_epoch": 1, "started_epoch": 99000},
+    ]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in legacy))
+
+    report = common.reconcile_suspend_ledger(ledger, env)
+
+    assert [c["cycle_id"] for c in report.unverified] == ["old"]
+    assert [c["cycle_id"] for c in report.recovered] == ["this-boot"]
+    assert report.wedged == []
+    messages = common.suspend_ledger_messages(report, ledger)
+    assert len(messages) == 1 and "will not repeat" in messages[0][1]
+    again = common.reconcile_suspend_ledger(ledger, env)  # warned once, never again
+    assert again.unverified == [] and again.wedged == [] and again.recovered == []
+
+
+def test_cycle_in_flight_is_not_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _boot_env(tmp_path)
+    ledger = common.suspend_ledger_path(env)
+    common.ledger_record_start(ledger, "running", 9999, env)
+    with common.wake_planner_lock(env):  # another process is inside its suspend cycle
+        report = common.reconcile_suspend_ledger(ledger, env)
+    assert report.wedged == [] and report.recovered == []
+    assert [c["cycle_id"] for c in common.incomplete_suspend_cycles(ledger)] == ["running"]

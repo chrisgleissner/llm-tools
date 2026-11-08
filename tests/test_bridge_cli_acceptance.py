@@ -21,7 +21,7 @@ def test_cross_mission_writes_fail_without_partial_effect(tmp_path, monkeypatch,
     other.mkdir()
     assert main(["mission", "create", "--prompt", "other", "--cwd", str(other), "--json"]) == 0
     foreign = json.loads(capsys.readouterr().out)["task"]["id"]
-    assert main(["task", "cancel", "--mission", mission, "--task", str(foreign), "--json"]) == 2
+    assert main(["task", "cancel", "--mission", mission, "--task", str(foreign), "--json"]) == 3
     capsys.readouterr()
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(foreign)["status"] == "QUEUED"
@@ -32,7 +32,7 @@ def test_cycle_rejection_is_reported_as_failure(tmp_path, monkeypatch, capsys):
     with BridgeStore(state / "bridge.sqlite3") as store:
         second = store.add_task(mission, "dependent", depends_on=[first])
     assert main(["task", "dependencies", "--mission", mission, "--task", str(first),
-                 "--add", str(second), "--json"]) == 2
+                 "--add", str(second), "--json"]) == 4
     capsys.readouterr()
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(first)["depends_on"] == []
@@ -92,7 +92,7 @@ def test_console_file_path_and_cli_share_durable_commands(tmp_path, monkeypatch,
         tasks = store.list_tasks(mission)
         assert len(tasks) == 2 and tasks[1]["id"] == created_task_id and tasks[1]["prompt"] == path.read_text()
     assert "Unknown command 'echo'" in dispatch_console_command(mission, "echo not-a-shell")
-    assert main(["doctor", "--mission", mission, "--json"]) == 0
+    assert main(["doctor", "--mission", mission, "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     assert json.loads(capsys.readouterr().out)["sqlite_integrity"] == "ok"
 
 
@@ -104,7 +104,7 @@ def test_cancellation_preserves_previously_verified_work(tmp_path, monkeypatch, 
         store.finish_operation(operation, exit_code=0)
     assert main(["task", "verify", "--mission", mission, "--task", str(first), "--approve", "--json"]) == 0
     capsys.readouterr()
-    assert main(["cancel", "--mission", mission, "--json"]) == 0
+    assert main(["cancel", "--mission", mission, "--yes", "--json"]) == 0
     capsys.readouterr()
     snapshot = status_snapshot(mission)
     assert snapshot["mission"]["status"] == "CANCELLED"

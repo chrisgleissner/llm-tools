@@ -16,6 +16,8 @@ export interface Coordinator {
   setupToken: () => string;
   /** Run a bridge-coordinator subcommand against this data directory; returns stdout. */
   cli: (...args: string[]) => string;
+  /** `admin reset-password` on the host, the way an SSH session would run it; `input` is what is typed or piped. */
+  resetPassword: (args: string[], input?: string) => string;
 }
 
 async function startCoordinator(): Promise<{ coord: Coordinator; stop: () => Promise<void> }> {
@@ -43,6 +45,7 @@ async function startCoordinator(): Promise<{ coord: Coordinator; stop: () => Pro
     dir: data,
     setupToken: () => readFileSync(join(data, "setup-token"), "utf8").trim(),
     cli: (...args) => execFileSync(BIN, [...args, "--data-dir", data], { encoding: "utf8" }).trim(),
+    resetPassword: (args, input = "") => execFileSync(BIN, ["admin", "reset-password", ...args, "--data-dir", data], { encoding: "utf8", input }).trim(),
   };
   return {
     coord,
@@ -100,6 +103,10 @@ export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions
     await page.locator("#account-panel").getByRole("button", { name: "Change password" }).click();
     return;
   }
+  // The shell (side bar, tab bar and More button) is built only after the page's auth-state request returns, which
+  // can be after the load event of a goto. isVisible() does not wait, so without this the check below can run before
+  // any navigation exists and fall through to a More button that is not there yet (or is hidden on desktop).
+  await page.locator("#more-button").waitFor({ state: "attached" });
   const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
   const more = page.locator("#more-button");
   await expect.poll(async () => (await link.isVisible()) || (await more.isVisible()), {

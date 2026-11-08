@@ -577,5 +577,5 @@ def target_picker(rng: random.Random, sb: Sandbox) -> None:
             picker.plain_text(rng.choice([1, 20, 80, 200]))
             for entry in entries:
                 entry.as_json()
-            bridge_switcher.format_missions(entries, width=rng.choice([10, 80, 300]))
+            bridge_switcher.format_missions(entries, total=rng.choice([None, len(entries), len(entries) + 7]))  # the listing has no width argument since CLIUX-033
             bridge_switcher.missions_json(entries)

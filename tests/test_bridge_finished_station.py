@@ -202,7 +202,7 @@ def test_station_gc_command_prints_the_outcome(tmp_path, state, capsys) -> None:
 
 def test_attach_to_a_finished_mission_explains_instead_of_suggesting_start(tmp_path, state, capsys) -> None:
     mission_id = _mission(state, tmp_path, "COMPLETED")
-    assert main(["attach", "--mission", mission_id]) == 2
+    assert main(["attach", "--mission", mission_id]) == 4
     err = capsys.readouterr().err
     assert f"Mission {mission_id[:8]} is completed and its station was closed" in err and "llm-bridge start" not in err
 
@@ -239,12 +239,24 @@ def test_message_is_shown_in_an_empty_pane_and_refreshed_but_never_replaces_a_pr
 
 
 def test_message_does_not_overwrite_a_previous_providers_output(tmp_path) -> None:
+    # tmux discards pty output that it has not read yet when it handles the exit of the pane's
+    # process (the pane is marked dead and its pty is closed). A provider that prints and exits
+    # at once can therefore leave an empty pane on a slow host. The provider here prints, then
+    # waits for a release file, so it exits only after the output is visible in the pane.
+    release = tmp_path / "release"
     backend = TmuxTerminalBackend()
-    handle = backend.start(provider_argv=["/bin/sh", "-c", "echo previous provider output"], bridge_argv=_SLEEP, cwd=tmp_path, socket_path=tmp_path / "keep.sock", session_name="keep")
+    handle = backend.start(
+        provider_argv=["/bin/sh", "-c", 'echo previous provider output; while [ ! -e "$1" ]; do sleep 0.02; done', "sh", str(release)],
+        bridge_argv=_SLEEP, cwd=tmp_path, socket_path=tmp_path / "keep.sock", session_name="keep",
+    )
     try:
+        assert _wait_for(lambda: "previous provider output" in _pane_text(handle)), _pane_text(handle)
+        assert backend.pane_is_alive(handle, pane="provider")
+        release.touch()
         assert _wait_for(lambda: not backend.pane_is_alive(handle, pane="provider"))
         assert not backend.show_provider_message(handle, "Waiting for capacity")
         assert "previous provider output" in _pane_text(handle)
+        assert "Waiting for capacity" not in _pane_text(handle)
     finally:
         backend.stop(handle)
 

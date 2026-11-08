@@ -468,14 +468,19 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${after}&limit=${limit}`);
       const fresh = r.events.map(normalize).filter((e) => e.mission_id === missionId);
       const known = new Set(events.map((e) => e.id));
-      events = [...events, ...fresh.filter((e) => !known.has(e.id))];
+      const added = fresh.filter((e) => !known.has(e.id));
+      events = [...events, ...added];
       eventCursor = cursor;
       renderEvents();
+      if (added.length) announce(`New event: ${humanizeEvent(added[added.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
     } catch (e) {
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
       renderEvents();
     }
   }
+
+  // One task read for the several triggers (a task event and a digest change usually arrive together).
+  const scheduleTasks = debounce(() => void loadTasks(), 150);
 
   const offStream = onStream((msg) => {
     // Coordinator worker-state broadcasts and terminal-relay statuses are live-only; neither is in /api/v1/events.
@@ -496,18 +501,29 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       renderEvents();
       return;
     }
+    // A change notice carries counts, not events. When it names this mission (or its mission list was cut), read
+    // the new events from the coordinator's own store, which needs no worker round trip. Tasks are read again
+    // only for a mission whose tasks changed in the batch.
     if (msg.type === "event" && msg.worker === workerName) {
-      void loadNewEvents(Number(msg.cursor ?? 0));
-      const taskMissions = Array.isArray(msg.task_missions) ? msg.task_missions : [];
-      if (taskMissions.includes(missionId)) void loadTasks();
-      announce("Mission updated");
+      const named = msg.missions === undefined || msg.truncated === true || msg.missions.some((m) => m.id === missionId && m.events > 0);
+      if (named) void loadNewEvents(Number(msg.cursor ?? 0));
+      if (Array.isArray(msg.task_missions) && msg.task_missions.includes(missionId)) scheduleTasks();
     }
   });
   let wasOnline = online();
   let viewKey = "";
+  let workKey = "";
   const offStore = subscribe(() => {
     const e = entry();
-    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}|${e?.mission.updated_at}|${JSON.stringify(e?.mission.task_counts)}|${JSON.stringify(e?.mission.needs_you)}|${e?.mission.current_task?.title}|${e?.mission.station}|${e?.mission.model}`;
+    // The tasks are read again when the replicated digest of this mission changed (status, task counts, current
+    // task, what needs the operator), never on a timer. The status itself is drawn from the digest.
+    const nextWorkKey = e ? JSON.stringify([e.mission.status, e.mission.task_counts, e.mission.current_task, e.mission.needs_kind, e.mission.needs_you?.message]) : "";
+    if (nextWorkKey !== workKey) {
+      const first = workKey === "";
+      workKey = nextWorkKey;
+      if (!first && online()) scheduleTasks();
+    }
+    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}|${e?.mission.updated_at}|${JSON.stringify(e?.mission.task_counts)}|${JSON.stringify(e?.mission.needs_you)}|${e?.mission.needs_kind}|${e?.mission.current_task?.title}|${e?.mission.station}|${e?.mission.model}`;
     if (key === viewKey) return;
     viewKey = key;
     snapshot = summarySnapshot();

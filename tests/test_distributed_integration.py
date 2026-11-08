@@ -239,15 +239,14 @@ def test_remote_cli_preserves_mission_identity_without_private_fields(system, tm
         remote_code, remote_out, err = run("--target", "ws", *argv)
         assert (code, remote_code) == (0, 0), err
         local, remote = json.loads(local_out), json.loads(remote_out)
-        remote_value = remote["tasks"] if "tasks" in remote else remote
         if argv[0] == "mission":
             local_row = local["missions"][0]
-            remote_row = remote_value["missions"][0]
+            remote_row = remote["missions"][0]
             redacted = {"cwd", "repo_identity", "objective", "config"}
             assert remote_row == {key: value for key, value in local_row.items() if key not in redacted}
             assert not redacted & remote_row.keys()
         else:
-            assert remote_value == local
+            assert remote == local
 
     code, out, _ = run("--target", "ws", "status", "--mission", mission_id[:8])
     assert code == 0 and mission_id[:8] in out
@@ -258,7 +257,7 @@ def test_remote_cli_preserves_mission_identity_without_private_fields(system, tm
     code, out, _ = run("--target", "all", "mission", "list", "--json")
     assert code == 0 and json.loads(out)["targets"]["ws"]["outcome"] == "ok"
     code, out, _ = run("worker", "list", "--json")
-    assert code == 0 and [worker["name"] for worker in json.loads(out)] == ["ws"]
+    assert code == 0 and [worker["name"] for worker in json.loads(out)["workers"]] == ["ws"]
     code, _, err = run("--target", "nowhere", "status", "--mission", mission_id)
     assert code == 2 and "unknown-target" in err
     code, _, err = run("--target", "ws", "status")
@@ -283,7 +282,7 @@ def test_remote_client_reaches_the_coordinator_without_a_worker(tmp_path, monkey
         assert main(["remote", "status", "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["coordinator_url"] == f"https://localhost:{coordinator.port}"
         assert main(["worker", "list", "--json"]) == 0
-        workers = json.loads(capsys.readouterr().out)
+        workers = json.loads(capsys.readouterr().out)["workers"]
         assert [(worker["name"], worker["state"]) for worker in workers] == [("ws", "offline")]
         assert main(["--target", "ws", "status", "--mission", "abc"]) != 0  # an offline worker is reported, never run locally
         capsys.readouterr()

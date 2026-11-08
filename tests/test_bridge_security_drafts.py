@@ -117,6 +117,7 @@ def test_console_and_control_startup_prune_old_drafts(state_dir: Path, tmp_path:
     ancient = time.time() - 15 * DAY
     os.utime(stale, (ancient, ancient))
     monkeypatch.setattr(bridge_tui, "run_control", lambda *a, **k: 0)
+    monkeypatch.setattr(bridge, "_interactive_terminal", lambda: True)
     monkeypatch.setattr(bridge.bridge_theme, "prepare", lambda: None)
     assert bridge.main(["control", "--mission", mission_id]) == 0
     assert not stale.exists()

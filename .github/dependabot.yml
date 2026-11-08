@@ -1,3 +1,4 @@
+# Dependency update policy (PRD-025): see SECURITY.md, "Dependencies and advisories".
 # One pull request per ecosystem and schedule. Every update of an ecosystem is collected in a
 # single group, so a run of Dependabot opens at most one PR for pip, one for cargo, one for
 # github-actions and one for npm, instead of one PR per dependency.

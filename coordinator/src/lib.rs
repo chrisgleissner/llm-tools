@@ -1,10 +1,12 @@
 //! LLM Bridge coordinator library. The binary in `main.rs` is a thin CLI over it,
 //! and the integration tests start the real server through [`server::start`].
 
+pub mod admin_reset;
 pub mod auth;
 pub mod certs;
 pub mod client_ip;
 pub mod config;
+pub mod config_check;
 pub mod cursor;
 pub mod db;
 pub mod http;

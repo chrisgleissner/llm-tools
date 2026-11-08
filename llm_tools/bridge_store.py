@@ -6,6 +6,7 @@ try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISI
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows CI
     fcntl = None  # type: ignore[assignment]
+import glob
 import json
 import os
 import re
@@ -16,13 +17,15 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
-    HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, TASK_STATES, TASK_TRANSITIONS,
+    AUTONOMY_ABORT_EXIT_CODE, HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
 )
+from .bridge_vocab import mission_mode
+from .bridge_vocab import status_label
 
 
 if TYPE_CHECKING:
@@ -32,6 +35,8 @@ SCHEMA_VERSION = 10
 # Written into every event row. It is independent of SCHEMA_VERSION: index-only
 # schema changes do not change what an event row means.
 EVENT_SCHEMA_VERSION = 7
+# <suffix after the database file name>: ".v6-20260101T000000Z.bak", with an optional "-N" for a second backup in one second.
+_BACKUP_NAME = re.compile(r"\.v(\d+)-(\d{8}T\d{6}Z(?:-\d+)?)\.bak")
 REJECTION_REASON_LIMIT = 2000
 MAX_PROPOSAL_BYTES = 64 * 1024
 MAX_PROPOSALS_PER_OPERATION = 20
@@ -39,6 +44,13 @@ MAX_PROPOSALS_PER_OPERATION = 20
 # Retention of controller bookkeeping events (see BridgeStore.prune_plumbing_events).
 HEARTBEAT_RETENTION_SECONDS = 3600
 CAPACITY_REFRESH_FULL_SECONDS = 3600
+# Event kinds the controller writes on every pass of a capacity wait. Within the last hour all of
+# them are kept; older ones are thinned to the last row in each 10-minute bucket, like capacity refreshes.
+THINNED_EVENT_KINDS = ("capacity-refresh", "provider-wait", "provider-selection")
+# Finished commands are only the record of what was asked; the command-applied/-rejected events stay.
+COMMAND_RETENTION_SECONDS = 30 * 86400
+# Largest command result copied into a command-applied/-rejected event (the commands table keeps the whole result).
+COMMAND_EVENT_RESULT_BYTES = 4096
 
 
 def rotation_label(providers: Any, routes: Any) -> str:
@@ -49,17 +61,31 @@ def rotation_label(providers: Any, routes: Any) -> str:
     return ",".join(names(routes) or names(providers))
 
 
+def _with_mode(config: dict[str, Any]) -> dict[str, Any]:
+    """The mission config with ``mode`` (native, background or headless) added next to the two saved booleans."""
+    config["mode"] = mission_mode(config)
+    return config
+
+
+class SchemaTooNew(RuntimeError):
+    """The database was written by a newer llm-bridge than this one (``llm-bridge`` exits with status 4)."""
+
+
 class TransitionError(ValueError):
     """A requested mission/task transition violates the durable state model."""
 
 
-def mission_transition_message(mission_id: str, old: str, new: str) -> str:
-    """Operator-facing wording for a refused mission state change."""
+class TaskNotFound(TransitionError):
+    """The mission has no task with the number or ID that was named (the command line exits 3)."""
+
+
+def mission_transition_message(mission_id: str, old: str, new: str, *, verb: str = "") -> str:
+    """Operator-facing wording for a refused mission state change; ``verb`` names the refused action (default: resumed)."""
     short = str(mission_id)[:8]
     if old == "COMPLETED":
         return f"mission {short} is finished (completed); add a task with: llm-bridge task add --prompt \"...\" to continue it"
     if old == "CANCELLED":
-        return f"mission {short} was cancelled and cannot be {'resumed' if new == 'RUNNING' else 'changed'}; create a new mission with: llm-bridge mission create --prompt \"...\""
+        return f"mission {short} was cancelled and cannot be {verb or ('resumed' if new == 'RUNNING' else 'changed')}; create a new mission with: llm-bridge mission create --prompt \"...\""
     if new == "PAUSED":
         return f"mission {short} is {old.lower()}, not running, so there is nothing to pause"
     return f"mission {short} is {old.lower()} and cannot become {new.lower()}"
@@ -78,6 +104,19 @@ def derive_title(prompt: str, fallback: str = "", limit: int = 100) -> str:
         if text:
             return text[:limit]
     return fallback
+
+
+def derive_mission_name(prompt: str, fallback: str = "", limit: int = 40) -> str:
+    """Default mission name: the first prompt line, cut at a word boundary under ``limit`` characters.
+
+    A line that fits is kept whole; a cut line ends in an ellipsis so it never looks complete.
+    The first word is kept even when it alone is longer than ``limit``.
+    """
+    title = derive_title(prompt, fallback, limit=10_000)
+    if len(title) <= limit:
+        return title
+    kept = title[: limit - 1].rsplit(None, 1)[0] if " " in title[: limit - 1] else title[: limit - 1]
+    return kept.rstrip(" ,;:.-") + "…"
 
 
 def utc_now() -> str:
@@ -326,6 +365,7 @@ class BridgeStore:
             hint = f" · fix with: chmod 700 {shlex.quote(str(self.path.parent))}" if parent_info.st_uid == os.getuid() else ""
             raise PermissionError(f"Bridge state directory must be owned by this user and private: {self.path.parent}{hint}")
         self.readonly = False
+        self.migration_backup: Path | None = None  # set when this open migrated the schema (see _backup_before_migration)
         import sqlite3  # imported on first open so commands that never open a store do not load it
 
         if readonly and self.path.exists():
@@ -342,6 +382,7 @@ class BridgeStore:
         self.db.execute("PRAGMA busy_timeout=10000")
         self._initialize()
         self._secure_sqlite_files()
+        self._files_secured = False  # the first write transaction secures once more, for files that write creates
 
     def _open_readonly(self) -> sqlite3.Connection | None:
         """A read-only connection to a database at the current schema, else ``None``."""
@@ -375,7 +416,7 @@ class BridgeStore:
         """
         current_version = self._user_version()
         if current_version > SCHEMA_VERSION:
-            raise RuntimeError(f"Bridge database schema {current_version} is newer than supported schema {SCHEMA_VERSION}")
+            raise self._schema_too_new(current_version)
         if current_version == SCHEMA_VERSION:
             return
         self.db.execute("BEGIN IMMEDIATE")
@@ -383,8 +424,9 @@ class BridgeStore:
             # Another process may have migrated while this one waited for the write lock.
             current_version = self._user_version()
             if current_version > SCHEMA_VERSION:
-                raise RuntimeError(f"Bridge database schema {current_version} is newer than supported schema {SCHEMA_VERSION}")
+                raise self._schema_too_new(current_version)
             if current_version < SCHEMA_VERSION:
+                self._backup_before_migration(current_version)
                 self._migrate(current_version)
                 self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.db.execute("COMMIT")
@@ -393,6 +435,68 @@ class BridgeStore:
                 self.db.execute("ROLLBACK")
             raise
         self._secure_sqlite_files()
+
+    def _backups(self) -> list[tuple[str, int, Path]]:
+        """Backups made next to this database, as (UTC timestamp, schema version before the migration, path), oldest first."""
+        found: list[tuple[str, int, Path]] = []
+        for candidate in self.path.parent.glob(f"{glob.escape(self.path.name)}.v*-*.bak"):
+            match = _BACKUP_NAME.fullmatch(candidate.name[len(self.path.name):])
+            if match:
+                found.append((match.group(2), int(match.group(1)), candidate))
+        return sorted(found)
+
+    def _schema_too_new(self, found: int) -> SchemaTooNew:
+        """The refusal for a database newer than ``SCHEMA_VERSION``; names the newest backup this llm-bridge can open."""
+        usable = [path for _stamp, version, path in self._backups() if version <= SCHEMA_VERSION]
+        advice = (f"upgrade llm-tools, or restore the backup {usable[-1]} made before the upgrade (copy it over {self.path})"
+                  if usable else f"upgrade llm-tools (no backup of {self.path} was found next to it)")
+        return SchemaTooNew(f"this Bridge database is schema {found} but this llm-bridge understands up to {SCHEMA_VERSION}; {advice}")
+
+    def _backup_before_migration(self, old_version: int) -> None:
+        """Copy the database to ``<name>.v<old>-<UTC timestamp>.bak`` (0600) before a migration changes it.
+
+        Runs inside the migration's write transaction, so the copy is the last committed state and
+        no other process can change it meanwhile. A database with no tables yet is new and has nothing to
+        keep. The path is kept in ``migration_backup`` and appended to ``migrations.log``
+        beside the database.
+        """
+        import sqlite3
+
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is None:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.path.with_name(f"{self.path.name}.v{old_version}-{stamp}.bak")
+        counter = 0
+        while True:
+            try:
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                counter += 1
+                target = self.path.with_name(f"{self.path.name}.v{old_version}-{stamp}-{counter}.bak")
+        os.close(descriptor)
+        # A second, read-only connection reads the last committed state while this one holds the write
+        # lock. (Backing up from the connection that holds the lock waits on itself forever.)
+        source = sqlite3.connect(f"file:{_sqlite_uri_path(self.path)}?mode=ro", uri=True, timeout=10.0)
+        copy = sqlite3.connect(target)
+        try:
+            source.backup(copy)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        finally:
+            copy.close()
+            source.close()
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(target) + suffix).unlink(missing_ok=True)
+        target.chmod(0o600)
+        self.migration_backup = target
+        line = f"{utc_now()} schema {old_version} -> {SCHEMA_VERSION}; backup {target}\n"
+        log = os.open(self.path.with_name("migrations.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(log, line.encode("utf-8"))
+        finally:
+            os.close(log)
 
     def _migrate(self, current_version: int) -> None:
         """Create missing tables, columns and indexes, then run the one-time data backfills."""
@@ -509,13 +613,25 @@ class BridgeStore:
         if column not in columns:
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    _files_secured = False
+
     def _secure_sqlite_files(self) -> None:
+        """Restrict the database and its WAL/shared-memory files to the owner.
+
+        Opening the store creates all three files and secures them; SQLite gives a recreated WAL file the
+        database file's mode, so one pass after this connection's first write is enough. Repeating the three
+        stat/chmod calls after every transaction cost an idle controller dozens of system calls per second.
+        """
+        if self._files_secured:
+            return
         for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             try:
                 if path.exists():
                     path.chmod(0o600)
             except OSError:
                 pass
+        if not self.readonly:
+            self._files_secured = True
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -557,8 +673,8 @@ class BridgeStore:
         operation_id: str | None = None,
     ) -> None:
         self.db.execute(
-            "INSERT INTO events(mission_id,task_id,operation_id,kind,data_json,created_at) VALUES(?,?,?,?,?,?)",
-            (mission_id, task_id, operation_id, kind, self._json(data), utc_now()),
+            "INSERT INTO events(mission_id,task_id,operation_id,schema_version,kind,data_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, self._json(data), utc_now()),
         )
 
     def mission_id_if_exists(self, mission_id: str) -> str | None:
@@ -605,6 +721,7 @@ class BridgeStore:
             task["acceptance"] = json.loads(task.pop("acceptance_json"))
             task["evidence"] = json.loads(task.pop("evidence_json"))
             task["pending"] = json.loads(task.pop("pending_json"))
+            task["status_label"] = status_label(task["status"])
             tasks.append(task)
         dependencies: dict[int, list[tuple[int, int]]] = {int(task["id"]): [] for task in tasks}
         ids = list(dependencies)
@@ -636,10 +753,10 @@ class BridgeStore:
         count = int(self.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0])
         short = str(mission_id)[:8]
         if count == 0:
-            raise TransitionError(f"mission {short} has no tasks; there is no task {ordinal}")
+            raise TaskNotFound(f"mission {short} has no tasks; there is no task {ordinal}")
         highest = int(self.db.execute("SELECT MAX(ordinal) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0])
         span = "task 1" if highest == 1 else f"tasks 1\u2013{highest}"
-        raise TransitionError(f"mission {short} has {span}; there is no task {ordinal}")
+        raise TaskNotFound(f"mission {short} has {span}; there is no task {ordinal}")
 
     def create_mission(
         self,
@@ -659,6 +776,9 @@ class BridgeStore:
         canonical_cwd = str(Path(cwd).expanduser().resolve(strict=True))
         repo_root = repository_identity(canonical_cwd)
         mid = mission_id or uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", mid) or mid in {".", ".."}:
+            # The id names lock files and runtime directories.
+            raise ValueError("invalid mission id: use letters, digits, '_', '.' and '-' only")
         now = utc_now()
         try:
             with self._transaction():
@@ -692,14 +812,14 @@ class BridgeStore:
 
     def get_mission(self, mission_id: str) -> dict[str, Any]:
         result = dict(self._mission_row(mission_id))
-        result["config"] = json.loads(result.pop("config_json"))
+        result["config"] = _with_mode(json.loads(result.pop("config_json")))
         return result
 
     def list_missions(self) -> list[dict[str, Any]]:
         result = []
         for row in self.db.execute("SELECT * FROM missions ORDER BY created_at,id"):
             item = dict(row)
-            item["config"] = json.loads(item.pop("config_json"))
+            item["config"] = _with_mode(json.loads(item.pop("config_json")))
             result.append(item)
         return result
 
@@ -714,10 +834,12 @@ class BridgeStore:
                 raise TransitionError(mission_transition_message(mission_id, old, status))
             if status == "COMPLETED":
                 counts = self.db.execute(
-                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
+                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed, "
+                    "SUM(CASE WHEN status='CANCELLED' THEN 1 ELSE 0 END) AS cancelled FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
                     (mission_id,),
                 ).fetchone()
-                if not counts["total"] or counts["total"] != counts["completed"]:
+                # A cancelled task is finished (the operator dropped it), but at least one task must have completed.
+                if not counts["completed"] or counts["total"] != counts["completed"] + counts["cancelled"]:
                     raise TransitionError("mission cannot complete while tasks are not complete")
             self.db.execute("UPDATE missions SET status=?,updated_at=? WHERE id=?", (status, utc_now(), mission_id))
             self._event(mission_id, "mission-status", {"from": old, "to": status})
@@ -750,10 +872,11 @@ class BridgeStore:
                 self._add_dependency_locked(mission_id, task_id, int(dep))
             self._event(mission_id, "task-added", {"title": title or derive_title(prompt), "priority": int(priority)}, task_id=task_id)
             if mission["status"] == "COMPLETED":
-                # A finished mission takes follow-up work: it goes back to a
-                # saved state that `start` continues from.
-                self.db.execute("UPDATE missions SET status='STOPPED',updated_at=? WHERE id=?", (now, mission_id))
-                self._event(mission_id, "mission-reopened", {"from": "COMPLETED", "to": "STOPPED", "reason": "task-added"}, task_id=task_id)
+                # A finished mission takes follow-up work: it goes back to the
+                # not-started state, which `start` continues from.  This is the one
+                # way out of COMPLETED, so it is not in MISSION_TRANSITIONS.
+                self.db.execute("UPDATE missions SET status=?,updated_at=? WHERE id=?", (REOPENED_MISSION_STATUS, now, mission_id))
+                self._event(mission_id, "mission-reopened", {"from": "COMPLETED", "to": REOPENED_MISSION_STATUS, "reason": "task-added"}, task_id=task_id)
         return task_id
 
     def _add_dependency_locked(self, mission_id: str, task_id: int, depends_on: int) -> None:
@@ -853,15 +976,53 @@ class BridgeStore:
     def get_task(self, task_id: int) -> dict[str, Any]:
         return self._task_dict(self._task_row(task_id))
 
+    # A task that still competes for a run: the scheduler picks the next one by priority (highest first),
+    # then ordering (lowest first), then creation.  Finished tasks sort after every other task.
+    _RUN_ORDER_SQL = "ORDER BY (status IN ('COMPLETED','CANCELLED')), priority DESC, ordering, id"
+    _WAITING_TO_RUN = ("QUEUED", "READY", "RUNNING")
+
     def list_tasks(self, mission_id: str, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
-        """The mission's tasks in task-list order; ``limit``/``offset`` select one page of it."""
+        """The mission's tasks in the order the scheduler runs them, finished tasks last.
+
+        ``limit``/``offset`` select one page of that order.  Each task carries ``run_position``:
+        its place among the tasks still waiting to run (1 = next), or ``None`` for any other task.
+        """
         self._mission_row(mission_id)
-        query = "SELECT * FROM tasks WHERE mission_id=? ORDER BY ordering,id"
+        query = f"SELECT * FROM tasks WHERE mission_id=? {self._RUN_ORDER_SQL}"
         params: tuple[Any, ...] = (mission_id,)
         if limit is not None or offset:
             query += " LIMIT ? OFFSET ?"
             params += (-1 if limit is None else max(0, int(limit)), max(0, int(offset)))
-        return self._task_dicts(self.db.execute(query, params).fetchall())
+        tasks = self._task_dicts(self.db.execute(query, params).fetchall())
+        if tasks:
+            positions = self.run_positions(mission_id)
+            for task in tasks:
+                task["run_position"] = positions.get(int(task["id"]))
+        return tasks
+
+    def run_positions(self, mission_id: str) -> dict[int, int]:
+        """Task ID -> place in the run order (1 = next) for every task still waiting to run or running."""
+        marks = ",".join("?" for _ in self._WAITING_TO_RUN)
+        rows = self.db.execute(
+            f"SELECT id FROM tasks WHERE mission_id=? AND status IN ({marks}) ORDER BY priority DESC, ordering, id",
+            (mission_id, *self._WAITING_TO_RUN),
+        )
+        return {int(row[0]): position for position, row in enumerate(rows, 1)}
+
+    def runs_after(self, task_id: int) -> list[int]:
+        """Numbers of the tasks that run before this one, in run order (empty when it is next or not waiting)."""
+        task = self._task_row(task_id)
+        marks = ",".join("?" for _ in self._WAITING_TO_RUN)
+        rows = self.db.execute(
+            f"SELECT id,ordinal FROM tasks WHERE mission_id=? AND status IN ({marks}) ORDER BY priority DESC, ordering, id",
+            (task["mission_id"], *self._WAITING_TO_RUN),
+        ).fetchall()
+        ahead: list[int] = []
+        for row in rows:
+            if int(row[0]) == int(task_id):
+                return ahead
+            ahead.append(int(row[1]))
+        return []
 
     def list_proposals(self, mission_id: str, *, status: str = "PENDING", limit: int = 100, after_task_id: int = 0) -> list[dict[str, Any]]:
         """List proposal records with a bounded, stable task-id cursor."""
@@ -900,6 +1061,19 @@ class BridgeStore:
                 (mission_id, -1 if limit is None else max(0, int(limit))),
             )
             return self._task_dicts(rows.fetchall())
+
+    def runnable_task_ids(self, mission_id: str, *, limit: int | None = None) -> list[int]:
+        """IDs ``ready_tasks`` would return, in its order, without promoting or writing anything.
+
+        The controller's idle loop and capacity waits call this every poll; it takes no write lock.
+        """
+        rows = self.db.execute(
+            "SELECT t.id FROM tasks t WHERE t.mission_id=? AND t.status IN ('QUEUED','READY') AND (t.origin='operator' OR t.proposal_status='ACCEPTED') "
+            "AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on WHERE d.task_id=t.id AND p.status!='COMPLETED') "
+            "ORDER BY t.priority DESC,t.ordering,t.id LIMIT ?",
+            (mission_id, -1 if limit is None else max(0, int(limit))),
+        )
+        return [int(row["id"]) for row in rows]
 
     _AMENDABLE_COLUMNS = {"prompt": "prompt", "title": "title", "priority": "priority", "acceptance": "acceptance_json"}
 
@@ -945,6 +1119,8 @@ class BridgeStore:
             if task["status"] in {"COMPLETED", "FAILED", "CANCELLED"}:
                 raise TransitionError(f"task {task['ordinal']} is {str(task['status']).lower()} and cannot be amended")
             pending = json.loads(task["pending_json"])
+            if prompt is not None and title is None and task["title"] == derive_title(task["prompt"]) and "title" not in pending:
+                title = derive_title(prompt) or None  # the title came from the first prompt line, so it follows the new one
             for key, value in (("prompt", prompt), ("title", title), ("priority", priority), ("acceptance", acceptance)):
                 if value is not None:
                     pending[key] = value
@@ -1008,6 +1184,19 @@ class BridgeStore:
         self._mission_row(mission_id)
         return [self.get_command(row[0]) for row in self.db.execute("SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid", (mission_id,))]
 
+    def _event_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """The command result as the event records it: whole when small, else its short fields and a size.
+
+        ``task.add`` returns the task, prompt included; copying a large prompt
+        into the event would store it a second time. The commands table keeps
+        the complete result.
+        """
+        encoded = len(self._json(result).encode("utf-8"))
+        if encoded <= COMMAND_EVENT_RESULT_BYTES:
+            return result
+        short = {key: value for key, value in result.items() if isinstance(value, (bool, int, float)) or (isinstance(value, str) and len(value) <= 200)}
+        return {**short, "truncated": True, "result_bytes": encoded}
+
     def finish_command(self, command_id: str, *, status: str, result: dict[str, Any] | None = None) -> dict[str, Any]:
         status = status.upper()
         if status not in {"APPLIED", "REJECTED", "FAILED"}:
@@ -1019,7 +1208,14 @@ class BridgeStore:
             if row["status"] != "QUEUED":
                 return self.get_command(command_id)
             self.db.execute("UPDATE commands SET status=?,result_json=?,updated_at=? WHERE id=?", (status, self._json(result or {}), utc_now(), command_id))
-            self._event(row["mission_id"], "command-" + status.lower(), {"command_id": command_id, "result": result or {}})
+            try:
+                action = json.loads(row["payload_json"]).get("action")
+            except (ValueError, AttributeError):
+                action = None
+            data: dict[str, Any] = {"command_id": command_id, "result": self._event_result(result or {})}
+            if action:
+                data["command"] = str(action)  # the queued event names it too; the outcome should say which command it was
+            self._event(row["mission_id"], "command-" + status.lower(), data)
         return self.get_command(command_id)
 
     def begin_iteration(self, task_id: int) -> dict[str, Any]:
@@ -1123,6 +1319,14 @@ class BridgeStore:
             )
             self._event(op["mission_id"], "operation-process", {"process_pid": int(process_pid), "process_start": process_start}, task_id=op["task_id"], operation_id=operation_id)
 
+    def record_operation_log_path(self, operation_id: str, logs_path: str) -> None:
+        """Note where a running operation's log is, so `task output --follow` can read it before the run ends."""
+        with self._transaction():
+            self.db.execute(
+                "UPDATE operations SET logs_path=? WHERE id=? AND status='RUNNING' AND logs_path IS NULL",
+                (logs_path, operation_id),
+            )
+
     def record_operation_session(
         self,
         operation_id: str,
@@ -1220,8 +1424,17 @@ class BridgeStore:
             self._event(op["mission_id"], "operation-exited", {"exit_code": int(exit_code), "task_status": status, "logs_path": logs_path, "provider_started": exit_code not in (143, 78)}, task_id=task["id"], operation_id=operation_id)
         return self.get_task(int(op["task_id"]))
 
-    def reconcile_interrupted_operations(self, mission_id: str) -> int:
+    def reconcile_interrupted_operations(self, mission_id: str, *, cause: str = "") -> int:
+        """Mark unresolved operations UNCERTAIN and block their tasks that are still queued, ready or running.
+
+        ``cause`` names an operator action that interrupted them (``stop-force``).
+        The event then says so, and ``release_interrupted_tasks`` can resume the
+        task when the mission is started again; without a cause the interruption
+        is a crash, and the task waits for the operator.
+        """
         count = 0
+        reason = {"stop-force": "interrupted by stop --force"}.get(cause, "operation outcome was not committed before controller exit")
+        data = {"reason": reason, **({"cause": cause} if cause else {})}
         with self._transaction():
             self._mission_row(mission_id)
             rows = self.db.execute("SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')", (mission_id,)).fetchall()
@@ -1229,8 +1442,9 @@ class BridgeStore:
                 task = self._task_row(int(op["task_id"]))
                 now = utc_now()
                 self.db.execute("UPDATE operations SET status='UNCERTAIN',updated_at=? WHERE id=?", (now, op["id"]))
-                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=?", (now, task["id"]))
-                self._event(mission_id, "operation-uncertain", {"reason": "operation outcome was not committed before controller exit"}, task_id=task["id"], operation_id=op["id"])
+                # An operator's CANCELLED or PAUSED task (or one already past the run, VERIFYING or finished) keeps its status.
+                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=? AND status IN ('QUEUED','READY','RUNNING')", (now, task["id"]))
+                self._event(mission_id, "operation-uncertain", data, task_id=task["id"], operation_id=op["id"])
                 count += 1
         return count
 
@@ -1265,8 +1479,63 @@ class BridgeStore:
                 released.append(int(task["ordinal"]))
         return released
 
-    def continue_task_after_provider_failure(self, operation_id: str, *, max_failures: int) -> dict[str, Any] | None:
+    def release_interrupted_tasks(self, mission_id: str) -> list[int]:
+        """Make tasks that ``stop --force`` interrupted runnable again; returns their ordinals.
+
+        Called when the operator starts the mission again. A task is released
+        only while its latest operation is the one the forced stop interrupted,
+        so a task that crashed, was retried since, or was blocked for another
+        reason is not touched.
+        """
+        released: list[int] = []
+        with self._transaction():
+            self._mission_row(mission_id)
+            rows = self.db.execute("SELECT id,ordinal FROM tasks WHERE mission_id=? AND status='BLOCKED'", (mission_id,)).fetchall()
+            for task in rows:
+                latest = self.db.execute(
+                    "SELECT id,status FROM operations WHERE mission_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1",
+                    (mission_id, task["id"]),
+                ).fetchone()
+                if latest is None or latest["status"] != "UNCERTAIN":
+                    continue
+                forced = self.db.execute(
+                    "SELECT 1 FROM events WHERE mission_id=? AND operation_id=? AND kind='operation-uncertain' "
+                    "AND json_extract(data_json,'$.cause')='stop-force' LIMIT 1",
+                    (mission_id, latest["id"]),
+                ).fetchone()
+                if forced is None:
+                    continue
+                self.db.execute("UPDATE tasks SET status='READY',updated_at=? WHERE id=?", (utc_now(), task["id"]))
+                self._event(mission_id, "task-interrupted-released", {"operation_id": latest["id"], "from": "BLOCKED", "to": "READY"}, task_id=task["id"], operation_id=latest["id"])
+                released.append(int(task["ordinal"]))
+        return released
+
+    def pending_question(self, mission_id: str, task_id: int) -> dict[str, Any] | None:
+        """The question a task's latest provider run stopped on, or ``None``.
+
+        Read from the ``task-awaiting-answer`` event Bridge records when the scheduler
+        watchdog stops a run that ended on an unanswered question. It counts only while
+        no later operation has run for the task.
+        """
+        row = self.db.execute(
+            "SELECT data_json FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind='task-awaiting-answer' "
+            "AND json_extract(data_json,'$.task_id')=? ORDER BY id DESC LIMIT 1", (mission_id, int(task_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        data = json.loads(row["data_json"])
+        latest = self.db.execute("SELECT id FROM operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1", (int(task_id),)).fetchone()
+        if latest is None or data.get("operation_id") != latest["id"]:
+            return None
+        return dict(data)
+
+    def continue_task_after_provider_failure(self, operation_id: str, *, max_failures: int, max_autonomy_aborts: int = 0) -> dict[str, Any] | None:
         """Requeue known provider failures at a safe boundary, within a budget.
+
+        ``max_autonomy_aborts`` is how many runs per task that the scheduler's
+        own watchdog stopped (exit status 75: no progress, a question nobody
+        answered, a blocked prompt) may be handed to the next rotation entry.
+        The default of 0 never requeues one.
 
         This is deliberately separate from crash reconciliation: only an
         operation with a committed exit status can be handed to another route.
@@ -1288,6 +1557,22 @@ class BridgeStore:
                 return None
             if json.loads(task["pending_json"]) or not self._dependencies_complete(int(task["id"])):
                 return None
+            if op["exit_code"] == AUTONOMY_ABORT_EXIT_CODE:
+                aborts = int(self.db.execute(
+                    "SELECT COUNT(*) FROM operations WHERE task_id=? AND status='EXITED' AND exit_code=?",
+                    (task["id"], AUTONOMY_ABORT_EXIT_CODE),
+                ).fetchone()[0])
+                if aborts > max_autonomy_aborts:
+                    # The task stays BLOCKED for the operator; a second watchdog stop
+                    # on another route is not a transient false alarm.
+                    if max_autonomy_aborts > 0:
+                        self._event(op["mission_id"], "provider-handoff-exhausted", {
+                            "operation_id": operation_id,
+                            "exit_code": AUTONOMY_ABORT_EXIT_CODE,
+                            "autonomy_aborts": aborts,
+                            "max_autonomy_aborts": max_autonomy_aborts,
+                        }, task_id=task["id"], operation_id=operation_id)
+                    return None
             # A quota failure is recoverable: the capacity wait resumes the task
             # when credits return, so it must not use up the budget meant for
             # crashes and broken CLIs. Otherwise repeated quota windows would
@@ -1479,11 +1764,12 @@ class BridgeStore:
                 if marker not in markers:
                     markers.append(marker)
             config["released_reviews"] = markers[-200:]
+            config.pop("mode", None)  # derived on read from the two saved mode booleans, never stored
             self.db.execute("UPDATE missions SET config_json=?,updated_at=? WHERE id=?", (self._json(config), utc_now(), mission_id))
             self.sync_review_hold_events(mission_id)
         ordinals = hold["tasks"]
         noun = f"task {ordinals[0]}" if len(ordinals) == 1 else f"tasks {', '.join(map(str, ordinals))}"
-        return {"released": ordinals, "detail": f"Continuing · {noun} stays awaiting approval while the next task starts"}
+        return {"released": ordinals, "detail": f"Continuing · {noun} stays in REVIEW while the next task starts"}
 
     def sync_review_hold_events(self, mission_id: str) -> dict[str, Any] | None:
         """Make ``review-hold`` / ``review-hold-released`` events match the current hold.
@@ -1521,7 +1807,7 @@ class BridgeStore:
         if status == "VERIFYING" and same_round:
             continued = marker in self._released_markers(self.get_mission(mission_id)["config"])
             how, text = ("continue", "continuing") if continued else ("auto-continue", "auto-continue is on")
-            text = f"task {ordinal} still awaits approval; {text} and the next task may start"
+            text = f"task {ordinal} still awaits your review; {text} and the next task may start"
         elif status == "COMPLETED":
             how, text = "approved", f"task {ordinal} approved"
         elif status in {"VERIFYING", "QUEUED", "READY", "FAILED"}:
@@ -1552,19 +1838,55 @@ class BridgeStore:
             self._event(task["mission_id"], "task-status", {"from": old, "to": status}, task_id=task_id)
         return self.get_task(task_id)
 
-    def events(self, mission_id: str, *, after: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+    def _event_filter(self, mission_id: str, after: int, since_seconds: int, exclude_kinds: Iterable[str]) -> tuple[str, tuple[Any, ...]]:
+        """WHERE clause and parameters for the events of one mission above a cursor, newer than an age, without some kinds."""
+        where = "e.mission_id=? AND e.id>?"
+        params: list[Any] = [mission_id, after]
+        if since_seconds > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+            where += " AND e.created_at>=?"
+            params.append(cutoff.isoformat(timespec="seconds"))
+        excluded = sorted(set(exclude_kinds))
+        if excluded:
+            where += f" AND e.kind NOT IN ({','.join('?' * len(excluded))})"
+            params.extend(excluded)
+        return where, tuple(params)
+
+    def events(
+        self,
+        mission_id: str,
+        *,
+        after: int = 0,
+        limit: int | None = None,
+        newest: bool = False,
+        since_seconds: int = 0,
+        exclude_kinds: Iterable[str] = (),
+    ) -> list[dict[str, Any]]:
+        """A mission's events in ascending ID order.
+
+        By default these are the first ``limit`` events above ``after``. With ``newest`` they are the
+        last ``limit`` events that match, still returned oldest to newest. ``since_seconds`` keeps
+        events at most that old, and ``exclude_kinds`` leaves kinds out before the limit applies.
+        """
         self._mission_row(mission_id)
         if limit is not None and not 0 <= limit <= 1000:
             raise ValueError("event page limit must be between 0 and 1000")
-        query = "SELECT e.*, t.ordinal AS task_ordinal FROM events e LEFT JOIN tasks t ON t.id=e.task_id WHERE e.mission_id=? AND e.id>? ORDER BY e.id"
-        params: tuple[Any, ...] = (mission_id, after)
+        where, params = self._event_filter(mission_id, after, since_seconds, exclude_kinds)
+        query = f"SELECT e.*, t.ordinal AS task_ordinal FROM events e LEFT JOIN tasks t ON t.id=e.task_id WHERE {where} ORDER BY e.id" + (" DESC" if newest else "")
         if limit is not None:
             query += " LIMIT ?"
             params += (limit,)
-        return [
+        rows = [
             {**dict(row), "data": json.loads(row["data_json"])}
             for row in self.db.execute(query, params)
         ]
+        return rows[::-1] if newest else rows
+
+    def event_count(self, mission_id: str, *, after: int = 0, since_seconds: int = 0, exclude_kinds: Iterable[str] = ()) -> int:
+        """How many events ``events`` could return for the same filters, ignoring the limit."""
+        self._mission_row(mission_id)
+        where, params = self._event_filter(mission_id, after, since_seconds, exclude_kinds)
+        return int(self.db.execute(f"SELECT COUNT(*) FROM events e WHERE {where}", params).fetchone()[0])
 
     def last_event_id(self) -> int:
         """Highest event ID in this database: the worker's replication cursor."""
@@ -1590,7 +1912,7 @@ class BridgeStore:
         chunk: int = 2000,
         budget_seconds: float = 1.0,
     ) -> dict[str, Any]:
-        """Bound the two event kinds the controller writes forever, and nothing else.
+        """Bound the event kinds the controller writes on a timer, and old finished commands.
 
         A heartbeat every 5 s and a capacity refresh every minute made up about
         92% of a mission's events (roughly 70 MB a week). Heartbeats older than
@@ -1615,7 +1937,7 @@ class BridgeStore:
             "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=:mission AND kind='controller-heartbeat' AND created_at<:cutoff "
             "AND id<(SELECT MAX(id) FROM events WHERE mission_id=:mission AND kind='controller-heartbeat') ORDER BY id LIMIT :limit)"
         )
-        deleted = {"controller-heartbeat": 0, "capacity-refresh": 0}
+        deleted = {"controller-heartbeat": 0, **{kind: 0 for kind in THINNED_EVENT_KINDS}, "commands": 0}
         deadline = time.monotonic() + max(0.0, budget_seconds)
         complete = True
         while True:
@@ -1627,7 +1949,7 @@ class BridgeStore:
             if time.monotonic() >= deadline:
                 complete = False
                 break
-        if complete:
+        for kind in THINNED_EVENT_KINDS if complete else ():
             # Rows are visited in id order in windows of ``chunk`` rows. A row goes when the next
             # older-than-cutoff row falls in the same 10-minute bucket (the first 15 characters of
             # the UTC timestamp), so the last row of each bucket stays, and so does the newest row.
@@ -1635,17 +1957,33 @@ class BridgeStore:
             while True:
                 rows = self.db.execute(
                     "SELECT id,substr(created_at,1,15) FROM events INDEXED BY events_mission_kind_id "
-                    "WHERE mission_id=? AND kind='capacity-refresh' AND id>? AND created_at<? ORDER BY id LIMIT ?",
-                    (mission_id, last, capacity_before, int(chunk) + 1),
+                    "WHERE mission_id=? AND kind=? AND id>? AND created_at<? ORDER BY id LIMIT ?",
+                    (mission_id, kind, last, capacity_before, int(chunk) + 1),
                 ).fetchall()
                 doomed = [(int(rows[i][0]),) for i in range(len(rows) - 1) if rows[i][1] == rows[i + 1][1]]
                 if doomed:
                     with self._transaction():
                         self.db.executemany("DELETE FROM events WHERE id=?", doomed)
-                    deleted["capacity-refresh"] += len(doomed)
+                    deleted[kind] += len(doomed)
                 if len(rows) <= chunk:
                     break
                 last = int(rows[-1][0]) - 1
+                if time.monotonic() >= deadline:
+                    complete = False
+                    break
+            if not complete:
+                break
+        if complete:
+            commands_before = (moment - timedelta(seconds=COMMAND_RETENTION_SECONDS)).isoformat(timespec="seconds")
+            while True:
+                with self._transaction():
+                    count = max(0, self.db.execute(
+                        "DELETE FROM commands WHERE id IN (SELECT id FROM commands WHERE mission_id=? AND status<>'QUEUED' AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                        (mission_id, commands_before, int(chunk)),
+                    ).rowcount)
+                deleted["commands"] += count
+                if count < chunk:
+                    break
                 if time.monotonic() >= deadline:
                     complete = False
                     break
@@ -1660,6 +1998,216 @@ class BridgeStore:
             "total": sum(deleted.values()),
             "heartbeat_before": str(result.get("heartbeat_before", "")),
             "capacity_before": str(result.get("capacity_before", "")),
+            "observed_at": utc_now(),
+        })
+
+    def retention_missions(self, *, finished_before: str | None = None) -> list[dict[str, Any]]:
+        """Finished missions (COMPLETED or CANCELLED) with no unresolved operation, oldest first.
+
+        ``finished_before`` keeps only those whose last update is older than that ISO time. A mission
+        with an active operation is never returned, so retention cannot touch an operation's own rows.
+        """
+        finished = sorted(FINISHED_MISSION_STATUSES)
+        active = sorted(ACTIVE_OPERATION_STATUSES)
+        query = (
+            f"SELECT id,status,updated_at FROM missions m WHERE status IN ({','.join('?' * len(finished))}) "
+            f"AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.mission_id=m.id AND o.status IN ({','.join('?' * len(active))}))"
+        )
+        params: list[Any] = [*finished, *active]
+        if finished_before is not None:
+            query += " AND updated_at<?"
+            params.append(finished_before)
+        return [dict(row) for row in self.db.execute(query + " ORDER BY updated_at,id", params)]
+
+    def prune_retention(
+        self,
+        *,
+        events_before: str | None = None,
+        finished_before: str | None = None,
+        operations_before: str | None = None,
+        chunk: int = 2000,
+        budget_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        """Apply the data-retention rules, in ``chunk``-sized transactions.
+
+        Finished missions (COMPLETED or CANCELLED with no unresolved operation) get all three rules.
+        A mission that is not finished (running, paused, stopped, failed or created) gets only the
+        ``events_before`` rule below, limited to diagnostic events; its audit records, audit summaries,
+        tasks, operations and commands are never touched.
+
+        * ``events_before``: diagnostic events (``bridge_events.DIAGNOSTIC_KINDS``) created before this
+          ISO time are deleted. Audit records and audit summaries stay. In a mission that is not finished
+          the newest event of each kind is kept (status reads the latest ``controller-config``,
+          ``controller-mode`` and similar), and ``capacity-refresh`` events are thinned to the last one in
+          each hour instead of being deleted. Events of an operation that is still active are never deleted.
+        * ``finished_before``: for a finished mission last updated before this time, every event except
+          the audit summaries (``bridge_events.AUDIT_SUMMARY_KINDS``) is deleted. Mission and task rows stay.
+        * ``operations_before``: operation and managed-process rows of a finished mission that ended
+          before this time and no longer reference a log file are deleted. The size and SHA-256 of a
+          pruned log stay in the ``operation-log-pruned`` event.
+
+        A cutoff of ``None`` skips its rule. The pass stops after ``budget_seconds``; ``complete`` is false
+        when more remains and the call should be repeated. Returns ``{"missions": {mission_id: {category:
+        count}}, "complete": bool}`` with the categories ``events``, ``capacity_refreshes`` (thinned),
+        ``finished_mission_events``, ``operations`` and ``managed_processes``.
+        """
+        from .bridge_events import AUDIT_SUMMARY_KINDS, DIAGNOSTIC_KINDS
+
+        summary = sorted(AUDIT_SUMMARY_KINDS)
+        diagnostic = sorted(DIAGNOSTIC_KINDS)
+        active = sorted(ACTIVE_OPERATION_STATUSES)
+        in_active = ",".join("?" * len(active))
+        # Rows that belong to an unresolved operation are never deleted, even if the mission lookup raced.
+        not_active_operation = f"(operation_id IS NULL OR operation_id NOT IN (SELECT id FROM operations WHERE status IN ({in_active})))"
+        deadline = time.monotonic() + max(0.0, budget_seconds)
+        missions: dict[str, dict[str, int]] = {}
+        limit = max(1, int(chunk))
+
+        def run(mission_id: str, category: str, sql: str, params: list[Any]) -> bool:
+            """Delete in chunks; ``False`` when the time budget ran out with rows left."""
+            while True:
+                with self._transaction():
+                    count = max(0, self.db.execute(sql, [*params, limit]).rowcount)
+                if count:
+                    bucket = missions.setdefault(mission_id, {})
+                    bucket[category] = bucket.get(category, 0) + count
+                if count < limit:
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+
+        def thin(mission_id: str, kind: str, before: str) -> bool:
+            """Keep the last event of each hour among those older than ``before``; ``False`` when the budget ran out."""
+            last = 0
+            while True:
+                rows = self.db.execute(
+                    "SELECT id,substr(created_at,1,13) FROM events INDEXED BY events_mission_kind_id "
+                    "WHERE mission_id=? AND kind=? AND id>? AND created_at<? ORDER BY id LIMIT ?",
+                    (mission_id, kind, last, before, limit + 1),
+                ).fetchall()
+                doomed = [(int(rows[i][0]),) for i in range(len(rows) - 1) if rows[i][1] == rows[i + 1][1]]
+                if doomed:
+                    with self._transaction():
+                        self.db.executemany("DELETE FROM events WHERE id=?", doomed)
+                    bucket = missions.setdefault(mission_id, {})
+                    bucket["capacity_refreshes"] = bucket.get("capacity_refreshes", 0) + len(doomed)
+                if len(rows) <= limit:
+                    return True
+                last = int(rows[-1][0]) - 1
+                if time.monotonic() >= deadline:
+                    return False
+
+        for mission in self.retention_missions():
+            mission_id = str(mission["id"])
+            steps: list[tuple[str, str, list[Any]]] = []
+            if finished_before is not None and str(mission["updated_at"]) < finished_before:
+                steps.append((
+                    "finished_mission_events",
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=? "
+                    f"AND kind NOT IN ({','.join('?' * len(summary))}) AND {not_active_operation} ORDER BY id LIMIT ?)",
+                    [mission_id, *summary, *active],
+                ))
+            if events_before is not None:
+                steps.append((
+                    "events",
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=? "
+                    f"AND kind IN ({','.join('?' * len(diagnostic))}) AND created_at<? AND {not_active_operation} ORDER BY id LIMIT ?)",
+                    [mission_id, *diagnostic, events_before, *active],
+                ))
+            if operations_before is not None:
+                steps.append((
+                    "managed_processes",
+                    "DELETE FROM managed_processes WHERE id IN (SELECT id FROM managed_processes WHERE mission_id=? "
+                    "AND status NOT IN ('STARTING','PREPARED','RUNNING') AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                    [mission_id, operations_before],
+                ))
+                steps.append((
+                    "operations",
+                    "DELETE FROM operations WHERE id IN (SELECT id FROM operations WHERE mission_id=? AND logs_path IS NULL "
+                    f"AND status NOT IN ({in_active}) AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                    [mission_id, *active, operations_before],
+                ))
+            for category, sql, params in steps:
+                if not run(mission_id, category, sql, params):
+                    return {"missions": missions, "complete": False}
+        if events_before is not None:
+            # Missions that are not finished: diagnostic events only, never the newest of a kind.
+            others = [
+                str(row[0]) for row in self.db.execute(
+                    f"SELECT id FROM missions WHERE status NOT IN ({','.join('?' * len(FINISHED_MISSION_STATUSES))}) ORDER BY id",
+                    sorted(FINISHED_MISSION_STATUSES),
+                )
+            ]
+            timed = sorted(DIAGNOSTIC_KINDS - {"capacity-refresh"})
+            for mission_id in others:
+                if not run(
+                    mission_id,
+                    "events",
+                    "DELETE FROM events WHERE id IN (SELECT e.id FROM events e WHERE e.mission_id=? "
+                    f"AND e.kind IN ({','.join('?' * len(timed))}) AND e.created_at<? "
+                    f"AND (e.operation_id IS NULL OR e.operation_id NOT IN (SELECT id FROM operations WHERE status IN ({in_active}))) "
+                    "AND e.id<(SELECT MAX(l.id) FROM events l WHERE l.mission_id=e.mission_id AND l.kind=e.kind) ORDER BY e.id LIMIT ?)",
+                    [mission_id, *timed, events_before, *active],
+                ):
+                    return {"missions": missions, "complete": False}
+                if not thin(mission_id, "capacity-refresh", events_before):
+                    return {"missions": missions, "complete": False}
+        return {"missions": missions, "complete": True}
+
+    def operations_with_logs(self, mission_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Operations of a mission that still reference a log file, oldest first."""
+        self._mission_row(mission_id)
+        rows = self.db.execute(
+            "SELECT id,task_id,logs_path FROM operations WHERE mission_id=? AND logs_path IS NOT NULL ORDER BY created_at,id LIMIT ?",
+            (mission_id, int(limit)),
+        )
+        return [dict(row) for row in rows]
+
+    def logs_path_references(self, logs_path: str) -> int:
+        """How many operations (of any mission) still reference exactly this log file."""
+        return int(self.db.execute("SELECT COUNT(*) FROM operations WHERE logs_path=?", (logs_path,)).fetchone()[0])
+
+    def prune_migration_backups(self, keep: int) -> list[Path]:
+        """Delete schema-migration backups beyond the ``keep`` newest; returns the removed paths.
+
+        Each removal is appended to ``migrations.log`` beside the database. A backup that cannot be
+        deleted is skipped and stays listed on the next pass.
+        """
+        if keep < 1:
+            raise ValueError("at least one migration backup must be kept")
+        backups = self._backups()
+        removed: list[Path] = []
+        for _stamp, version, path in backups[: max(0, len(backups) - keep)]:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(path)
+            line = f"{utc_now()} pruned schema {version} backup {path} ({size} bytes); keeping the newest {keep}\n"
+            try:
+                log = os.open(self.path.with_name("migrations.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    os.write(log, line.encode("utf-8"))
+                finally:
+                    os.close(log)
+            except OSError:
+                pass  # the audit event of the pass still records the count
+        return removed
+
+    def record_retention_pruned(self, mission_id: str, result: dict[str, Any]) -> int:
+        """Audit record of a data-retention pass: rows, files and backups removed per category, with the cutoffs used."""
+        deleted = {str(category): int(count) for category, count in dict(result.get("deleted", {})).items() if int(count)}
+        missions = {str(key): {str(c): int(n) for c, n in dict(value).items()} for key, value in list(dict(result.get("missions", {})).items())[:20]}
+        retention: dict[str, Any] = {
+            "cutoffs": {str(key): str(value) for key, value in dict(result.get("cutoffs", {})).items()},
+            "missions": missions,
+            "mission_count": int(result.get("mission_count", len(missions))),
+        }
+        return self.record_runtime_event(mission_id, "events-pruned", {
+            "deleted": deleted,
+            "total": sum(deleted.values()),
+            "retention": retention,
             "observed_at": utc_now(),
         })
 
@@ -1732,6 +2280,61 @@ class BridgeStore:
             self._mission_row(mission_id)
             self._event(mission_id, kind, bounded)
             return int(self.db.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    def task_notice_cursor(self, mission_id: str, operation_id: str) -> int:
+        """Event ID after which task changes are news for a running provider.
+
+        The newer of the operation's `operation-prepared` event and the `through_event_id` of its last
+        `task-notice-delivered` event, so a restarted controller does not announce a task twice.
+        """
+        row = self.db.execute(
+            "SELECT COALESCE(MAX(CASE WHEN kind='operation-prepared' THEN id END),0) AS prepared FROM events WHERE mission_id=? AND operation_id=?",
+            (mission_id, operation_id),
+        ).fetchone()
+        cursor = int(row["prepared"])
+        last = self.db.execute(
+            "SELECT data_json FROM events WHERE mission_id=? AND operation_id=? AND kind='task-notice-delivered' ORDER BY id DESC LIMIT 1",
+            (mission_id, operation_id),
+        ).fetchone()
+        if last is not None:
+            try:
+                cursor = max(cursor, int(json.loads(last["data_json"]).get("through_event_id", 0)))
+            except (ValueError, TypeError):
+                pass
+        return cursor
+
+    def task_notice_candidates(self, mission_id: str, after_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+        """`task-added` and `task-amended` events above ``after_id`` with the task's number, title and current status."""
+        rows = self.db.execute(
+            "SELECT e.id,e.kind,e.task_id,t.ordinal,t.title,t.status FROM events e JOIN tasks t ON t.id=e.task_id "
+            "WHERE e.mission_id=? AND e.id>? AND e.kind IN ('task-added','task-amended') AND t.origin='operator' ORDER BY e.id LIMIT ?",
+            (mission_id, int(after_id), int(limit)),
+        )
+        return [dict(row) for row in rows]
+
+    def record_task_notice(self, mission_id: str, operation_id: str, *, through_event_id: int, tasks: list[dict[str, Any]], text_bytes: int = 0) -> None:
+        """Record that a running provider was told about ``tasks`` (the durable half of the no-duplicate rule)."""
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, "task-notice-delivered", {
+                "operation_id": operation_id,
+                "through_event_id": int(through_event_id),
+                "tasks": tasks[:50],
+                "task_count": len(tasks),
+                "text_bytes": int(text_bytes),
+            }, operation_id=operation_id)
+
+    def record_task_notice_deferred(self, mission_id: str, operation_id: str, *, reason: str, tasks: list[dict[str, Any]], waited_seconds: int) -> None:
+        """Record once that a notice could not be typed (for example the composer holds an unsent draft)."""
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, "task-notice-deferred", {
+                "operation_id": operation_id,
+                "reason": reason,
+                "tasks": tasks[:50],
+                "task_count": len(tasks),
+                "waited_seconds": int(waited_seconds),
+            }, operation_id=operation_id)
 
     def set_mission_config_value(self, mission_id: str, key: str, value: Any, *, event_kind: str) -> dict[str, Any]:
         if not key or key in {"id", "cwd", "objective"}:
@@ -1896,12 +2499,14 @@ class BridgeStore:
 class MissionLock:
     """Non-blocking lifetime flock for one mission process owner."""
 
-    def __init__(self, directory: str | Path, mission_id: str) -> None:
+    def __init__(self, directory: str | Path, mission_id: str, *, kind: str = "") -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", mission_id):
             raise ValueError("invalid mission id for lock")
         self.directory = Path(directory).expanduser().absolute()
         self.mission_id = mission_id
-        self.path = self.directory / f"mission-{mission_id}.lock"
+        # ``kind`` names a second lock for the same mission (the launcher's
+        # start lock); the default is the controller's lifetime lock.
+        self.path = self.directory / (f"mission-{mission_id}.{kind}.lock" if kind else f"mission-{mission_id}.lock")
         self._file: Any | None = None
 
     def acquire(self, timeout: float = 0.0, poll: float = 0.02) -> None:
@@ -1918,19 +2523,49 @@ class MissionLock:
         info = self.directory.stat()
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise PermissionError(f"mission lock directory must be owned by this user and private: {self.directory}")
-        self._file = self.path.open("a+")
-        os.chmod(self.path, 0o600)
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            try:
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    self._file.close()
-                    self._file = None
-                    raise
-                time.sleep(poll)
+        stream = self.path.open("a+")
+        try:
+            os.chmod(self.path, 0o600)
+            deadline = time.monotonic() + max(0.0, timeout)
+            while True:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(poll)
+        except BaseException:
+            # Only a lock that is really held is kept in ``_file``; a later
+            # acquire() must not mistake a half-opened file for ownership.
+            stream.close()
+            raise
+        self._file = stream
+
+    def write_owner(self, record: Mapping[str, Any]) -> None:
+        """Record who holds the lock, in the lock file itself, while holding it."""
+        if self._file is None:
+            raise RuntimeError("the lock is not held")
+        self._file.seek(0)
+        self._file.truncate(0)
+        self._file.write(json.dumps(dict(record), sort_keys=True) + "\n")
+        self._file.flush()
+        os.fsync(self._file.fileno())
+
+    @classmethod
+    def read_owner(cls, directory: str | Path, mission_id: str) -> dict[str, Any]:
+        """The identity record of the current holder; ``{}`` when the lock is free or has no record.
+
+        A record left by a holder that has since exited is never returned: the
+        lock must be held right now.
+        """
+        if not cls.is_held(directory, mission_id):
+            return {}
+        try:
+            record = json.loads(cls(directory, mission_id).path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
 
     @classmethod
     def is_held(cls, directory: str | Path, mission_id: str) -> bool:
@@ -1950,7 +2585,7 @@ class MissionLock:
             except BlockingIOError:
                 return True
             except OSError:
-                return False
+                return True  # e.g. ENOLCK: absence of a controller is not proven, so do not report one as gone
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
             return False
         finally:

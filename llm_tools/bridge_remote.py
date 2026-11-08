@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from . import bridge_commands as commands
 from . import bridge_format as fmt
+from .bridge_help import error_text
 from .bridge_store import default_state_dir
 from .bridge_worker import _atomic_private_write
 
@@ -87,11 +88,14 @@ def load(env: dict[str, str] | None = None) -> RemoteConfig:
     path = remote_dir(env) / REMOTE_FILE
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return RemoteConfig(str(value["coordinator_url"]), str(value["token"]))
+        config = RemoteConfig(str(value["coordinator_url"]), str(value["token"]))
     except FileNotFoundError:
         raise RemoteError("no coordinator is configured; run llm-bridge remote login (known targets: local)") from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RemoteError(f"remote configuration {path} is unreadable: {type(exc).__name__}") from None
+    if not config.coordinator_url.startswith("https://"):  # login enforces this; an edited file must not bypass it
+        raise RemoteError(f"remote configuration {path} must name the coordinator with https://; run llm-bridge remote login again")
+    return config
 
 
 class Client:
@@ -279,6 +283,8 @@ class Client:
                 query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": initial_offset, "wait_ms": wait_ms})
                 status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
         elif op == "mission.events":
+            if {"newest", "since_seconds", "hide_bookkeeping"} & params.keys():
+                return None  # the events resource pages by cursor only; these filters go through the typed command route
             query = urllib.parse.urlencode({"worker": target, "after": params.get("after", 0), "limit": params.get("limit", 50), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/events?{query}", timeout=wait + 15)
         elif op == "session.list":
@@ -325,7 +331,13 @@ class Client:
                 "delivered when the worker reconnects",
                 exit_code=EXIT_UNAVAILABLE,
             )
-        return dict(body["result"])
+        result = dict(body["result"])
+        if op == "task.list":
+            # The coordinator adds a cursor to the command result; the local task list has none (page with --offset and --limit).
+            for page in (result, result.get("result")):
+                if isinstance(page, dict):
+                    page.pop("next_cursor", None)
+        return result
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -366,6 +378,13 @@ def _read_text(args: argparse.Namespace) -> str:
     return read_verbatim(args.prompt_file) if getattr(args, "prompt_file", None) else str(getattr(args, "prompt", "") or "")
 
 
+def _evidence_text(value: Any) -> str:
+    """`task output` or `task diff` of a worker: the text, or the reason there is none."""
+    if isinstance(value, dict) and value.get("available"):
+        return str(value.get("text", ""))
+    return f"unavailable: {value.get('message') if isinstance(value, dict) else value}"
+
+
 def request_for(args: argparse.Namespace, target: str) -> tuple[commands.CommandRequest, Callable[[Any], str]]:
     """Map a parsed command line to a typed request and its human formatter."""
     command = args.command
@@ -382,11 +401,32 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
     if command == "status":
         return make("mission.status"), fmt.format_status
     if command == "events":
-        return make("mission.events", {"after": args.after, "limit": args.limit}), lambda value: fmt.format_events(value["events"])
+        if args.follow:
+            raise ValueError("events --follow is not available remotely; run events again to see newer events")
+        # The same request the local command sends: the newest events unless --after names a cursor.
+        params: dict[str, Any] = {"limit": args.limit}
+        if args.after is None:
+            params["newest"] = True
+        else:
+            params["after"] = args.after
+        if args.since:
+            params["since_seconds"] = args.since
+        if not args.verbose:
+            params["hide_bookkeeping"] = True
+        return make("mission.events", params), lambda value: fmt.format_events(
+            value["events"], total=value.get("total"), newest=args.after is None, verbose=args.verbose, after=args.after or 0
+        )
     if command == "mission" and args.mission_action == "list":
         return make("mission.list", {"include_config": bool(args.include_config)}, with_mission=False), lambda value: fmt.format_mission_list(value["missions"])
     if command == "mission" and args.mission_action == "create":
+        from .bridge import _resolve_mode_args
+
+        _resolve_mode_args(args)  # --mode and the older --native/--headless flags become one choice
         unsupported_options: list[str] = []
+        if args.verifier_command is not None:
+            unsupported_options.append("--verifier")
+        if getattr(args, "verifier_after_dashes", None):
+            unsupported_options.append("-- COMMAND")
         if bool(args.auto_continue):
             unsupported_options.append("--auto-continue")
         if args.command_template:
@@ -443,6 +483,9 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         request = commands.CommandRequest("mission.agents", {"mission": args.agent_mission}, mission_id=args.agent_mission, target=target)
         return request, lambda value: "\n".join(__import__("llm_tools.bridge_agents", fromlist=["format_agent_map"]).format_agent_map(value))
     if command == "start":
+        from .bridge import _resolve_mode_args
+
+        _resolve_mode_args(args)
         params = {
             "headless": getattr(args, "headless", None),
             "native_tui": getattr(args, "native_tui", None),
@@ -463,6 +506,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         request = make("mission.resume")
         return request, lambda value: fmt.format_command_receipt("resume", value, request.mission_id or "")
     if command in {"pause", "cancel", "continue", "stop"}:
+        if getattr(args, "after_task", None) not in (None, False):
+            raise ValueError(f"{command} --after-task is not available remotely; it would act now. Run it on the worker, or use steer")
         params = {"force": bool(getattr(args, "force", False))} if command == "stop" else {}
         request = make(f"mission.{command}", params)
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
@@ -508,6 +553,10 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             return make("task.list", params), lambda value: fmt.format_task_list(value["tasks"])
         if action == "show":
             return make("task.show", _task_selector(args)), fmt.format_task_detail
+        if action in {"output", "diff"}:
+            if getattr(args, "follow", False):
+                raise ValueError("task output --follow is not available remotely; the worker returns the end of the log")
+            return make(f"task.{action}", _task_selector(args)), _evidence_text
         if action == "add":
             try:
                 depends_on = [int(value.strip()) for value in args.depends_on.split(",") if value.strip()]
@@ -518,15 +567,16 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
                 params["depends_on_numbers"] = depends_on
             return make("task.add", params), lambda value: fmt.format_task_result("add", value.get("result") or value)
         extra: dict[str, Any] = {
-            "amend": lambda: {"prompt": _read_text(args)},
+            "amend": lambda: {"prompt": _read_text(args), **({"requeue": True} if args.requeue else {})},
             "verify": lambda: {"evidence": args.evidence, "approved": bool(args.approve)},
-            "reject": lambda: {"reason": args.reason},
+            "approve": lambda: {"evidence": args.evidence, "approved": True},
+            "reject": lambda: {"reason": args.reason, **({"hold": True} if args.hold else {})},
             "priority": lambda: {"priority": args.value},
             "reorder": lambda: {"order": args.value},
         }.get(action, lambda: {})()
         if action == "dependencies":
             extra["depends_on_number"] = args.add
-        operation = "task.dependency" if action == "dependencies" else f"task.{action}"
+        operation = "task.dependency" if action == "dependencies" else "task.verify" if action == "approve" else f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
     raise ValueError(f"{command} is not available with --target {target}; remote commands: mission create|list, restore, suspend-until-credits, status, events, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
@@ -543,21 +593,46 @@ def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:
     return 2, message
 
 
+def _cancel_confirmed(target: str, args: argparse.Namespace, client: Client) -> bool:
+    """The local `cancel` confirmation, for a mission on ``target``: `--yes` skips it, a finished mission needs none.
+
+    The saved status and name come from the worker. When the worker cannot answer, the question is asked
+    with the mission reference alone, which is the safer choice.
+    """
+    from .bridge import _confirm_cancel
+    from .bridge_states import FINISHED_MISSION_STATUSES
+
+    if getattr(args, "yes", False):
+        return True
+    status, name = "", ""
+    try:
+        envelope = client.submit_resource(target, commands.CommandRequest("mission.status", mission_id=args.mission, target=target))
+        mission = ((envelope or {}).get("result") or {}).get("mission") or {}
+        status, name = str(mission.get("status") or ""), str(mission.get("name") or "")
+    except (RemoteError, ValueError, OSError):
+        pass
+    if status in FINISHED_MISSION_STATUSES:
+        return True
+    return _confirm_cancel(args, fmt.short_id(args.mission), fmt.clipped_name(name))
+
+
 def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = None) -> int:
     """Execute one parsed command on ``target`` (a worker name or ``all``)."""
     as_json = bool(getattr(args, "json", False))
     try:
         client = client or Client(load())
         if args.command == "worker" and getattr(args, "worker_action", "") == "list":
-            return _print(client.workers(), as_json, _format_workers)
+            return _print({"workers": client.workers()}, as_json, lambda value: _format_workers(value["workers"]))  # --json lists are objects
         request, human = request_for(args, target)
         spec = commands.lookup(request.operation)
         if target != commands.ALL_TARGET:
+            if args.command == "cancel" and not _cancel_confirmed(target, args, client):
+                return 2
             resource_result = client.submit_resource(target, request)
             envelope = client.submit(target, request) if resource_result is None else resource_result
             code, message = _envelope_exit(envelope)
             if message:
-                print(f"llm-bridge: {target}: {message}", file=sys.stderr)
+                print(error_text(f"{target}: {message}", str((envelope.get("error") or {}).get("code") or "failed")), file=sys.stderr)
                 return code
             value = envelope.get("result")
             if request.operation in {"proposal.create", "proposal.accept", "proposal.reject"}:
@@ -585,16 +660,16 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
         _print({"schema_version": 1, "targets": results}, as_json, lambda value: _format_all(value["targets"], human))
         return 0 if failures == 0 else EXIT_UNAVAILABLE
     except RemoteError as exc:
-        print(f"llm-bridge: {exc}", file=sys.stderr)
+        print(error_text(str(exc), "unreachable"), file=sys.stderr)
         return exc.exit_code
     except (ValueError, commands.CommandFailure) as exc:
-        print(f"llm-bridge: {exc}", file=sys.stderr)
+        print(error_text(str(exc), "usage"), file=sys.stderr)
         return 2
 
 
 def _print(value: Any, as_json: bool, human: Callable[[Any], str]) -> int:
     if as_json:
-        print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(commands.with_task_numbers(value), ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(human(value))
     return 0

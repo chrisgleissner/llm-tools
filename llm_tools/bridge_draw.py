@@ -22,6 +22,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from . import bridge_theme
+from .bridge_event_text import _scrub  # noqa: F401  (shared with the CLI; re-exported for bridge_tui)
 from .bridge_glyphs import glyph, localize
 from .bridge_input import cell_slice, cell_width
 from .bridge_theme import ROLES as THEME_ROLES, Style, fit_style
@@ -181,27 +182,6 @@ def role_attr(role: str) -> int:
     if role == "secondary":
         role = "muted" if "muted" in _ROLE_ATTRS else "dim"
     return _ROLE_ATTRS.get(role, 0)
-
-
-def _scrub(text: str, *, keep_newline: bool = False, drop_format: bool = True) -> str:
-    """Replace control and surrogate characters with spaces and (optionally) drop format characters.
-
-    Only the distinct characters of `text` are classified, so the cost does not
-    grow with the length of repetitive text.
-    """
-    if text.isascii() and text.isprintable():
-        return text  # printable ASCII has no control or format characters
-    table: dict[int, str | None] = {}
-    for char in set(text):
-        if char.isascii() and char.isprintable():
-            continue
-        category = unicodedata.category(char)
-        if category in {"Cc", "Cs"}:
-            if not (keep_newline and char == "\n"):
-                table[ord(char)] = " "
-        elif drop_format and category == "Cf":
-            table[ord(char)] = None  # bidi overrides, zero-width marks
-    return text.translate(table) if table else text
 
 
 def _put(

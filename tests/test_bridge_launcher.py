@@ -203,8 +203,10 @@ def test_bare_command_runs_from_unrelated_folder_and_creates_without_provider(tm
 
 def test_bare_noninteractive_command_prints_help_without_creating_state(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
-    assert bridge.main([]) == 0
-    assert "llm-bridge" in capsys.readouterr().out
+    assert bridge.main([]) == 2  # no terminal: an error, with the reason (CLIUX-077)
+    captured = capsys.readouterr()
+    assert "llm-bridge" in captured.out
+    assert "the home screen needs an interactive terminal" in captured.err and "not a TTY" in captured.err
     assert not (tmp_path / "state").exists()
 
 

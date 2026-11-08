@@ -54,8 +54,8 @@ def test_header_wordmark_chip_name_and_state(roles) -> None:
     state = make_state(full_snapshot())
     parts = elements(draw(state, roles), roles, 0)
     assert parts == [
-        ("LLM BRIDGE", "brand"), (" · ", "dim"), ("▌", theme.mission_role("M1")), (" Fix the typo", "info"),
-        (" · ", "dim"), ("● RUNNING", "state_running"),
+        ("LLM BRIDGE", "brand"), (" · ", "dim"), ("▌", theme.mission_role("M1")), (" Fix the typo", "info"), (" (M1)", "dim"),
+        (" · ", "dim"), ("◆ NEEDS YOU", "state_review"),
     ]
 
 
@@ -154,12 +154,12 @@ def test_tasks_list_colours_only_the_state_and_mutes_ids_and_finished_rows(roles
     selected = elements(screen, roles, 3)
     assert [role for _text, role in selected] == ["selected"] and selected[0][0].startswith("> 2 ")
     queued_row = elements(screen, roles, row_of(screen, "10"))
-    assert role_of(queued_row, "10") == "muted" and role_of(queued_row, "◆ VERIFYING") == "state_review"
-    assert role_of(queued_row, "P12") == "muted" and role_of(queued_row, "Troubleshooting") == "info"
+    assert role_of(queued_row, "10") == "muted" and role_of(queued_row, "◆ REVIEW") == "state_review"
+    assert role_of(queued_row, "prio 12") == "muted" and role_of(queued_row, "Troubleshooting") == "info"
     done = elements(screen, roles, row_of(screen, "11"))
     assert role_of(done, "✓ COMPLETED") == "state_done" and role_of(done, "Shipped") == "muted"
     cancelled = elements(screen, roles, row_of(screen, "12"))
-    assert role_of(cancelled, "✕ CANCELLED") == "state_paused" and role_of(cancelled, "Dropped") == "muted"
+    assert role_of(cancelled, "⊘ CANCELLED") == "state_paused" and role_of(cancelled, "Dropped") == "muted"
 
 
 def test_preview_separator_state_matches_the_list(roles) -> None:

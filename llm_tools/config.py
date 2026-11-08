@@ -56,7 +56,7 @@ from .capacity import ALL_PROVIDERS
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
 _TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage", "bridge"})
-_BRIDGE_KEYS = frozenset({"theme", "teams", "token_spend"})
+_BRIDGE_KEYS = frozenset({"theme", "teams", "token_spend", "retention", "task_notices"})
 _USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
@@ -270,10 +270,19 @@ def _validate(raw: Any) -> dict[str, Any]:
         _validate_section(bridge, "bridge", _BRIDGE_KEYS)
         if "teams" in bridge and not isinstance(bridge["teams"], bool):
             _fail("bridge.teams must be true or false")
+        if "task_notices" in bridge and not isinstance(bridge["task_notices"], bool):
+            _fail("bridge.task_notices must be true or false")
         if "token_spend" in bridge and (
             not isinstance(bridge["token_spend"], str) or bridge["token_spend"] not in {"low", "medium", "high"}
         ):
             _fail("bridge.token_spend must be low, medium, or high")
+        if "retention" in bridge:
+            from . import bridge_retention  # stdlib-only module; imported here to keep config start-up lean
+
+            try:
+                bridge_retention.validate_table(bridge["retention"])
+            except ValueError as exc:
+                _fail(str(exc))
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):

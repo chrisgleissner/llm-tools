@@ -32,7 +32,7 @@ def test_create_rejects_native_with_headless_and_saves_nothing(state: Path, tmp_
     assert main(argv) != 0
     err = capsys.readouterr().err
     assert "--headless and --native cannot be combined" in err
-    assert "Native" in err and "Headless" in err and "Background" in err
+    assert "--mode native, background or headless" in err
     assert not state.exists() or not (state / "bridge.sqlite3").exists() or BridgeStore(state / "bridge.sqlite3").list_missions() == []
 
 
@@ -65,15 +65,16 @@ def help_texts() -> str:
 def test_help_uses_native_headless_background_and_never_autonomous() -> None:
     text = help_texts()
     assert "autonomous" not in text.lower()
-    create = topic_text("mission create")
-    assert "Native mode:" in create and "Headless mode:" in create and "Background mode" in create
-    assert "Native mode:" in topic_text("start") and "Headless mode:" in topic_text("start")
-    quickstart = topic_text("quickstart")
-    assert "Native (--native)" in quickstart and "Headless (--headless)" in quickstart and "Background, the default" in quickstart
-    assert "Background (no" in topic_text("providers")
+    create = " ".join(topic_text("mission create").split())
+    assert "Native: the provider's own interactive terminal" in create and "Headless: no terminal" in create and "Background: the provider runs under a controller" in create
+    start = " ".join(topic_text("start").split())
+    assert "Native (the provider's own terminal" in start and "Background (a station shows the activity log)" in start and "Headless (no station)" in start
+    quickstart = " ".join(topic_text("quickstart").split())
+    assert "--mode native|background|headless" in quickstart and "Background is the default for the command line" in quickstart
+    assert "Background (--mode" in " ".join(topic_text("providers").split())
 
 
-def test_home_form_names_its_two_choices_native_and_headless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_home_form_names_its_three_choices_native_background_and_headless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import curses
     from llm_tools import bridge_tui
 
@@ -82,24 +83,26 @@ def test_home_form_names_its_two_choices_native_and_headless(tmp_path: Path, mon
     monkeypatch.setattr(launcher, "provider_installed", lambda name: True)
     form = Launcher(str(tmp_path), creating=True, installed=("codex",), providers="codex", objective="x", focus=3)
     screens = []
-    for _ in range(2):
+    for _ in range(3):
         grid = Grid(size=(34, 120))
         launcher._draw(grid, form)
         screens.append(grid.text())
         form.key(" ")
     assert "Mode: Native — provider terminal in a station" in screens[0] and "Start and open provider" in screens[0]
-    assert "Mode: Headless — provider runs without a terminal" in screens[1] and "Start headless work" in screens[1]
+    assert "Mode: Background — activity log in a station" in screens[1] and "Start and open activity log" in screens[1]
+    assert "Mode: Headless — provider runs without a terminal" in screens[2] and "Start headless work" in screens[2]
     assert not any("utonomous" in screen for screen in screens)
-    assert "Native shows the provider terminal in a station" in launcher.field_hint(form) and "Headless" in launcher.field_hint(form)
+    hint = launcher.field_hint(form)
+    assert "Native shows the provider terminal" in hint and "Background" in hint and "Headless" in hint
 
 
 def test_operations_doc_uses_the_same_three_names() -> None:
     doc = (Path(__file__).resolve().parent.parent / "docs" / "llm-bridge" / "operations.md").read_text(encoding="utf-8")
-    table = doc[doc.index("| Mode | Flag |"):]
+    table = doc[doc.index("| Mode | `--mode` |"):]
     rows = [line for line in table.splitlines()[2:5]]
     assert [re.match(r"\| (\w+) \|", row).group(1) for row in rows] == ["Native", "Headless", "Background"]
-    assert "neither flag (CLI default)" in rows[2]
+    assert "(CLI default)" in rows[2]
     # The only remaining mention of the old name says that it is the old name.
     old = [line for line in doc.splitlines() if "utonomous" in line]
     assert len(old) <= 2 and all("call" in line or "Older" in line or "older" in line for line in old), old
-    assert "`mission create` and `start` both\nrefuse the combination" in doc
+    assert "`--native` with `--headless`,\nis refused" in doc

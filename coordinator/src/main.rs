@@ -1,5 +1,6 @@
 //! `bridge-coordinator` command line (see docs/distributed/coordinator.md).
 
+use bridge_coordinator::admin_reset;
 use bridge_coordinator::certs::{self, Sans};
 use bridge_coordinator::config;
 use bridge_coordinator::db::Db;
@@ -13,14 +14,22 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
                                 (no --hostname/--ip: localhost, this machine's host name,
                                  <host>.home.arpa and its non-loopback addresses)
   info                          (URL, CA path and SHA-256, bind address, LAN state)
+  check-config                  (validate config.toml and the BRIDGE_COORDINATOR_* variables; lists every
+                                 error with key, value and fix; exit 0 valid, 1 not; --web-dir as for serve)
   health                        (HTTPS GET /healthz with the local CA; exit 0 healthy, 1 not)
   backup --output FILE | restore --input FILE   (restore needs the server stopped)
   setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
   worker add NAME [--client-cert-file FILE --client-key-file FILE] | worker rotate-token NAME | worker revoke NAME
-  admin reset-password [--keep-api-tokens]
-                                (local recovery; clears TOTP and recovery codes, deletes sessions;
-                                 revokes all API tokens unless kept)
+  admin reset-password [--temporary] [--keep-api-tokens] [--username NAME]
+                                (on a terminal: asks for the new password twice, without echo;
+                                 otherwise reads it from stdin. --temporary generates a one-time
+                                 password, prints it once and forces a change at the next web
+                                  sign-in. Clears TOTP and recovery codes, deletes all sessions;
+                                  revokes all API tokens unless kept.
+                                 There is exactly one administrator account, so --username is only
+                                 checked against its name. Run as the service user, or as root:
+                                 the database files then keep the data directory's owner)
   admin reset-passkeys          (local recovery; deletes all passkeys and browser sessions)
   cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
                                                     within the CA's name constraints)
@@ -51,6 +60,8 @@ struct Args {
     expires_days: Option<u32>,
     scopes: Vec<String>,
     keep_api_tokens: bool,
+    temporary: bool,
+    username: Option<String>,
     words: Vec<String>,
 }
 
@@ -70,6 +81,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         expires_days: None,
         scopes: vec![],
         keep_api_tokens: false,
+        temporary: false,
+        username: None,
         words: vec![],
     };
     let mut it = args.into_iter();
@@ -93,6 +106,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             "--scope" => a.scopes.push(value("--scope")?),
             "--keep-api-tokens" => a.keep_api_tokens = true,
+            "--temporary" => a.temporary = true,
+            "--username" => a.username = Some(value("--username")?),
             "--key" => a.key = Some(value("--key")?.into()),
             "--client-cert-file" => a.client_cert_file = Some(value("--client-cert-file")?.into()),
             "--client-key-file" => a.client_key_file = Some(value("--client-key-file")?.into()),
@@ -134,6 +149,16 @@ async fn run(args: Args) -> Result<(), String> {
         ["init"] => bridge_coordinator::init::init_with(&dir, &sans, args.bind.as_deref()),
         ["info"] => {
             print!("{}", ops::report(&dir, false)?);
+            Ok(())
+        }
+        ["check-config"] => {
+            let cfg = config::Config::load_checked(&dir, args.web_dir.is_some())?;
+            println!(
+                "config ok: {} (bind {}, exposure {})",
+                dir.join("config.toml").display(),
+                cfg.bind,
+                format!("{:?}", cfg.exposure).to_ascii_lowercase()
+            );
             Ok(())
         }
         ["health"] => {
@@ -302,27 +327,15 @@ async fn run(args: Args) -> Result<(), String> {
         }
         ["admin", "reset-password"] => {
             let db = open_db(&dir)?;
-            if db.admin_get().map_err(|e| e.to_string())?.is_none() {
-                return Err("no administrator exists yet; use the setup token".into());
-            }
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
-            let password = line.trim_end_matches(['\n', '\r']);
-            auth::valid_password(password)?;
-            let revoked = db
-                .admin_reset_password_local(&auth::hash_password(password), args.keep_api_tokens)
-                .map_err(|e| e.to_string())?;
-            db.audit(
-                "cli",
-                "password.reset",
-                &format!("all sessions and TOTP recovery state deleted; {revoked} API token(s) revoked"),
-                "local",
-            );
-            if args.keep_api_tokens {
-                println!("password reset; all sessions and TOTP recovery state cleared; API tokens kept (--keep-api-tokens)");
-            } else {
-                println!("password reset; all sessions and TOTP recovery state cleared; {revoked} API token(s) revoked");
-            }
+            let opts = admin_reset::Options {
+                username: args.username.clone(),
+                keep_api_tokens: args.keep_api_tokens,
+                temporary: args.temporary,
+            };
+            let report = admin_reset::reset_password(&db, &opts, &mut admin_reset::TerminalInput::new());
+            drop(db);
+            admin_reset::restore_ownership(&dir);
+            print!("{}", report?.text(args.keep_api_tokens));
             Ok(())
         }
         ["admin", "reset-passkeys"] => {
@@ -375,7 +388,12 @@ async fn main() -> ExitCode {
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            // Configuration errors are complete lines already.
+            if e.starts_with("config error:") {
+                eprintln!("{e}");
+            } else {
+                eprintln!("error: {e}");
+            }
             ExitCode::from(1)
         }
     }

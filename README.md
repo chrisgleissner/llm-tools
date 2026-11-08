@@ -53,7 +53,11 @@ Next             Ready. In your project folder run llm-bridge, press N, type the
                  Claude Code asks once to trust a new folder: choose "Yes, I trust this folder".
 ```
 
-If tmux is missing, or no provider is signed in, the `Next` line says what to fix. No `pipx`, or another route? See [install paths](./docs/reference.md#install-paths). Check the installed version with `llm-bridge --version`.
+If tmux is missing, or no provider is signed in, the `Next` line says what to fix. `doctor` lists every provider the new-mission form offers, exits 1 when no provider can run (so scripts can gate on it), and `doctor --json` carries `ready` and `blocking` fields. No `pipx`, or another route? See [install paths](./docs/reference.md#install-paths). Check the installed version with `llm-bridge --version`.
+
+To report a problem, `llm-bridge doctor --bundle` writes `llm-bridge-bundle-<UTC time>.tar.gz` (mode 0600, never overwrites; `--bundle PATH` chooses the file). It holds versions, the doctor report, the configuration, a mission and event count summary, controller health and the tail of recent logs, with tokens, e-mail addresses, private addresses, host names, prompts and task text removed and your home folder shown as `~`. Read it before you attach it to a public issue. Details: [diagnostic bundle](./docs/llm-bridge/operations.md#diagnostic-bundle-for-bug-reports).
+
+For scripts, `llm-bridge` exits 0 on success or nothing to do, 1 on a runtime failure, 2 on a usage error, 3 when a mission or task is not found or the name is ambiguous, and 4 when the mission or task is in the wrong state. With `--json` an error is `{"error": {"code", "message", "hint", "help"}}` on standard output and every list is an object. An error also ends with a `see:` line (and `help` in JSON) that points at its entry in [troubleshooting](./docs/llm-bridge/troubleshooting.md). See [command-line conventions](./docs/llm-bridge/operations.md#command-line-conventions).
 
 ## Your first Bridge mission
 
@@ -61,29 +65,33 @@ Run this in a folder you are happy for an agent to edit, for example a new empty
 
 1. Run `llm-bridge` and press `N`. The home screen starts no provider.
 2. Type the task, for example `Create a file named hello.txt containing the word hello, then stop.`
-3. The form selects the first provider that is installed and signed in, shown as `[1] claude`. Press `Tab` five times to reach **Start and open provider**. Its hint reads `Starts claude now · uses provider capacity`. Press `Enter`. This is the step that uses paid capacity.
+3. The form selects the first provider that is installed and signed in, shown as `[1] claude`. Press `F5` to start from any field, or press `Tab` five times to reach **Start and open provider** and press `Enter`. The hint on that row reads `Starts claude now · uses provider capacity`. When a provider's quota is used up, the row says so, for example `copilot has no quota until Dec 1 · Start waits for it`, and the form prefers a provider that has capacity. Providers that are not signed in are marked, for example `[ ] codex (not signed in: codex login)`. This is the step that uses paid capacity.
 4. The provider opens in its own terminal inside Bridge. Claude Code may first ask whether you trust the folder. Choose **Yes, I trust this folder**. The first option is **No, exit**. If you pick it, Claude exits with status 1. Bridge does not start it again. It holds the task, and the status and the Needs you row say `Claude Code was not allowed to trust this folder · trust it and run /start again, or choose another provider with /rotation`. Run `/start` to start Claude again, and the prompt returns.
 5. When the provider says it is done, exit it with `/exit`. Bridge then shows:
 
    ```text
-   Provider exited (status 0) · Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject.
+   Provider exited (status 0) · Task 1 ready for review · Ctrl-] B then /approve
    ```
 
 6. Press `Ctrl-]`, then `B`. Type `/approve`, press `Enter`, then press `y` to confirm. The controls show `✓ COMPLETED` and `mission completed · 1/1 tasks completed`.
 7. Press `Ctrl-]`, then `d`, to leave the station. Bridge opens the mission controls in your own terminal; press `Ctrl-D` to leave them. The terminal prints `Detached from mission … the mission is completed`, and `hello.txt` is in your folder.
 
-A task never completes on the provider's exit alone. It waits in `VERIFYING` until you approve it, or until a verifier you configured passes.
+A task never completes on the provider's exit alone. It waits in `REVIEW` until you approve it, or until a verifier you configured passes.
 
 The form has no model setting, so the provider uses its own default. To try a particular Claude model, start Bridge as `ANTHROPIC_MODEL=<model> llm-bridge`.
 
 The same flow from a script, with no terminal attached:
 
 ```bash
-llm-bridge mission create --file task.md --name demo --native
+llm-bridge mission create --file task.md --name demo --mode native
 llm-bridge start                       # the mission is inferred from the folder; on a terminal it opens the station
 llm-bridge status                      # after the provider exits, "Needs you" shows the approve command
-llm-bridge task verify --task 1 --approve
+llm-bridge task output --task 1        # read what the provider did (pages on a terminal, --follow while it runs)
+llm-bridge task diff --task 1          # the files it changed since the run started
+llm-bridge task approve --task 1
 ```
+
+A task added or amended while a native Claude Code, Codex or Copilot is working (with `task add`, the console or a remote client) waits in the queue. Bridge also types a short notice about it into the provider's terminal at its next idle prompt (never over text you have typed and not sent; `task_notices = false` under `[bridge]` in the config turns it off), and the `task add` receipt says whether that will happen (`delivered to the running provider at its next prompt`) or when the task starts (`starts after task 2`). Headless and background missions keep the plain queue.
 
 ## The 60-second tour
 
@@ -152,7 +160,7 @@ navigation remain explicit. Monitoring starts no model calls. See the
 
 - **Missions outlive your session.** Tasks, evidence and history live in a local database.
 - **Providers keep their own UI.** Native mode runs the real CLI in a private tmux station.
-- **You approve, not the exit code.** Finished work waits in `VERIFYING` until you approve it, or a verifier you configured passes.
+- **You approve, not the exit code.** Finished work waits in `REVIEW` until you approve it, or a verifier you configured passes.
 - **Capacity stays visible:** `claude · 5h 77% left, resets 4h 43m · weekly 56% left, resets 6d 5h`.
 - **Capacity waits stay awake by default.** Opt a mission into RTC-backed sleep with `llm-bridge mission set --mission ID --suspend-when-rate-limited on`; Bridge sleeps only when no operation is active and a wake is armed.
 - **Sleep to a known credit reset.** Use `llm-bridge suspend-until-credits --mission ID` or **Suspend until credits recover** in Actions. With opt-in enabled and its controller running, Bridge also prearms a recovery wake for manual OS suspend while waiting for credits, including paused missions and detached UIs. See [power prerequisites and safety](./docs/llm-bridge/operations.md#suspend-until-credits-recover).
@@ -171,7 +179,7 @@ In a station, `Ctrl-]` is the prefix:
 | `Ctrl-]` then `d` | Detach; the mission keeps running |
 | `Ctrl-]` then `?` | Help |
 
-The controls feel like Codex and Claude Code: nine tabs on `F1`–`F9` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage, Agents), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`.
+The controls feel like Codex and Claude Code: nine tabs on `F1`–`F9` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage, Agents), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`. Typing `/` lists the commands with a one-line description each, narrowing as you type; Tab completes the common prefix and a second Tab names the matches. `Ctrl-E` opens the task composer (a kept draft comes back with `Restored draft from HH:MM`); `?` opens a word-wrapped help page.
 
 The Agents view shows mission roots and verified native Codex children, with
 age, model, effort, status and last observed activity. Select a row to inspect
@@ -186,7 +194,7 @@ mission; older missions without saved policy keep their original prompts until
 explicitly configured. The [Bridge operations guide](./docs/llm-bridge/operations.md#provider-native-teams-and-token-spend-preference)
 covers the three preferences, provider fallback, and repeated-invocation prompt overhead.
 
-[Go deeper →](./docs/llm-bridge/operations.md)
+[User guide →](./docs/llm-bridge/guide.md) · [Go deeper →](./docs/llm-bridge/operations.md)
 
 ### Distributed use (optional)
 
@@ -230,6 +238,11 @@ unknown or offline target fails and never falls back to local execution. Copy
 `ca.pem` and `setup-token` out of the coordinator as described in the install guide.
 The same command line is shown by `llm-bridge help distributed`.
 
+Forgot the web password? In an SSH session on the coordinator host run
+`llm-bridge-coordinator reset-password` (container and native installs; add
+`--temporary` to force a change at the next sign-in). See
+[Locked out or forgot the password](./docs/distributed/install.md#locked-out-or-forgot-the-password).
+
 Remote mission creation, machine power operations and restore each require the
 separate `--allow-create`, `--allow-power` and `--allow-restore` enrolment flags.
 Creation and restore also require repeatable `--allow-root DIR` entries. Each
@@ -254,8 +267,11 @@ install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profi
 troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
 HTTP API, limits), [API examples and reference](./docs/distributed/api.md),
 [protocol](./docs/distributed/protocol.md),
-[threat model](./docs/distributed/threat-model.md) and
-[benchmarks](./docs/distributed/benchmarks.md).
+[threat model](./docs/distributed/threat-model.md),
+[safe defaults](./docs/distributed/safe-defaults.md),
+[uninstall and moving to another host](./docs/llm-bridge/uninstall.md),
+[benchmarks](./docs/distributed/benchmarks.md) and
+[soak and fault-injection tests](./docs/distributed/soak-and-chaos.md) (`scripts/bridge_soak.py`, `scripts/bridge_chaos.py`).
 
 ## llm-usage
 
@@ -300,6 +316,7 @@ A [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the
 - With everything exhausted, suspends the machine and wakes it at the earliest reset.
 - Holds an idle inhibitor, so your desktop cannot suspend it mid-task.
 - Never suspends without a wake alarm.
+- Records every resume. A USB keyboard with wakeup enabled can wake the machine before the alarm; that is logged as an early wake, not as a failed resume. Only a machine that rebooted during a suspend triggers the wedged-resume warning. Details: [Reliable sleep/wake](./docs/ralph-robin.md#reliable-sleepwake).
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -317,7 +334,7 @@ Run `llm-sleep-soak` once before an overnight job.
 - **SSH friendly.** Missions belong to your user, not your login. Start at your desk, check in from your phone's terminal, detach, carry on. If the connection drops, the Bridge screen exits with status 129 instead of spinning; the mission keeps running.
 - **Light and dark.** Auto-detected; force with `LLM_BRIDGE_THEME=light|dark`; preview with `llm-bridge theme`.
 - **`NO_COLOR`** gives monochrome. States always carry a glyph and a word.
-- **ASCII locales.** Plain ASCII under `LANG=C`.
+- **ASCII locales.** Plain ASCII symbols when `LC_ALL`, `LC_CTYPE` or `LANG` is `C` or `POSIX`, or when you set `LLM_BRIDGE_ASCII=1`; `llm-bridge theme` shows which set is active.
 
 ## Privacy and safety
 
@@ -325,7 +342,7 @@ No telemetry and no network listener. Quota reads use your existing provider cre
 
 ## More
 
-- Docs: [Bridge](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
+- Docs: [Bridge user guide](./docs/llm-bridge/guide.md) · [Bridge troubleshooting](./docs/llm-bridge/troubleshooting.md) · [Bridge operations](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
 - Needs Python 3.11+ and your provider CLIs; Bridge needs Linux and `tmux` (macOS runs the usage tools and the remote client).
 - Contributing: [small, focused PRs](./docs/reference.md#contributing).
 - License: Apache 2.0.

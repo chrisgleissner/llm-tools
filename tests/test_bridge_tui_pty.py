@@ -426,7 +426,7 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
     try:
         _read_until(master, process, b"RUNNING")
         os.write(master, b"\t")  # Orders view.
-        _read_until(master, process, b"READY  P8  after 11  PTY order")  # Wait until the async snapshot is visible.
+        _read_until(master, process, b"prio 8  after 11  PTY order")  # Wait until the async snapshot is visible.
         os.write(master, b"\r")  # Inspect the selected order.
         rendered = _read_until(master, process, b"Acceptance criteria")
         assert b"Dependencies: 11" in rendered

@@ -1,5 +1,6 @@
 //! `config.toml` in the data directory.
 
+use crate::config_check::{self, CheckOptions};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -265,121 +266,72 @@ pub fn parse_exposure(name: &str, v: &str) -> Result<Exposure, String> {
     }
 }
 
+/// Replace the legacy root key `lan_enabled` by `exposure` in the file text, keeping comments and
+/// ordering. Returns `None` when the file has no usable legacy key (absent, unparsable or not a
+/// boolean; the validator reports those). An explicit `exposure` wins over the legacy key.
+fn migrate_legacy_lan_enabled(text: &str) -> Option<String> {
+    let table: toml::Table = text.parse().ok()?;
+    let legacy_lan = table.get("lan_enabled")?.as_bool()?;
+    let selected = match table.get("exposure").and_then(toml::Value::as_str) {
+        Some(explicit) => explicit.to_string(),
+        None => if legacy_lan { "lan" } else { "loopback" }.to_string(),
+    };
+    let has_exposure = table.contains_key("exposure");
+    let mut migrated = String::new();
+    let mut inserted = has_exposure;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("lan_enabled") && trimmed.split_once('=').is_some_and(|(key, _)| key.trim() == "lan_enabled") {
+            continue;
+        }
+        migrated.push_str(line);
+        migrated.push('\n');
+        if !inserted && trimmed.starts_with("bind") && trimmed.split_once('=').is_some_and(|(key, _)| key.trim() == "bind") {
+            migrated.push_str(&format!("exposure = \"{selected}\"\n"));
+            inserted = true;
+        }
+    }
+    if !inserted {
+        migrated.push_str(&format!("exposure = \"{selected}\"\n"));
+    }
+    Some(migrated)
+}
+
 impl Config {
+    /// Read and validate `config.toml` with the environment overrides. All problems are reported
+    /// together, one `config error: ...` line each (see `config_check.rs`).
     pub fn load(dir: &Path) -> Result<Config, String> {
+        Self::load_with(dir, CheckOptions::default())
+    }
+
+    /// [`Config::load`] plus the checks that only matter before serving: a non-loopback bind needs
+    /// `exposure = "lan"` or `"internet"`, and `web_dir` must hold an `index.html` unless `--web-dir` replaces it.
+    pub fn load_checked(dir: &Path, web_dir_overridden: bool) -> Result<Config, String> {
+        Self::load_with(
+            dir,
+            CheckOptions {
+                require_lan: true,
+                check_paths: !web_dir_overridden,
+            },
+        )
+    }
+
+    fn load_with(dir: &Path, opts: CheckOptions) -> Result<Config, String> {
         let path = dir.join("config.toml");
         let mut text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e} (run `init` first)", path.display()))?;
-        let mut document: toml::Value = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
-        let table = document
-            .as_table_mut()
-            .ok_or_else(|| format!("invalid {}: expected a TOML table", path.display()))?;
-        let legacy_lan = table
-            .remove("lan_enabled")
-            .map(|v| v.as_bool().ok_or_else(|| "lan_enabled must be true or false".to_string()))
-            .transpose()?;
-        if let Some(legacy_lan) = legacy_lan {
-            if !table.contains_key("exposure") {
-                table.insert("exposure".into(), toml::Value::String(if legacy_lan { "lan" } else { "loopback" }.into()));
-            }
-            // Preserve operator comments and ordering while replacing the legacy root key.
-            let selected = table.get("exposure").and_then(toml::Value::as_str).unwrap_or("loopback");
-            let mut migrated = String::new();
-            let mut inserted = false;
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("lan_enabled") && trimmed.split_once('=').is_some_and(|(key, _)| key.trim() == "lan_enabled") {
-                    continue;
-                }
-                migrated.push_str(line);
-                migrated.push('\n');
-                if !inserted && trimmed.starts_with("bind") && trimmed.split_once('=').is_some_and(|(key, _)| key.trim() == "bind") {
-                    migrated.push_str(&format!("exposure = \"{selected}\"\n"));
-                    inserted = true;
-                }
-            }
-            if !inserted {
-                migrated.push_str(&format!("exposure = \"{selected}\"\n"));
-            }
+        if let Some(migrated) = migrate_legacy_lan_enabled(&text) {
             crate::write_replace(&path, migrated.as_bytes(), 0o600).map_err(|e| format!("cannot migrate {}: {e}", path.display()))?;
             text = migrated;
         }
-        let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
-        // Environment variables win over config.toml (container deployments).
-        if let Some(v) = std::env::var_os(ENV_BIND) {
-            cfg.bind = v.to_string_lossy().into_owned();
-        }
-        if let Ok(v) = std::env::var(ENV_EXPOSURE) {
-            cfg.exposure = parse_exposure(ENV_EXPOSURE, &v)?;
-        } else if let Some(v) = std::env::var_os(ENV_LAN_ENABLED) {
-            cfg.exposure = if parse_bool(ENV_LAN_ENABLED, &v.to_string_lossy())? {
-                Exposure::Lan
-            } else {
-                Exposure::Loopback
-            };
-        }
-        if cfg.min_tls != "1.3" && cfg.min_tls != "1.2" {
-            return Err("min_tls must be \"1.3\" or \"1.2\"".into());
-        }
-        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_CERT_FILE").ok().filter(|v| !v.trim().is_empty()) {
-            cfg.tls_cert_file = Some(v);
-        }
-        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_KEY_FILE").ok().filter(|v| !v.trim().is_empty()) {
-            cfg.tls_key_file = Some(v);
-        }
-        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_CERT_NAME").ok().filter(|v| !v.trim().is_empty()) {
-            cfg.tls_cert_name = Some(v);
-        }
-        let file_provider_fields = [cfg.tls_cert_file.is_some(), cfg.tls_key_file.is_some(), cfg.tls_cert_name.is_some()];
-        if file_provider_fields.iter().any(|set| *set) && !file_provider_fields.iter().all(|set| *set) {
-            return Err("tls_cert_file, tls_key_file and tls_cert_name must be configured together".into());
-        }
-        if let Some(origin) = &cfg.public_origin {
-            let canonical = crate::passkeys::canonical_origin(origin)?;
-            if canonical != *origin {
-                return Err(format!("public_origin must use its canonical form {canonical:?}"));
-            }
-        }
-        if cfg.max_events_per_worker == 0 {
-            return Err("max_events_per_worker must be at least 1".into());
-        }
-        if cfg.trusted_proxies.len() > 64 || cfg.trusted_proxies.iter().any(|cidr| !crate::client_ip::valid_cidr(cidr)) {
-            return Err("trusted_proxies must contain at most 64 valid IPv4 or IPv6 CIDRs".into());
-        }
-        if cfg.max_connections == 0
-            || cfg.max_connections_per_ip == 0
-            || cfg.request_body_timeout_secs == 0
-            || cfg.http_idle_timeout_secs == 0
-            || cfg.ws_ping_interval_secs == 0
-        {
-            return Err(
-                "max_connections, max_connections_per_ip, request_body_timeout_secs, http_idle_timeout_secs and ws_ping_interval_secs must be at least 1"
-                    .into(),
-            );
-        }
-        if cfg.ws_idle_timeout_secs <= cfg.ws_ping_interval_secs {
-            return Err("ws_idle_timeout_secs must be larger than ws_ping_interval_secs".into());
-        }
-        if !(1..=10_000).contains(&cfg.mutation_limit_per_token) || !(1..=10_000).contains(&cfg.mutation_limit_per_address) {
-            return Err("mutation limits must be between 1 and 10000 per 60 seconds".into());
-        }
+        let cfg = config_check::evaluate_env(&text, opts).map_err(|errors| errors.join("\n"))?;
         if !(1..=10_000).contains(&cfg.mutation_limit_global) {
             return Err("global mutation limit must be between 1 and 10000 per 60 seconds".into());
         }
-        if !(1..=3650).contains(&cfg.max_token_lifetime_days) {
-            return Err("max_token_lifetime_days must be between 1 and 3650".into());
-        }
-        if let Some(webhook) = &cfg.security_webhook_url {
-            let url = url::Url::parse(webhook).map_err(|_| "security_webhook_url must be an HTTPS URL".to_string())?;
-            if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
-                return Err("security_webhook_url must be an HTTPS URL without embedded credentials".into());
-            }
-        }
-        cfg.validate_internet_static()?;
         cfg.listener_binds()?;
         Ok(cfg)
     }
 
-    fn validate_internet_static(&self) -> Result<(), String> {
+    pub(crate) fn validate_internet_static(&self) -> Result<(), String> {
         if self.exposure != Exposure::Internet {
             return Ok(());
         }
@@ -493,7 +445,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(invalid);
 
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_global = 600", "mutation_limit_global = 10001"));
-        assert!(Config::load(&invalid).unwrap_err().contains("global mutation limit"));
+        assert!(Config::load(&invalid).unwrap_err().contains("mutation_limit_global"));
         let _ = std::fs::remove_dir_all(invalid);
     }
 
@@ -531,7 +483,7 @@ mod tests {
             "{}\n[listener_groups]\nconsole_rest = \"0.0.0.0:8443\"\n",
             config_text("127.0.0.1:8443", false)
         ));
-        assert!(Config::load(&lan_only).unwrap_err().contains("exposure"));
+        assert!(Config::load_checked(&lan_only, true).unwrap_err().contains("exposure"));
         std::fs::remove_dir_all(lan_only).unwrap();
     }
 

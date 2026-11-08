@@ -99,11 +99,27 @@ def test_composer_editing_keys_preserve_newlines_and_retain_recovery(tmp_path, m
     assert recovery is not None and recovery.read_text(encoding="utf-8") == "\nx"
 
 
-def test_composer_discards_source_only_on_explicit_ctrl_d(tmp_path, monkeypatch):
+def test_composer_discards_source_only_on_explicit_ctrl_x(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
-    assert compose_document("private", window=_Window(["\x04"])) is None
+    assert compose_document("private", window=_Window(["\x18"])) is None
     assert bridge_tui.LAST_RECOVERY_DRAFT is None
     assert not list((tmp_path / "state" / "drafts").glob("composer-recovery-*.md"))
+
+
+def test_ctrl_d_closes_the_composer_and_keeps_the_draft(tmp_path, monkeypatch):
+    """CLIUX-014: Ctrl-D leaves like Esc and never discards; a console user pressing it to exit loses nothing."""
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    assert compose_document("private", window=_Window(["\x04"])) is None
+    kept = bridge_tui.LAST_RECOVERY_DRAFT
+    assert kept is not None and kept.read_text(encoding="utf-8") == "private"
+
+
+def test_f2_does_not_save_the_composer(tmp_path, monkeypatch):
+    """CLIUX-014: F-keys only switch views, so F2 is not Save in the composer."""
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    assert compose_document("private", window=_Window([curses.KEY_F2, "\x13"])) == "private"
+    saved_by_f2 = compose_document("private", window=_Window([curses.KEY_F2, "\x18"]))
+    assert saved_by_f2 is None  # F2 changed nothing; the Ctrl-X that follows still discards
 
 
 def test_overlimit_paste_is_atomic_and_reports_actual_received_bytes(tmp_path, monkeypatch):

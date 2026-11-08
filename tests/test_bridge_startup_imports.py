@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 _DRIVER = """
 import contextlib, io, json, sys
+import pathlib  # Python 3.11's pathlib imports urllib.parse; every Bridge module needs pathlib, so it is not a startup cost
 baseline = set(sys.modules)
 from llm_tools import bridge
 sink = io.StringIO()
@@ -153,7 +154,7 @@ def test_usage_errors_come_from_the_full_parser(capsys: pytest.CaptureFixture[st
     with pytest.raises(SystemExit) as raised:
         bridge._parse_arguments(["task", "bogus"])
     assert raised.value.code == 2
-    assert "invalid choice: 'bogus'" in capsys.readouterr().err
+    assert "unknown task command 'bogus'" in capsys.readouterr().err
     with pytest.raises(SystemExit) as raised:
         bridge._parse_arguments(["nonsense"])
     assert raised.value.code == 2

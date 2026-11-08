@@ -469,7 +469,7 @@ def test_composer_frame_of_a_long_single_line_paste_is_fast(tmp_path, monkeypatc
     elapsed = time.perf_counter() - started
     assert result == payload + "xy"
     assert elapsed < 3  # each frame measured the whole line before: seconds for this paste
-    assert window.rows[-1][2].startswith("F2/Ctrl-S") or any("full source" in row[2] for row in window.rows)
+    assert window.rows[-1][2].startswith("Ctrl-S") or any("full source" in row[2] for row in window.rows)
 
 
 def test_periodic_checkpoint_runs_off_the_ui_thread_and_keeps_atomic_fsynced_writes(tmp_path, monkeypatch):
@@ -511,7 +511,7 @@ def test_periodic_checkpoint_runs_off_the_ui_thread_and_keeps_atomic_fsynced_wri
             if self.calls == 4:
                 recovery = tui.LAST_RECOVERY_DRAFT
                 assert recovery is not None and recovery.read_bytes() == b"A"
-                return "\x04"  # discard
+                return "\x18"  # Ctrl-X discards
             raise AssertionError("loop continued after discard")
 
     assert tui.compose_document("", window=Window()) is None

@@ -127,8 +127,8 @@ def test_unknown_stats_render_a_dash_and_a_stale_controller_shows_no_provider(tm
     state.probe = lambda ident: False
     grid = draw(state, size=(34, 120))
     running = grid.row(6)
-    assert "stale" in running and "2/5" not in running
-    assert re.search(r"stale\s+aaaaaaaa\s+▌ Port the bridge\s+-\s+-\s+4m ago", running), running
+    assert "INTERRUPTED" in running and "2/5" not in running
+    assert re.search(r"INTERRUPTED\s+aaaaaaaa\s+▌ Port the bridge\s+-\s+-\s+4m ago", running), running
 
 
 def test_progress_text_variants():
@@ -212,7 +212,7 @@ def test_rows_are_grouped_live_then_waiting_then_finished_and_finished_rows_are_
     assert "● /" in grid.row(6) and "● /" not in grid.row(7)  # the current folder keeps its marker, in the folder column
     # Finished rows recede (muted) except for the state word, which keeps its own colour.
     assert seen[(10, "done")] == roles["muted"] and seen[(11, "cancelled")] == roles["muted"]
-    assert seen[(10, "✓ COMPLETED")] == roles["state_done"] and seen[(11, "✕ CANCELLED")] == roles["state_paused"]
+    assert seen[(10, "✓ COMPLETED")] == roles["state_done"] and seen[(11, "⊘ CANCELLED")] == roles["state_paused"]
     assert seen[(8, "failed")] == roles["info"] and seen[(9, "fresh")] == roles["info"]
     assert seen[(6, "paused-here")] == roles["info"] and seen[(6, "‖ PAUSED")] == roles["state_paused"]
     assert launcher.status_group("STOPPED") == 1 and launcher.status_group("STOPPING") == 0
@@ -597,7 +597,7 @@ def test_ascii_mode_creation_form_uses_plain_markers(tmp_path, monkeypatch):
     state.cursors[0] = 7
     grid = draw(state, size=(34, 120))
     assert "one \\n two" in grid.row(5) and "Mode: Native - provider terminal in a station" in grid.text()
-    assert "Tab/Up/Down fields | Enter next | Esc back" == grid.row(33)
+    assert "Tab/Up/Down fields | Enter next | F5 start | Esc back" == grid.row(33)
     assert ">[1] codex" not in grid.text()  # the cursor marker only appears on the focused picker row
     state.focus = 1
     assert ">[1] codex" in draw(state, size=(34, 120)).row(7)
@@ -607,12 +607,12 @@ def test_ascii_mode_creation_form_uses_plain_markers(tmp_path, monkeypatch):
 
 def test_form_footer_matches_the_keys_that_work(tmp_path):
     state = Launcher(str(tmp_path), creating=True, installed=("codex", "claude"), providers="codex")
-    assert launcher.form_footer(state) == "Tab/↑↓ fields · Enter next · Esc back"
+    assert launcher.form_footer(state) == "Tab/↑↓ fields · Enter next · F5 start · Esc back"
     assert state.key("\t") is None and state.focus == 1
     assert state.key(curses.KEY_DOWN) is None and state.focus == 2  # horizontal picker: up/down leave the field
     state.routes = (launcher.RouteChoice("r1", "codex"),)
     state.focus, state.vertical = 1, True
-    assert launcher.form_footer(state) == "Tab next field · Enter next · Esc back"
+    assert launcher.form_footer(state) == "Tab next field · Enter next · F5 start · Esc back"
     assert state.key("\t") is None and state.focus == 2
     assert state.key("\x1b") is None and not state.creating
 

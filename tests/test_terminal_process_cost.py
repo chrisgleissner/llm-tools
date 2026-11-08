@@ -19,6 +19,7 @@ import pytest
 
 from llm_tools import common, terminal
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import wait_for
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 
@@ -110,22 +111,34 @@ def test_resize_hook_runs_inside_tmux_and_restores_the_command_pane_and_zoom(tmp
             height = tmux("display-message", "-p", "-t", handle.bridge_pane, "#{pane_height}")
             return height, tmux("display-message", "-p", "-t", handle.session_name + ":station", "#{window_zoomed_flag}")
 
+        def resize_client(rows: int, cols: int, expected: tuple[str, str]) -> None:
+            """Resize the client terminal, then wait until the hook has settled the layout.
+
+            The geometry that is expected afterwards can already be true before tmux has handled
+            SIGWINCH (the previous step ended in it), and tmux's own layout of the resized window
+            briefly gives the command pane another height before the hook corrects it. Waiting
+            for the geometry alone can therefore pass on the old state and then read the
+            intermediate one. The window must first have the new size; the hook runs after that.
+            """
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            os.killpg(client.pid, signal.SIGWINCH)
+            window = f"{cols}x{rows - 1}"  # the status row belongs to tmux
+
+            def pumped(condition) -> bool:
+                pump(0.05)  # keep draining the pty so tmux never blocks writing to it
+                return bool(condition())
+
+            size = lambda: tmux("display-message", "-p", "-t", handle.session_name + ":station", "#{window_width}x#{window_height}")
+            wait_for(lambda: pumped(lambda: size() == window), timeout=10, interval=0, message=f"window did not become {window}, is {size()}")
+            wait_for(lambda: pumped(lambda: geometry() == expected), timeout=10, interval=0)
+            assert geometry() == expected, (rows, cols, geometry())
+
         try:
             pump(1.0)
             for rows, cols in ((24, 80), (32, 100), (40, 120)):
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-                os.killpg(client.pid, signal.SIGWINCH)
-                deadline = time.monotonic() + 5
-                while geometry() != ("6", "1") and time.monotonic() < deadline:
-                    pump(0.1)
-                assert geometry() == ("6", "1"), (rows, cols, geometry())  # zoomed station keeps its zoom and command-pane height
+                resize_client(rows, cols, ("6", "1"))  # zoomed station keeps its zoom and command-pane height
             tmux("resize-pane", "-Z", "-t", handle.provider_pane)  # unzoom
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-            os.killpg(client.pid, signal.SIGWINCH)
-            deadline = time.monotonic() + 5
-            while geometry() != ("6", "0") and time.monotonic() < deadline:
-                pump(0.1)
-            assert geometry() == ("6", "0")
+            resize_client(30, 100, ("6", "0"))
         finally:
             os.killpg(client.pid, signal.SIGTERM)
             client.wait(timeout=5)
