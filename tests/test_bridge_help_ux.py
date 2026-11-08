@@ -113,7 +113,7 @@ def _rows(path: str) -> list[str]:
 
 
 def test_subcommands_are_listed_common_first_without_duplicate_rows() -> None:
-    assert _rows("mission") == ["create", "list", "set", "settings", "colour"]
+    assert _rows("mission") == ["create", "list", "set", "settings", "delete", "colour"]
     assert _rows("task")[:6] == ["add", "list", "show", "approve", "reject", "amend"]
     for path in ("task", "proposal", "worker", "remote"):
         rows = _rows(path)
