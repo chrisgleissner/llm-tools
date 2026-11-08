@@ -468,6 +468,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/workers/{name}/doctor` |
 | `GET /api/v1/workers/{name}/agents` |
+| `GET /api/v1/workers/{name}/sessions` |
+| `GET /api/v1/workers/{name}/usage` |
 | `GET /api/v1/workers/{name}/audit` |
 | `POST /api/v1/workers/{name}/gc` |
 | `GET /api/v1/tokens` |
