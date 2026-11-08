@@ -55,6 +55,13 @@ the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+`GET /api/v1/workers/{name}/sessions` reads the worker's bounded provider-session
+list through `session.list`; it accepts `mission`, `limit`, `cursor`, or the
+legacy `offset` (cursor and offset cannot be combined). Its encrypted cursor is
+bound to the worker, mission filter and page size. `GET
+/api/v1/workers/{name}/usage` returns the typed `usage.snapshot` projection; it
+contains availability and capacity values, never provider credentials or raw
+environment data. Both routes accept the same bounded `wait_ms` option.
 The current mutation adapters use the same command journal: `POST
 /api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
