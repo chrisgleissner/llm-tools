@@ -217,6 +217,7 @@ fn response_schema(path: &str, method: &str) -> Value {
     if path == "/api/v1/commands/{id}"
         || path == "/api/v1/commands"
         || matches!(path, "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage")
+        || path == "/api/v1/missions/{id}/station"
         || (matches!(
             path,
             "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"

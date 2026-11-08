@@ -1901,6 +1901,38 @@ async fn worker_sessions_and_usage_are_readable_through_resource_routes() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["result"]["result"]["providers"], json!([]));
 
+    let station_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let station = tokio::spawn(async move {
+        station_api
+            .rb(Method::GET, "/api/v1/missions/mission-1/station?worker=w1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.station");
+    assert_eq!(command["payload"]["mission_id"], "mission-1");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.station","outcome":"ok","result":{"mission_id":"mission-1","stations":[{"id":"codex","status":"configured"}],"station_mode":{"actual_mode":"background"}},"error":null}),
+        )
+        .await;
+    let response = station.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["stations"][0]["id"], "codex");
+    assert!(body["result"]["result"].get("tasks").is_none(), "the station resource exposes no task prompts");
+
+    let bad_station_query = api.get("/api/v1/missions/mission-1/station?worker=w1&unknown=true").await;
+    assert_eq!(bad_station_query.0, 400);
+
     assert_eq!(api.get("/api/v1/workers/w1/sessions?limit=1001").await.0, 400);
     env.stop().await;
 }

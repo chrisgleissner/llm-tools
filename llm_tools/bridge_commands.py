@@ -243,6 +243,15 @@ def _mission_status(store: BridgeStore | None, request: CommandRequest, params: 
     return bound_status(dict(snapshot), task_limit=params["task_limit"], prompt_chars=prompt_chars, event_limit=params["event_limit"])
 
 
+def _mission_station(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Return only the station projection from the authoritative bounded mission status."""
+    status = _mission_status(store, request, {"task_limit": 0, "prompt_chars": 0, "event_limit": 0, "full": False})
+    return {
+        "mission_id": request.mission_id,
+        **{key: status.get(key) for key in ("stations", "station_config", "station_mode", "station_observation", "station_context")},
+    }
+
+
 def _mission_steer(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert request.mission_id is not None
     cli = _cli()
@@ -730,6 +739,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
                       {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
                        "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
+        OperationSpec("mission.station", "Show one mission's bounded provider station state", False, True, _NO_PARAMS, _mission_station),
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),

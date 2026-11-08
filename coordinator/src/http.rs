@@ -2535,6 +2535,7 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
     let (operation, allowed, position_key, default_limit): (&str, &[&str], Option<&str>, u64) = match resource {
         "mission" => ("mission.status", &["task_limit", "prompt_chars", "event_limit"], None, 0),
+        "station" => ("mission.station", &[], None, 0),
         "tasks" => ("task.list", &["limit", "cursor", "offset", "prompt_chars"], Some("offset"), 50),
         "events" => ("mission.events", &["limit", "cursor", "after"], Some("after"), 50),
         "operations" => ("session.list", &["limit", "cursor", "offset"], Some("offset"), 100),
@@ -2662,6 +2663,28 @@ async fn mission_status_resource(
             mission_id: id,
             worker: q.get("worker").cloned(),
             resource: "mission",
+            query: q,
+        },
+    )
+    .await
+}
+
+async fn mission_station_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "station",
             query: q,
         },
     )
@@ -4277,6 +4300,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}", &["DELETE"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/station", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/agents", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["PATCH"], Access::Authed, "operate"),
@@ -4540,6 +4564,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/missions/{id}", get(mission_status_resource).delete(mission_delete_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/station", get(mission_station_resource))
         .route("/api/v1/missions/{id}/agents", get(mission_agents_resource))
         .route(
             "/api/v1/missions/{id}/settings",
