@@ -443,6 +443,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/auth/state` |
 | `POST /api/v1/auth/setup` |
 | `POST /api/v1/auth/login` |
+| `POST /api/v1/auth/step-up` |
 | `POST /api/v1/auth/totp/enroll` |
 | `POST /api/v1/auth/totp/confirm` |
 | `POST /api/v1/auth/totp/disable` |

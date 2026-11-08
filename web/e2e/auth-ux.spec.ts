@@ -1,5 +1,5 @@
 // First-run registration, sign-in, sessions and the account menu (AUTH-002, AUTH-005, AUTH-006, WEB-003, WEB-009).
-import { expect, expectAccessible, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test } from "./fixtures";
+import { expect, expectAccessible, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, stepUpViaUi, test } from "./fixtures";
 
 test.describe("first-run registration", () => {
   test("explains the setup token, states the policy, shows strength live and validates inline", async ({ page, coord }) => {
@@ -166,6 +166,7 @@ test.describe("sign-in", () => {
     await page.getByLabel("Token name").fill("banner-test");
     await page.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
     const banner = page.getByRole("region", { name: "Security notifications" });
     await expect(banner).toContainText("An API token was created.");
@@ -378,6 +379,7 @@ test.describe("account menu and password change", () => {
     await page.getByLabel("read", { exact: true }).uncheck();
     await page.getByLabel("operate", { exact: true }).check();
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     const secret = page.locator(".token-secret code");
     await expect(secret).toContainText(/^.{30,}$/);
     const secretValue = await secret.textContent();
@@ -390,6 +392,7 @@ test.describe("account menu and password change", () => {
     await expect(page.getByText("Audit integrity verified.")).toBeVisible();
     await expect(activity).not.toContainText(secretValue ?? "");
     await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);
   });
@@ -404,6 +407,7 @@ test.describe("account menu and password change", () => {
     await workers.selectOption("token-worker-a");
     await page.getByLabel("Token name").fill("worker-limited-key");
     await page.getByRole("button", { name: "Create token" }).click();
+    await stepUpViaUi(page);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Workers token-worker-a");
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("Workers token-worker-b");
   });

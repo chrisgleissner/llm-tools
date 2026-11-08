@@ -110,6 +110,13 @@ impl Env {
     }
     /// Complete first-run setup and log in; returns an authenticated session API.
     pub async fn admin(&self) -> Api {
+        let mut api = self.admin_unstepped().await;
+        let (status, body) = api.step_up(PASSWORD, None, None).await;
+        assert_eq!(status, 200, "test fixture step-up failed: {body}");
+        api
+    }
+    /// Create the first admin session without the ten-minute step-up marker, for auth regressions.
+    pub async fn admin_unstepped(&self) -> Api {
         let token = std::fs::read_to_string(self.dir.join("setup-token")).unwrap();
         let mut api = self.api();
         let (st, body) = api
@@ -193,6 +200,31 @@ impl Api {
             self.csrf = Some(body["csrf_token"].as_str().unwrap().to_string());
         }
         st
+    }
+    pub async fn step_up(&mut self, password: &str, totp_code: Option<&str>, recovery_code: Option<&str>) -> (u16, Value) {
+        let mut body = json!({"password":password});
+        if let Some(code) = totp_code {
+            body["totp_code"] = json!(code);
+        }
+        if let Some(code) = recovery_code {
+            body["recovery_code"] = json!(code);
+        }
+        let response = self.rb(Method::POST, "/api/v1/auth/step-up").json(&body).send().await.unwrap();
+        let status = response.status().as_u16();
+        let cookie = response.headers().get("set-cookie").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let text = response.text().await.unwrap();
+        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        if status == 200 {
+            if let Some(cookie) = cookie {
+                self.cookie = cookie
+                    .split(';')
+                    .next()
+                    .and_then(|part| part.strip_prefix("__Host-bridge_session="))
+                    .map(str::to_owned);
+            }
+            self.csrf = body["csrf_token"].as_str().map(str::to_owned);
+        }
+        (status, body)
     }
     /// Add a worker through the API and return its token.
     pub async fn add_worker(&self, name: &str) -> String {

@@ -200,6 +200,7 @@ pub struct Session {
     pub remember: bool,
     pub expires_at: i64,
     pub idle_secs: i64,
+    pub fresh_auth_until: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -283,7 +284,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
@@ -357,6 +358,8 @@ const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, use
 const MIGRATE_V18: &str = "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE audit ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';";
 /// Version 20: per-principal TOTP verifier state and one-time Argon2id recovery-code hashes.
 const MIGRATE_V20: &str = "CREATE TABLE totp_auth(principal_id TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),last_step INTEGER NOT NULL DEFAULT -1); CREATE TABLE recovery_codes(principal_id TEXT NOT NULL, code_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(principal_id,code_hash)); CREATE INDEX recovery_codes_principal ON recovery_codes(principal_id);";
+/// Version 21: a short-lived step-up marker belongs to the rotated browser session.
+const MIGRATE_V21: &str = "ALTER TABLE sessions ADD COLUMN fresh_auth_until INTEGER NOT NULL DEFAULT 0;";
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -612,6 +615,19 @@ impl Db {
         }
         if version < 20 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V20} PRAGMA user_version = 20; COMMIT;"))?;
+        }
+        if version < 21 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            let has_column = has_sessions
+                && conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='fresh_auth_until')",
+                    [],
+                    |row| row.get(0),
+                )?;
+            let alter = if has_sessions && !has_column { MIGRATE_V21 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 21; COMMIT;"))?;
         }
         conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
@@ -977,10 +993,30 @@ impl Db {
         let (_, absolute) = session_policy(remember);
         let session_id = crate::auth::random_token();
         self.c().execute(
-            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id,session_id) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id,session_id,fresh_auth_until) VALUES(?,?,?,?,?,?,?,?,0)",
             params![token_hash, csrf, now, now, now + absolute, remember, principal_id, session_id],
         )?;
         Ok(())
+    }
+    /// Rotate a session's bearer secret, CSRF token, and public ID while marking fresh
+    /// authentication for a bounded interval. The previous credentials stop working atomically.
+    pub fn session_step_up_rotate(&self, principal_id: &str, old_hash: &str, new_hash: &str, csrf: &str, fresh_until: i64) -> R<bool> {
+        let session_id = crate::auth::random_token();
+        let changed = self.c().execute(
+            "UPDATE sessions SET token_hash=?1,csrf=?2,session_id=?3,fresh_auth_until=?4
+             WHERE principal_id=?5 AND token_hash=?6 AND expires_at>?7",
+            params![new_hash, csrf, session_id, fresh_until, principal_id, old_hash, crate::now()],
+        )?;
+        Ok(changed == 1)
+    }
+    pub fn session_is_freshly_authenticated(&self, token_hash: &str) -> R<bool> {
+        let until = self
+            .c()
+            .query_row("SELECT fresh_auth_until FROM sessions WHERE token_hash=?1", [token_hash], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+        Ok(until.is_some_and(|until| until > crate::now()))
     }
     pub fn session_list_for(&self, principal_id: &str, current_token_hash: &str) -> R<Vec<Value>> {
         let now = crate::now();
@@ -1027,14 +1063,14 @@ impl Db {
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
         let c = self.c();
-        let row: Option<(String, i64, i64, bool, String)> = c
+        let row: Option<(String, i64, i64, bool, String, i64)> = c
             .query_row(
-                "SELECT csrf, last_seen, expires_at, remember,principal_id FROM sessions WHERE token_hash=?",
+                "SELECT csrf, last_seen, expires_at, remember,principal_id,fresh_auth_until FROM sessions WHERE token_hash=?",
                 params![token_hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?, r.get(5)?)),
             )
             .optional()?;
-        let Some((csrf, last_seen, expires_at, remember, principal_id)) = row else {
+        let Some((csrf, last_seen, expires_at, remember, principal_id, fresh_auth_until)) = row else {
             return Ok(None);
         };
         let (idle_secs, _) = session_policy(remember);
@@ -1052,6 +1088,7 @@ impl Db {
             remember,
             expires_at,
             idle_secs,
+            fresh_auth_until,
         }))
     }
     pub fn session_delete(&self, token_hash: &str) -> R<()> {

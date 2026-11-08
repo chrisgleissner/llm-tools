@@ -249,6 +249,22 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreated"}}}
         });
     }
+    if path == "/api/v1/auth/step-up" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object","additionalProperties":false,"required":["password"],
+                "properties":{
+                    "password":{"type":"string","maxLength":256},
+                    "totp_code":{"type":"string","maxLength":16},
+                    "recovery_code":{"type":"string","maxLength":64}
+                },
+                "not":{"required":["totp_code","recovery_code"]}
+            }}}
+        });
+        op["responses"]["200"]["description"] =
+            json!("Credentials verified; session cookie, CSRF token and public session ID rotated. Fresh authentication lasts 10 minutes.");
+    }
     if path == "/api/v1/commands" {
         op["parameters"] = json!([{
             "name":"Idempotency-Key",
@@ -776,11 +792,7 @@ mod tests {
         if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
             let mut bytes = serde_json::to_vec_pretty(&generated).expect("serialize generated OpenAPI");
             bytes.push(b'\n');
-            std::fs::write(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"),
-                bytes,
-            )
-            .expect("write OpenAPI snapshot");
+            std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"), bytes).expect("write OpenAPI snapshot");
             return;
         }
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");

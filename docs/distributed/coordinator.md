@@ -214,6 +214,7 @@ Public:
 | GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. It also adds `password_change_required` (true while a temporary password from `admin reset-password --temporary` has not been replaced) and, after a reset on the host, `password_reset_notice: {at, message}` (`at` is the UTC epoch of the reset; the message is "Your password was reset by an administrator on the host."). The notice stays until the password is changed through `/auth/password` or seven days pass. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
 | POST | `/api/v1/auth/login` | `{username, password, remember?, totp_code? | recovery_code?}`. When optional TOTP is enabled, password plus exactly one valid TOTP or unused recovery code is required. Password sign-in also requires this second factor in Internet mode; without TOTP there, use passkey sign-in. Recovery codes are consumed once and their use is audited and notified. `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error for invalid password or MFA. |
+| POST | `/api/v1/auth/step-up` | Browser session only. `{password, totp_code? | recovery_code?}`; verifies the password and, when enabled, consumes one TOTP step or recovery code. Atomically rotates the session cookie, CSRF token and public session ID, and marks the new session freshly authenticated for ten minutes. Sensitive browser mutations require this marker; bearer tokens cannot substitute for fresh human authentication. This endpoint verifies password/MFA only; passkey assertion step-up remains separate work. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
@@ -284,6 +285,13 @@ usable by non-browser clients and are still subject to authentication, exact
 Origin and CSRF rules where applicable.
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
+Sensitive account and worker mutations use the browser session's ten-minute
+step-up marker after password and configured TOTP/recovery verification. This
+includes token creation/revocation, worker enrollment/removal, restore, the
+`mission.create` / `--allow-create` operation and suspend-until-credits. Step-up
+rotates the session credential, CSRF token and public session ID. Admin bearer
+tokens cannot perform these operations; passkey assertion step-up is not yet
+implemented.
 
 API errors are RFC 9457 problem details (`application/problem+json`) with a
 stable type URI derived from the existing error code. The nested `error` object

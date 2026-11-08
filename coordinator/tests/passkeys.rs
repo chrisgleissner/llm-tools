@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 20);
+    assert_eq!(SCHEMA_VERSION, 21);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -61,6 +61,39 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .webauthn_challenge_take("challenge-2", "admin", "session-a", "registration")
         .unwrap()
         .is_none());
+    drop(db);
+    remove_database(&path);
+}
+
+#[test]
+fn schema_20_migration_adds_a_disabled_by_default_fresh_auth_marker() {
+    let path = db_path();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions(
+               token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created_at INTEGER NOT NULL,
+               last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, remember INTEGER NOT NULL DEFAULT 1,
+               principal_id TEXT NOT NULL DEFAULT 'admin', session_id TEXT);
+             PRAGMA user_version=20;",
+        )
+        .unwrap();
+        let now = bridge_coordinator::now();
+        conn.execute(
+            "INSERT INTO sessions(token_hash,csrf,created_at,last_seen,expires_at,remember,principal_id,session_id)
+             VALUES('legacy-hash','legacy-csrf',?1,?1,?2,1,'admin','legacy-session-id')",
+            rusqlite::params![now, now + 86_400],
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert!(!db.session_is_freshly_authenticated("legacy-hash").unwrap());
+    assert!(db.session_get("legacy-hash").unwrap().is_some());
+    let version: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
     drop(db);
     remove_database(&path);
 }

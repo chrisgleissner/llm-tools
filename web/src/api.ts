@@ -120,6 +120,8 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
     if (res.status === 403 && e?.code === "password-change-required") passwordChangeHandler();
     throw new ApiError(res.status, e?.code ?? "http", e?.message ?? `Request failed (${res.status}).`, Number.isFinite(ra) && ra > 0 ? ra : null);
   }
+  const csrf = (json as { csrf_token?: unknown } | null)?.csrf_token;
+  if (typeof csrf === "string") setCsrf(csrf);
   return json as T;
 }
 

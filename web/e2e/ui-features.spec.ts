@@ -1,5 +1,5 @@
 // Dashboard, lists, toasts, dialogs and shortcuts (WEB-003, WEB-004, WEB-005, WEB-006, WEB-010, WEB-011).
-import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test } from "./fixtures";
+import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, stepUpViaUi, test } from "./fixtures";
 import { havePython, startSeededWorker } from "./seed";
 
 test("responsive navigation waits for its destination before falling back to More", async ({ page, coord }) => {
@@ -28,6 +28,7 @@ test.describe("workers page", () => {
     await expect(dialog.locator("#worker-name-error")).toContainText("lowercase letters");
     await dialog.getByLabel("Worker name").fill("build-1");
     await dialog.getByRole("button", { name: "Add worker" }).click();
+    await stepUpViaUi(page);
     const result = page.getByRole("dialog", { name: "Worker added" });
     await expect(result.locator("#worker-token")).toHaveText(/^[A-Za-z0-9_-]{43}$/);
     await expect(result).toContainText("llm-bridge worker enroll --name build-1");
@@ -50,6 +51,7 @@ test.describe("workers page", () => {
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Remove worker build-1" }).click();
     await page.locator("#dialog-confirm").click();
+    await stepUpViaUi(page);
     await expect(page.locator(".toast.applied", { hasText: "removed" })).toContainText("Worker build-1 removed");
     await expect(page.getByRole("heading", { name: "No workers enrolled" })).toBeVisible();
   });

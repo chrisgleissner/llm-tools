@@ -1,6 +1,7 @@
 import * as api from "../api";
 import { field, h, relFromMs, timeEl } from "../dom";
 import { passkeyProviderName } from "../passkey-provider";
+import { withStepUp } from "../step-up";
 import { minutes } from "./login";
 import { passwordForm } from "./password-form";
 
@@ -62,7 +63,7 @@ function tokenManagement(): HTMLElement {
         revoke.addEventListener("click", async () => {
           revoke.disabled = true;
           try {
-            await api.del(`/api/v1/tokens/${encodeURIComponent(token.name)}`);
+            await withStepUp(() => api.del(`/api/v1/tokens/${encodeURIComponent(token.name)}`));
             status.textContent = `Token ${token.name} revoked.`;
             await refresh();
           } catch (err) {
@@ -98,11 +99,11 @@ function tokenManagement(): HTMLElement {
     }
     create.disabled = true;
     try {
-      const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
+      const created = await withStepUp(() => api.post<api.ApiTokenCreated>("/api/v1/tokens", {
         name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
         allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
         allowed_workers: Array.from(allowedWorkers.selectedOptions, (option) => option.value),
-      });
+      }));
       oneTime.hidden = false;
       oneTime.replaceChildren(
         h("p", {}, `Copy this secret for ${created.token.name}. It will not be shown again.`),

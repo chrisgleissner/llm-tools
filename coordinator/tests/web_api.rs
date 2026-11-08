@@ -31,7 +31,7 @@ async fn sign_in_with_ua(api: &Api, user_agent: &str) -> reqwest::Response {
 #[tokio::test(flavor = "multi_thread")]
 async fn totp_enrollment_and_recovery_codes_gate_login_and_recovery_is_single_use() {
     let env = boot().await;
-    let admin = env.admin().await;
+    let mut admin = env.admin().await;
     let (status, enrolled) = admin.post("/api/v1/auth/totp/enroll", json!({"current_password":PASSWORD})).await;
     assert_eq!(status, 200, "{enrolled}");
     let secret = enrolled["secret"].as_str().expect("enrollment secret");
@@ -98,6 +98,10 @@ async fn totp_enrollment_and_recovery_codes_gate_login_and_recovery_is_single_us
         .unwrap();
     assert_eq!(replay.status().as_u16(), 401, "recovery codes are one-time");
     assert_eq!(env.srv.state.db.recovery_code_hashes("admin").unwrap().len(), 9);
+    let second_recovery = recovery[1].as_str().unwrap();
+    let (status, stepped) = admin.step_up(PASSWORD, None, Some(second_recovery)).await;
+    assert_eq!(status, 200, "recovery-code step-up should work once: {stepped}");
+    assert_eq!(env.srv.state.db.recovery_code_hashes("admin").unwrap().len(), 8);
     env.stop().await;
 }
 
@@ -166,6 +170,133 @@ async fn browser_sessions_can_list_and_revoke_only_their_principals_sessions() {
         401,
         "the revoked browser session must no longer authenticate"
     );
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_up_rotates_session_credentials_and_gates_api_token_lifecycle() {
+    let env = boot().await;
+    let mut api = env.admin_unstepped().await;
+    env.srv.state.db.worker_add("build-1", "worker-hash").unwrap();
+    let old_cookie = api.cookie.clone().unwrap();
+    let old_csrf = api.csrf.clone().unwrap();
+    let before_id = api.get("/api/v1/auth/sessions").await.1["sessions"][0]["id"].as_str().unwrap().to_owned();
+    let (status, problem) = api
+        .post("/api/v1/missions", json!({"worker":"build-1","prompt":"new","cwd":"/srv/work","wait_ms":0}))
+        .await;
+    assert_eq!(status, 403, "mission creation uses the worker's allow-create opt-in: {problem}");
+    assert_eq!(problem["code"], "step-up-required");
+    let (status, problem) = api.post("/api/v1/tokens", json!({"name":"before-step-up"})).await;
+    assert_eq!(status, 403, "{problem}");
+    assert_eq!(problem["code"], "step-up-required");
+    assert_eq!(env.srv.state.db.api_tokens_list().unwrap().len(), 0);
+
+    let (status, problem) = api.step_up("wrong password", None, None).await;
+    assert_eq!(status, 401, "{problem}");
+    assert_eq!(
+        api.cookie.as_deref(),
+        Some(old_cookie.as_str()),
+        "failed verification must not rotate the session"
+    );
+
+    let (status, result) = api.step_up(PASSWORD, None, None).await;
+    assert_eq!(status, 200, "{result}");
+    let new_cookie = api.cookie.clone().unwrap();
+    let new_csrf = api.csrf.clone().unwrap();
+    assert_ne!(new_cookie, old_cookie);
+    assert_ne!(new_csrf, old_csrf);
+    assert!(result["fresh_auth_until"].as_str().unwrap().ends_with('Z'));
+
+    let mut old_api = env.api();
+    old_api.cookie = Some(old_cookie);
+    old_api.csrf = Some(old_csrf.clone());
+    assert_eq!(old_api.get("/api/v1/auth/sessions").await.0, 401, "rotated cookie must stop authenticating");
+    old_api.cookie = api.cookie.clone();
+    assert_eq!(
+        old_api.post("/api/v1/tokens", json!({"name":"old-csrf"})).await.0,
+        403,
+        "old CSRF token must stop working with the rotated cookie"
+    );
+    assert_ne!(api.get("/api/v1/auth/sessions").await.1["sessions"][0]["id"], before_id);
+
+    let (status, mission) = api
+        .post("/api/v1/missions", json!({"worker":"build-1","prompt":"new","cwd":"/srv/work","wait_ms":0}))
+        .await;
+    assert_eq!(
+        status, 422,
+        "fresh session passes the step-up gate before the worker capability check: {mission}"
+    );
+    assert_eq!(mission["code"], "unsupported-operation");
+
+    let expired_cookie = bridge_coordinator::auth::random_token();
+    let expired_csrf = bridge_coordinator::auth::random_token();
+    let current_hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_deref().unwrap());
+    assert!(env
+        .srv
+        .state
+        .db
+        .session_step_up_rotate(
+            "admin",
+            &current_hash,
+            &bridge_coordinator::auth::sha256_hex(&expired_cookie),
+            &expired_csrf,
+            bridge_coordinator::now() - 1,
+        )
+        .unwrap());
+    api.cookie = Some(expired_cookie);
+    api.csrf = Some(expired_csrf.clone());
+    let (status, expired) = api.post("/api/v1/tokens", json!({"name":"expired-step-up"})).await;
+    assert_eq!(status, 403, "{expired}");
+    assert_eq!(expired["code"], "step-up-required");
+
+    assert_eq!(api.step_up(PASSWORD, None, None).await.0, 200);
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"after-step-up"})).await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(api.send(api.rb(Method::DELETE, "/api/v1/tokens/after-step-up")).await.0, 200);
+    let audit = env.srv.state.db.audit_list(100).unwrap();
+    let serialized = serde_json::to_string(&audit).unwrap();
+    for secret in [PASSWORD, &old_csrf, &expired_csrf] {
+        assert!(!serialized.contains(secret), "auth material must not enter the audit log");
+    }
+    assert!(audit.iter().any(|entry| entry["action"] == "session.step-up"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_bearer_tokens_cannot_substitute_for_browser_step_up() {
+    let env = boot().await;
+    let _admin = env.admin().await;
+    let token = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped("automation-admin", &bridge_coordinator::auth::sha256_hex(&token), None, &["admin".into()])
+        .unwrap());
+    assert!(env.srv.state.db.worker_add("build-1", "worker-hash").unwrap());
+    let mut bearer = env.api();
+    bearer.bearer = Some(token);
+    for (method, path, body) in [
+        (Method::POST, "/api/v1/tokens", json!({"name":"minted"})),
+        (Method::DELETE, "/api/v1/tokens/automation-admin", json!({})),
+        (Method::POST, "/api/v1/workers", json!({"name":"new-worker"})),
+        (Method::DELETE, "/api/v1/workers/build-1", json!({})),
+        (Method::POST, "/api/v1/workers/build-1/restore", json!({"input":"/tmp/backup.db"})),
+        (Method::POST, "/api/v1/missions/mission-1/suspend-until-credits?worker=build-1", json!({})),
+        (
+            Method::POST,
+            "/api/v1/missions",
+            json!({"worker":"build-1","prompt":"new","cwd":"/tmp","wait_ms":0}),
+        ),
+    ] {
+        let (status, problem) = bearer.send(bearer.rb(method.clone(), path).json(&body)).await;
+        assert_eq!(status, 403, "{method} {path}: {problem}");
+        assert_eq!(problem["code"], "step-up-required", "{method} {path}: {problem}");
+    }
+    assert!(env.srv.state.db.api_tokens_list().unwrap().iter().any(|row| row.name == "automation-admin"));
+    assert!(!env.srv.state.db.api_tokens_list().unwrap().iter().any(|row| row.name == "minted"));
+    assert!(env.srv.state.db.worker_get("build-1").unwrap().is_some());
+    assert!(env.srv.state.db.worker_get("new-worker").unwrap().is_none());
     env.stop().await;
 }
 
@@ -843,30 +974,32 @@ async fn token_last_use_address_uses_only_configured_trusted_proxy_headers() {
 async fn token_mutation_budget_keys_on_trusted_client_address() {
     let env = boot_with(|t| {
         t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")
-            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2")
+            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 4")
     })
     .await;
     let admin = env.admin().await;
-    let (_, token_a) = admin.post("/api/v1/tokens", json!({"name":"automation-a","scopes":["admin"]})).await;
-    let (_, token_b) = admin.post("/api/v1/tokens", json!({"name":"automation-b","scopes":["admin"]})).await;
-    for (name, token, address) in [
-        ("created-a", token_a["secret"].as_str().unwrap(), "198.51.100.27"),
-        ("created-b", token_b["secret"].as_str().unwrap(), "203.0.113.42"),
-    ] {
-        let mut client = env.api();
-        client.bearer = Some(token.to_string());
-        let response = client
-            .rb(Method::POST, "/api/v1/tokens")
+    let (_, token) = admin.post("/api/v1/tokens", json!({"name":"automation","scopes":["admin"]})).await;
+    let mut client = env.api();
+    client.bearer = Some(token["secret"].as_str().unwrap().to_string());
+    for address in ["198.51.100.27", "203.0.113.42"] {
+        for attempt in 0..4 {
+            let response = client
+                .rb(Method::POST, "/api/v1/commands")
+                .header("x-forwarded-for", address)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 400, "{address} request {attempt} should reach validation");
+        }
+        let limited = client
+            .rb(Method::POST, "/api/v1/commands")
             .header("x-forwarded-for", address)
-            .json(&json!({"name":name,"scopes":["read"]}))
+            .json(&json!({}))
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            response.status().as_u16(),
-            201,
-            "different trusted client address {address} has a separate budget"
-        );
+        assert_eq!(limited.status().as_u16(), 429, "{address} should exhaust its own address budget");
     }
     env.stop().await;
 }
@@ -895,7 +1028,20 @@ async fn token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry()
 async fn passkey_registration_start_is_bound_to_https_named_origin_and_session() {
     let origin = "https://bridge.example.test";
     let env = boot_with(|t| t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")).await;
-    let api = env.admin().await;
+    let mut api = env.admin_unstepped().await;
+    let (status, body) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/passkeys/registration/start")
+                .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+                .header("x-csrf-token", api.csrf.as_deref().unwrap())
+                .header("origin", origin)
+                .json(&json!({"name":"laptop"})),
+        )
+        .await;
+    assert_eq!(status, 403, "registration must require step-up: {body}");
+    assert_eq!(body["code"], "step-up-required");
+    let (status, body) = api.step_up(PASSWORD, None, None).await;
+    assert_eq!(status, 200, "{body}");
     let (status, options) = api
         .send(
             api.bare(Method::POST, "/api/v1/auth/passkeys/registration/start")
@@ -964,7 +1110,7 @@ async fn passkey_challenge_creation_uses_the_per_address_mutation_budget() {
     let origin = "https://bridge.example.test";
     let env = boot_with(|t| {
         t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")
-            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1")
+            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2")
     })
     .await;
     let api = env.admin().await;
@@ -989,7 +1135,7 @@ async fn passkey_challenge_creation_uses_the_per_address_mutation_budget() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_session_mutations_share_the_per_address_budget() {
-    let env = boot_with(|t| t.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1")).await;
+    let env = boot_with(|t| t.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2")).await;
     let api = env.admin().await;
     let request = || api.rb(Method::POST, "/api/v1/commands").json(&json!({}));
 

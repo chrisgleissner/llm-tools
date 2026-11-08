@@ -284,12 +284,14 @@ async fn csrf_origin_and_bearer_tokens() {
         .unwrap();
     let mut bearer = env.api();
     bearer.bearer = Some(tok.clone());
-    assert_eq!(bearer.post("/api/v1/workers", json!({"name": "w-bearer"})).await.0, 201);
+    let (status, problem) = bearer.post("/api/v1/workers", json!({"name": "w-bearer"})).await;
+    assert_eq!(status, 403, "bearer tokens cannot substitute for browser step-up: {problem}");
+    assert_eq!(problem["code"], "step-up-required");
     assert_eq!(bearer.get("/api/v1/diagnostics").await.0, 200);
     env.srv.state.db.token_revoke("cli").unwrap();
     assert_eq!(bearer.get("/api/v1/workers").await.0, 401);
     let audit = env.srv.state.db.audit_list(50).unwrap();
-    assert!(audit.iter().any(|r| r["action"] == "worker.add" && r["actor"] == "token:cli"));
+    assert!(!audit.iter().any(|r| r["action"] == "worker.add" && r["actor"] == "token:cli"));
 
     // the stream upgrade checks Origin for cookie sessions
     let c = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());

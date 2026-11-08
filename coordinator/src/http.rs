@@ -330,6 +330,7 @@ pub enum Principal {
         remember: bool,
         expires_at: i64,
         idle_secs: i64,
+        fresh_auth_until: i64,
     },
     Token {
         name: String,
@@ -391,6 +392,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
             remember: s.remember,
             expires_at: s.expires_at,
             idle_secs: s.idle_secs,
+            fresh_auth_until: s.fresh_auth_until,
         }),
         None => Err(unauthorized()),
     }
@@ -679,6 +681,23 @@ async fn verify_recovery_blocking(st: &AppState, code: String, phc: String) -> b
     tokio::task::spawn_blocking(move || auth::verify_recovery_code(&code, &phc))
         .await
         .expect("verify task")
+}
+
+fn fresh_session_step_up(principal: &Principal) -> Result<(), ApiError> {
+    match principal {
+        Principal::Session { fresh_auth_until, .. } if *fresh_auth_until > crate::now() => Ok(()),
+        _ => Err(err(
+            StatusCode::FORBIDDEN,
+            "step-up-required",
+            "verify your credentials again before this sensitive action",
+        )),
+    }
+}
+
+/// These browser-account mutations cannot be delegated through a bearer token: step-up is
+/// session-bound, and possession of an admin token is not fresh human authentication.
+fn require_fresh_browser_session(principal: &Principal) -> Result<(), ApiError> {
+    fresh_session_step_up(principal)
 }
 
 /// `max_age: None` makes a browser-session cookie (no `Max-Age`): the browser drops it on exit.
@@ -1011,6 +1030,118 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     Ok(r)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepUpBody {
+    password: String,
+    #[serde(default)]
+    totp_code: Option<String>,
+    #[serde(default)]
+    recovery_code: Option<String>,
+}
+
+/// Reauthenticate and atomically rotate the current browser session. The replacement
+/// cookie, CSRF token, and public session ID are new; the fresh marker lasts ten minutes.
+async fn step_up(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let Principal::Session {
+        principal_id,
+        token_hash: old_hash,
+        remember,
+        ..
+    } = p
+    else {
+        return Err(err(StatusCode::FORBIDDEN, "session-required", "step-up requires a browser session"));
+    };
+    let parsed = parse_body(&body.bytes)?;
+    let body: StepUpBody = serde_json::from_value(Value::Object(parsed))
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "password is required; provide at most one MFA code"))?;
+    if body.password.len() > auth::MAX_PASSWORD_LEN
+        || body.totp_code.as_ref().is_some_and(|code| code.len() > 16)
+        || body.recovery_code.as_ref().is_some_and(|code| code.len() > 64)
+        || (body.totp_code.is_some() && body.recovery_code.is_some())
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "credential input is invalid"));
+    }
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if st.db.admin_principal_id()?.as_deref().unwrap_or("admin") != principal_id {
+        return Err(unauthorized());
+    }
+    let attempt = st
+        .limiter
+        .acquire(&["step-up".to_string(), format!("user:{}", clean(&username.to_lowercase()))], true)
+        .map_err(limited)?;
+    if !verify_blocking(&st, body.password, password_hash).await {
+        attempt.fail();
+        st.db.audit(&username, "step-up.failure", "password verification failed", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+    }
+    let totp = st.db.totp_get(&principal_id)?;
+    let totp_enabled = totp.as_ref().is_some_and(|(_, enabled, _)| *enabled);
+    if password_login_blocked(st.cfg.exposure, totp_enabled) {
+        attempt.fail();
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "step-up-unavailable",
+            "Internet exposure requires an enabled second factor for password step-up",
+        ));
+    }
+    if let Some((secret, enabled, _)) = totp {
+        if enabled {
+            let verified = if let Some(code) = body.totp_code.as_deref() {
+                if let Some(step) = auth::matching_totp_step(&secret, code, crate::now()) {
+                    st.db.totp_step_consume(&principal_id, step)?
+                } else {
+                    false
+                }
+            } else if let Some(code) = body.recovery_code.as_deref() {
+                let mut matched = None;
+                for hash in st.db.recovery_code_hashes(&principal_id)? {
+                    if verify_recovery_blocking(&st, code.to_owned(), hash.clone()).await && matched.is_none() {
+                        matched = Some(hash);
+                    }
+                }
+                if let Some(hash) = matched {
+                    st.db.recovery_code_consume(&principal_id, &hash)?
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !verified {
+                attempt.fail();
+                st.db.audit(&username, "step-up.failure", "second-factor verification failed", &ip);
+                return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+            }
+        }
+    } else if body.totp_code.is_some() || body.recovery_code.is_some() {
+        attempt.fail();
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "credentials could not be verified"));
+    }
+    attempt.succeed();
+    let token = auth::random_token();
+    let csrf = auth::random_token();
+    let fresh_until = crate::now() + 10 * 60;
+    if !st
+        .db
+        .session_step_up_rotate(&principal_id, &old_hash, &auth::sha256_hex(&token), &csrf, fresh_until)?
+    {
+        return Err(unauthorized());
+    }
+    st.db
+        .audit(&username, "session.step-up", "session rotated; fresh authentication valid for 10 minutes", &ip);
+    let mut response = json_ok(StatusCode::OK, json!({"csrf_token":csrf,"fresh_auth_until":timestamp(Some(fresh_until))}));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, remember.then_some(crate::db::SESSION_ABSOLUTE_SECS as u64))
+            .parse()
+            .expect("session cookie"),
+    );
+    Ok(response)
+}
+
 fn password_login_blocked(exposure: crate::config::Exposure, totp_enabled: bool) -> bool {
     exposure == crate::config::Exposure::Internet && !totp_enabled
 }
@@ -1107,6 +1238,7 @@ struct PasskeyReenrollBody {
 }
 
 async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
     let Principal::Session { token_hash, .. } = p else {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -1158,6 +1290,7 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
 }
 
 async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
     let Principal::Session { token_hash, .. } = p else {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -1713,6 +1846,7 @@ async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<Ha
 }
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    fresh_session_step_up(&p)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs", "allowed_workers"])?;
     let name = str_field(&m, "name")?;
@@ -1923,6 +2057,7 @@ async fn dismiss_security_notification(State(st): State<St>, Authed(p, ip): Auth
 }
 
 async fn revoke_token(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
+    fresh_session_step_up(&p)?;
     if !st.db.token_revoke(&name)? {
         return Err(err(StatusCode::NOT_FOUND, "unknown-token", "no such token"));
     }
@@ -1972,6 +2107,7 @@ async fn get_worker(State(st): State<St>, Path(name): Path<String>, _a: Authed) 
 }
 
 async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name"])?;
     let name = str_field(&m, "name")?;
@@ -2013,6 +2149,7 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
 }
 
 async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     if !st.db.worker_revoke(&name)? {
         return Err(err(StatusCode::NOT_FOUND, "unknown-target", "no such worker"));
     }
@@ -2304,6 +2441,9 @@ async fn mission_status_resource(
 }
 
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    // Remote mission creation is a worker opt-in operation (`--allow-create`), so it
+    // requires the same fresh human authentication as the other API-016 opt-in actions.
+    require_fresh_browser_session(&p)?;
     let mut params = parse_body(&body.bytes)?;
     let worker = str_field(&params, "worker")?.to_string();
     if !p.allows_worker(&worker) {
@@ -2374,6 +2514,7 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
 }
 
 async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Path(worker): Path<String>, headers: HeaderMap, body: Buffered) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let mut params = parse_body(&body.bytes)?;
     no_extra(&params, &["input", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&params)?;
@@ -3403,6 +3544,7 @@ async fn suspend_until_credits_resource(
     headers: HeaderMap,
     body: Buffered,
 ) -> ApiResult {
+    require_fresh_browser_session(&p)?;
     let worker = q
         .get("worker")
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
@@ -3783,6 +3925,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/state", &["GET"], Access::Public, ""),
     ("/api/v1/auth/setup", &["POST"], Access::Public, ""),
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/step-up", &["POST"], Access::Session, ""),
     ("/api/v1/auth/totp/enroll", &["POST"], Access::Session, ""),
     ("/api/v1/auth/totp/confirm", &["POST"], Access::Session, ""),
     ("/api/v1/auth/totp/disable", &["POST"], Access::Session, ""),
@@ -4027,6 +4170,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/step-up", post(step_up).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/totp/enroll", post(totp_enroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/totp/confirm", post(totp_confirm).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/totp/disable", post(totp_disable).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))

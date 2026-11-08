@@ -125,6 +125,17 @@ export async function loginViaUi(page: Page, username = "admin", password = PASS
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 }
 
+/** Complete the password/MFA prompt shown when a sensitive browser mutation needs step-up. */
+const steppedUpPages = new WeakSet<Page>();
+export async function stepUpViaUi(page: Page, password = PASSWORD): Promise<void> {
+  if (steppedUpPages.has(page)) return;
+  const dialog = page.getByRole("dialog", { name: "Verify it is you" });
+  await dialog.getByLabel("Current password").fill(password);
+  await dialog.getByRole("button", { name: "Verify and continue" }).click();
+  await expect(dialog).toHaveCount(0);
+  steppedUpPages.add(page);
+}
+
 /** WCAG 2.x A/AA axe scan in both colour schemes; fails on any violation and prints the details. */
 export async function expectAccessible(page: Page, label: string): Promise<void> {
   // Buttons and chips fade their colours over 0.12 s. Switching the colour scheme starts that

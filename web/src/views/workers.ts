@@ -3,6 +3,7 @@ import { button, copyButton, emptyState, field, h, idChip, keepFocus, timeEl } f
 import { icon } from "../icons";
 import { refresh, store, subscribe, workerState } from "../store";
 import { announce, confirmDialog, openPanel } from "../ui";
+import { withStepUp } from "../step-up";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
@@ -39,7 +40,7 @@ function addDialog(): void {
     name.setError("");
     submit.disabled = true;
     try {
-      const r = await api.post<{ name: string; token: string }>("/api/v1/workers", { name: v });
+      const r = await withStepUp(() => api.post<{ name: string; token: string }>("/api/v1/workers", { name: v }));
       (document.getElementById("add-worker") as HTMLDialogElement | null)?.close();
       announce(`Worker ${r.name} added.`, "applied");
       void refresh().catch(() => {});
@@ -66,7 +67,7 @@ export function workers(root: HTMLElement): () => void {
     const ok = await confirmDialog({ title: `Remove worker ${name}?`, message: `Its connection is closed and its token stops working. Its missions disappear from this list. To use the machine again, add and enrol a worker again.`, confirmLabel: "Remove worker", danger: true });
     if (ok === null) return;
     try {
-      await api.del(`/api/v1/workers/${encodeURIComponent(name)}`);
+      await withStepUp(() => api.del(`/api/v1/workers/${encodeURIComponent(name)}`));
       announce(`Worker ${name} removed.`, "applied");
     } catch (e) {
       announce(`Worker ${name} was not removed: ${e instanceof api.ApiError ? e.message : "unexpected error"}`, "failed");
