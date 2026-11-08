@@ -126,7 +126,10 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
 
 /// Text assets that the build stores next to a gzip copy (`app-HASH.js.gz`).
 fn compressible(rel: &Path) -> bool {
-    matches!(rel.extension().and_then(|e| e.to_str()), Some("html" | "js" | "mjs" | "css" | "svg" | "json" | "webmanifest"))
+    matches!(
+        rel.extension().and_then(|e| e.to_str()),
+        Some("html" | "js" | "mjs" | "css" | "svg" | "json" | "webmanifest")
+    )
 }
 
 /// The file at `rel` for a client that accepts gzip: the build's `.gz` copy when it exists (smaller by about 75% on a slow link), else the file itself.
