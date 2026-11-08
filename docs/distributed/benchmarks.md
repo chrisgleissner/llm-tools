@@ -407,3 +407,46 @@ under 4x CPU throttling exceeds 4 000 ms or the form takes more than 5 000 ms to
 deliberately loose (about 25 times the measured values) so that a slower or busier CI runner does not fail the test;
 they catch order-of-magnitude regressions, not small ones. The measured values are in the table above and are also
 written to `web/test-results/load-metrics.json` and uploaded by the CI `web` job.
+
+## Backup while serving (DOG-024, x86-64 host, NVMe, not a Pi)
+
+`cargo test --release --test backup_serving -- --nocapture` generates a database
+(events, finished commands with 6 KB results, audit rows and free pages), starts the real
+`serve` process, keeps a fake worker sending an event batch every 50 ms and polls
+`/healthz` and `/api/v1/auth/state` four times a second while `bridge-coordinator backup`
+runs as a second process. Environment: `BACKUP_TEST_MB` (data in MiB, default 100),
+`BACKUP_TEST_BLOAT_MB` (free pages, default 60), `BACKUP_TEST_BIN` (binary to run, for
+example one built before the change), `BACKUP_TEST_FLAGS`, `BACKUP_TEST_CONTROL=1` (same
+traffic, no backup), `BACKUP_TEST_OUT` (file for the figures). Point `TMPDIR` at a disk,
+not at a tmpfs.
+
+| Run | Database file | Result |
+| --- | --- | --- |
+| Binary before the fix, 100 MiB data + 60 MiB free pages | 174 MiB | backup not finished after 60 s, 8,667 MiB written by the backup process; slowest `/healthz` 177 ms, `/auth/state` 175 ms, event batch 212 ms |
+| Fixed binary, same data, `--max-mb-s 40` | 174 MiB | backup 1.3 s, copy 50 MiB, 50 MiB written; slowest `/healthz` 36 ms, `/auth/state` 114 ms, event batch 85 ms |
+| Fixed binary, 400 MiB data + 200 MiB free pages, default options | 698 MiB (470 MiB in use) | backup 44 s (copy 445 MiB, written at 10.9 MiB/s on average against a 6 MiB/s cap, pacing is per statement step), `integrity_check` 0.4 s; slowest `/healthz` 131 ms, `/auth/state` 308 ms, event batch 248 ms |
+| Same, control without backup | 698 MiB | slowest `/healthz` 113 ms, `/auth/state` 118 ms, event batch 221 ms |
+
+The test runs the backup with the product default write cap (6 MiB/s), and a second test runs the same
+traffic without a backup, on every platform. Findings from the GitHub-hosted runners (CI runs 42445440538
+to 42450825462), before reads got their own connections:
+
+- With `--max-mb-s 40` the copy saturated the disk shared with the coordinator's commits: one commit, and
+  the request queued behind it, took 1.2 s on Linux and 2.9 s on Windows. The test uses the default cap.
+- The control run without any backup failed on Windows too: event batch commits took 0.8 to 3 s and
+  `/api/v1/auth/state` answered 503 behind them, while `/healthz` stayed fast. macOS stayed under 1 s
+  without a backup (slowest request 609 ms) and failed with one (a 2.6 s commit while the copy was
+  flushed every MiB). The cause of the request stalls was that reads shared the writer's connection;
+  reads now have four read-only connections (decision D29). After that change both tests passed their
+  control run on macOS Intel and Windows (CI run 42453427529), reads stayed fast, and the remaining slow
+  calls were the worker's own event batch commits (up to 9 s on the Windows runner, the copy at that time
+  running in background I/O mode at 1.4 to 2 MiB/s), which only a faster disk can shorten. The 1 s
+  bound for every request is therefore checked on Linux; on macOS and Windows `/healthz` must stay under
+  1 s and the auth state under 5 s.
+
+The control run shows the database's own retention work after start (the fixture holds
+53,000 finished commands with bulky results) as the main source of the larger figures.
+The test requires no polled request at or over 1 s and the backup to finish within 90 s.
+On the old binary it fails because the backup does not finish. Pi Zero 2 W figures are an
+extrapolation (install.md, Backup and restore) until measured on the board.
+

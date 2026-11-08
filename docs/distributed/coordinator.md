@@ -112,7 +112,12 @@ worker protocol is `protocol.md`.
   require a LAN exposure or an existing `web_dir`.
 - `bridge-coordinator backup --output FILE` and `restore --input FILE` copy and
   replace the database; the procedure, the files a backup does not contain and the
-  restore checks are in `install.md` (Backup and restore).
+  restore checks are in `install.md` (Backup and restore). `backup` works from one read
+  snapshot at nice 19 and a capped write rate, so it does not stop serving; it prints
+  size, progress and an estimate, refuses an estimate above `--budget-minutes` (default
+  15) unless `--force`, and verifies the copy with `integrity_check`. `backup-check
+  --backup-dir DIR --max-age-hours N` checks the newest snapshot for the pre-upgrade
+  step, and `compact` (server stopped) rebuilds a database file that holds free pages.
 - `bridge-coordinator setup-token` replaces the setup token file; it fails once an
   administrator exists.
 - Environment variables (names in `config.rs`):
@@ -359,8 +364,10 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Browser change stream | 32 retained messages, each at most 4 KiB; event and command bodies are fetched through their scoped API resources rather than retained in the fan-out ring | fixed |
 | Worker terminal status queue | 16 small messages per terminal; reason text is capped at 256 bytes and excess advisory updates are dropped | fixed |
 | Stored events per worker | 50 000, oldest deleted first, in passes that keep 90 % of the cap once it is reached (worker databases keep the authoritative copy) | `max_events_per_worker` |
-| Completed commands kept | 7 days | fixed |
+| Completed commands kept | rows 7 days and at most 5 000; the result body of a read-only command is dropped after 1 hour and that of a mutating command after 1 day (the outcome stays; results of 1 KiB or less stay whole) | fixed |
 | Mission tombstones kept | 90 days, and at most 10 000 per worker (oldest deleted first); table `mission_tombstones`, created with `IF NOT EXISTS` when the database opens, so the schema version does not change | fixed |
+| Database calls | run off the async worker threads (`block_in_place`); writes get the writer connection in arrival order, wait at most 3 s for it, and at most `max_connections` + 32 may wait (every connection has one call in flight); reads (lists, auth state, token and session lookups) use up to four read-only connections to the same WAL file and never wait for a commit, otherwise the request gets 503 `database-busy` with `Retry-After: 2`. `/healthz` does not use the database | fixed |
+| Retention and vacuum passes | hourly and at start, on a blocking thread, 50 rows per statement with the database lock released between statements; databases created by this version use incremental auto-vacuum and each pass returns up to 8 MiB of free pages; the write-ahead log file is cut back to 16 MiB after a checkpoint. A database created earlier keeps its free pages until `compact` | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
 | Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
 
