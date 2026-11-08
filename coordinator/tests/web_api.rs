@@ -653,11 +653,7 @@ async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
         (Method::GET, "/api/v1/missions/private-mission/tasks/1?worker=worker-b"),
     ] {
         let response = admin.bare(method.clone(), path).bearer_auth(token).send().await.unwrap();
-        assert_eq!(
-            response.status().as_u16(),
-            403,
-            "worker-bound token must not reach {method} {path}"
-        );
+        assert_eq!(response.status().as_u16(), 403, "worker-bound token must not reach {method} {path}");
         let body = response.json::<Value>().await.unwrap();
         let expected = if path.ends_with("/restore") {
             "session-required"
@@ -1396,9 +1392,9 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     assert_eq!(token_uses.iter().filter(|row| row["actor"] == "token:mutator").count(), 32);
     assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
     assert!(token_uses.iter().any(|row| {
-        row["detail"].as_str().is_some_and(|detail| {
-            detail.contains("scopes=admin") && detail.contains("request_id=audit-request-001")
-        })
+        row["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("scopes=admin") && detail.contains("request_id=audit-request-001"))
     }));
     assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
     env.stop().await;
