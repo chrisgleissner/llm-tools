@@ -25,6 +25,13 @@ const withProviders = async (p: import("@playwright/test").Page): Promise<void> 
 export const screens: ScreenDef[] = [
   { name: "inbox-sparse", variant: "sparse", mock: IN, path: "/", run: inboxReady },
   { name: "inbox-dense", variant: "dense", mock: DENSE, path: "/", run: async (p) => { await inboxReady(p); await withProviders(p); } },
+  // D28.1: a failure older than a day is one row after the others. The mission failed 3 h before the fixed time; a day later it is "older".
+  { name: "inbox-older-failures", mock: { ...IN, fakeClock: true }, path: "/", run: async (p) => {
+    await inboxReady(p);
+    await p.clock.fastForward("22:00:00");
+    await expect(p.locator("[data-older-failures]")).toContainText("1 older failure");
+    await expect(p.locator('[data-section="needs-you"] [data-state="failed"]')).toHaveCount(0);
+  } },
   { name: "inbox-empty", variant: "empty", mock: { ...IN, missions: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No missions yet" })).toBeVisible(); } },
   { name: "inbox-no-workers", variant: "empty", mock: { auth: "in", workers: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No workers yet" })).toBeVisible(); } },
   { name: "inbox-error", variant: "error", mock: { ...IN, apiErrors: true }, path: "/", run: async (p) => { await expect(p.locator(".error-block")).toBeVisible({ timeout: 15_000 }); } },

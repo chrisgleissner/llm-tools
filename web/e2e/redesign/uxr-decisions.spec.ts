@@ -30,6 +30,8 @@ uxr({ t: "T48", uxr: ["UXR-011"], needs: [...NEEDS] }, "D28.1: failures older th
   await page.locator("#show-more-needs-you").click();
   const group = page.locator("[data-older-failures]");
   await expect(group).toHaveText(/3 older failures/);
+  // The preview shows a row that is on the screen, not the oldest failure that was folded into the group.
+  if (await page.locator(".inbox-preview").isVisible()) await expect(page.locator(".inbox-preview .preview-title")).not.toContainText("Docs migration 35");
   const sequence = () => page.locator('[data-section="needs-you"] li').evaluateAll((els) => els.map((e) => (e.hasAttribute("data-older-failures") ? "older" : (e.getAttribute("data-state") ?? "?"))));
   const before = await sequence();
   expect(before.slice(0, 2), "the two recent failures lead").toEqual(["failed", "failed"]);
