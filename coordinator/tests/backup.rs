@@ -171,7 +171,7 @@ fn the_cli_prints_size_and_progress_and_refuses_over_budget() {
     let t = text(&o);
     assert!(o.status.success(), "{t}");
     assert!(
-        t.contains("nice 19") || t.contains("normal priority"),
+        t.contains("nice 19") || t.contains("background") || t.contains("normal priority"),
         "the priority that took effect is reported: {t}"
     );
     assert!(t.contains("integrity_check") && t.contains("MiB"), "{t}");

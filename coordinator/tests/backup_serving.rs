@@ -300,9 +300,29 @@ fn rows(path: &Path) -> (i64, i64, i64) {
     (n("events"), n("commands"), n("audit"))
 }
 
-#[cfg_attr(not(target_os = "linux"), ignore = "needs the Linux idle I/O class; see the module comment")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backup_of_a_large_database_does_not_stop_serving() {
+    scenario(
+        std::env::var_os("BACKUP_TEST_CONTROL").is_some(),
+        std::env::var_os("BACKUP_TEST_OUT").map(PathBuf::from),
+    )
+    .await;
+}
+
+// DIAGNOSTIC (temporary): the same traffic without a backup, on every platform but Linux. It always
+// fails, with the measurements as the message, so the CI log shows them.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn diagnostic_control_run_without_a_backup() {
+    let out = std::env::temp_dir().join(format!("control-report-{}.txt", std::process::id()));
+    scenario(true, Some(out.clone())).await;
+    panic!("CONTROL RUN (no backup): {}", std::fs::read_to_string(out).unwrap_or_default());
+}
+
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn scenario(control: bool, out_file: Option<PathBuf>) {
+    let _serial = SERIAL.lock().await; // two coordinators writing at once would disturb each other's timings
     let bin = std::env::var("BACKUP_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
     let old_binary = bin != BIN;
     let flags: Vec<String> = match std::env::var("BACKUP_TEST_FLAGS") {
@@ -393,9 +413,17 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     let out = dir.join("backup.sqlite3");
     let before = rows(&db_path(&dir));
     // Control run for measurements: the same traffic and fixture, no backup.
-    let control = std::env::var_os("BACKUP_TEST_CONTROL").is_some();
-    let mut backup = Command::new(if control { "sleep" } else { &bin })
-        .args(if control { vec!["25".to_string()] } else { vec![] })
+    let sleeper = if cfg!(windows) { "ping" } else { "sleep" };
+    let mut backup = Command::new(if control { sleeper } else { &bin })
+        .args(if control {
+            if cfg!(windows) {
+                vec!["-n".to_string(), "26".to_string(), "127.0.0.1".to_string()]
+            } else {
+                vec!["25".to_string()]
+            }
+        } else {
+            vec![]
+        })
         .args(if control { vec![] } else { vec!["backup", "--output"] })
         .args(if control { vec![] } else { vec![out.to_str().unwrap()] })
         .args(if control { &[][..] } else { &flags[..] })
@@ -463,7 +491,7 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     }
     report += &format!("backup output:\n{}\n", backup_text.trim_end());
     println!("{report}");
-    if let Some(file) = std::env::var_os("BACKUP_TEST_OUT") {
+    if let Some(file) = out_file {
         std::fs::write(file, &report).unwrap();
     }
 

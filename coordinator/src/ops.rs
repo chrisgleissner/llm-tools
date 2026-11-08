@@ -492,7 +492,8 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// Lower this thread's CPU priority to nice 19 and its I/O class to idle, where the platform has them.
+/// Lower this process's CPU priority and I/O priority: nice 19 and the idle I/O class on Linux, the
+/// background class on macOS, background mode on Windows.
 /// Returns a description of what took effect. It is called by the command line, not by [`backup`], so
 /// a test or embedding process never changes its own priority (a non-root process cannot raise it again).
 pub fn lower_priority() -> String {
@@ -510,7 +511,34 @@ pub fn lower_priority() -> String {
             (false, false) => "normal priority (neither nice nor the idle I/O class is available)".into(),
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // The Darwin background class lowers CPU priority and throttles disk I/O of the whole process.
+        // SAFETY: plain integer arguments; a failure only means the priority is unchanged.
+        if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) } == 0 {
+            "background class (CPU and disk I/O throttled)".into()
+        } else {
+            "normal priority (the background class is not available)".into()
+        }
+    }
+    #[cfg(windows)]
+    {
+        // PROCESS_MODE_BACKGROUND_BEGIN lowers CPU, memory and I/O priority of the calling process.
+        const PROCESS_MODE_BACKGROUND_BEGIN: u32 = 0x0010_0000;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn SetPriorityClass(process: *mut core::ffi::c_void, class: u32) -> i32;
+        }
+        // SAFETY: the pseudo handle of the current process is always valid; a failure (return 0) only
+        // means the priority is unchanged.
+        if unsafe { SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_BEGIN) } != 0 {
+            "background mode (CPU and I/O priority lowered)".into()
+        } else {
+            "normal priority (background mode is not available)".into()
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         "normal priority (not supported on this platform)".into()
     }
