@@ -108,7 +108,7 @@ Use the Agent tool for subagents. Do not use agent teams: each teammate is a sep
 - Give each subagent a short brief: the goal, the worktree, the rows it must tick, the rules below, and "report in under 15 lines". Do not paste this whole file.
 - The lead coordinates, reviews diffs and merges. It does not implement and does not read large files or logs itself.
 - Wait for CI with one background `gh run watch <id> --interval 300` per run instead of repeated checks.
-- The earlier missions 48ead01a, 94912428 and abffc02b are stopped and, after setup step 1, cancelled. Do not restart them; their unfinished work is in the work items below.
+- The earlier missions 48ead01a, 94912428 and abffc02b are stopped and, after setup step 1, deleted. Do not restart them; their unfinished work is in the work items below.
 
 ## Work items
 
