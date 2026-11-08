@@ -71,3 +71,34 @@ test("a changed digest of the open mission reads its tasks once and shows the ne
   expect(mock.requestCounts().tasks).toBe(before.tasks + 1);
   expect(mock.requestCounts().status, "the status is drawn from the digest").toBe(0);
 });
+
+// A button that is replaced between the mouse-down and the mouse-up of a click never receives the click (seen on Firefox).
+// After a task action the coordinator relays several messages: the reply, a change notice per event and the changed digest.
+// The tasks panel must be redrawn once for the one change of its data, and not again for notices that bring the same tasks.
+test("the tasks panel is redrawn only when the task data changed", async ({ page }) => {
+  const mock = await mockApp(page, IN);
+  await page.goto(MISSION_PATH);
+  await expect(page.locator('[data-entity^="task:"]').first()).toBeAttached();
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const box = document.querySelector(".task-list-box") as HTMLElement;
+    const w = window as unknown as { __redraws: number };
+    w.__redraws = 0;
+    new MutationObserver((records) => { w.__redraws += records.filter((r) => r.addedNodes.length > 0).length; }).observe(box, { childList: true });
+  });
+  const redraws = () => page.evaluate(() => (window as unknown as { __redraws: number }).__redraws);
+  mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", "QUEUED"]);
+  mock.pushEvent({ kind: "task-status", task_id: 2, mission_id: RUNNING, data: { from: "RUNNING", to: "PAUSED" } });
+  await expect(page.locator('[data-entity^="task:"]', { hasText: "Task number 2" })).toHaveCount(1);
+  expect(await redraws(), "one redraw for the one change").toBe(1);
+  for (let i = 0; i < 4; i += 1) {
+    mock.pushEvent({ kind: "task-status", task_id: 2, mission_id: RUNNING, data: { from: "RUNNING", to: "PAUSED" } });
+    mock.patchMission(RUNNING, { updated_at: new Date(Date.now() + i * 1000).toISOString() });
+    await page.waitForTimeout(350);
+  }
+  const before = mock.requestCounts().tasks;
+  await page.waitForTimeout(500);
+  expect(mock.requestCounts().tasks, "the notices made the page read the tasks again").toBeGreaterThan(0);
+  expect(await redraws(), "notices that bring the same tasks must not replace the rows or their buttons").toBe(1);
+  expect(before).toBeGreaterThan(0);
+});
