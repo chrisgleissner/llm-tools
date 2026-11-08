@@ -447,7 +447,7 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 
-## D27 Coordinator backups: snapshot copy, bounded retention, no WAL shipping yet (DOG-024)
+## D29 Coordinator backups and database access (DOG-024)
 
 Cause. On the Pi, `backup` ran for more than 35 minutes and the coordinator answered
 neither HTTPS nor worker TLS handshakes. The old backup opened the database from a second
@@ -487,6 +487,25 @@ snapshot plus the frames of its generation. Because the workers re-send replicat
 events, the missing piece is only coordinator-local state, so a recent snapshot with an
 age check (`backup-check`) is what ships now.
 
-Open: the coordinator still calls the database synchronously on its two runtime threads.
-A slow commit stops request handling for its duration whatever the cause. Moving database
-calls to a blocking pool is a larger change than this fix and is not done here.
+Database access off the runtime threads. The coordinator called SQLite synchronously from
+request handlers on its two runtime threads, behind one connection mutex. One slow commit
+(or one holder of SQLite's write lock) therefore stopped both threads: the accept loop,
+TLS handshakes and `/healthz` stopped with them, and a pile of handlers waiting on the
+mutex had no limit. Reproduced with a second connection holding the write lock for 6 s:
+the old code did not run a 300 ms timer for 4.7 s. Every public `Db` method now runs
+through `db::blocking`, which uses `tokio::task::block_in_place` on a multi-thread runtime,
+so the worker hands its core to another thread while the call waits or commits (a
+`macro_rules!` wraps the whole `impl Db`, so no call site changed). The connection
+mutex is taken with a wait limit (3 s, `db::set_lock_wait` for tests) and at most 48
+callers may wait; beyond either the caller gets `SQLITE_BUSY`, which HTTP and the worker
+upgrade report as 503 `database-busy` with `Retry-After`, and the worker channel closes
+with 1011 and reconnects. `/healthz` never touches the database. Rejected: a dedicated
+database thread with a queue (every call site would have to become async, and the
+authentication helpers called from synchronous extractors would cascade). A poisoned
+connection mutex is recovered, and the waiter count is released on every exit path, so
+serving continues when the slow commit ends; `coordinator/tests/db_stall.rs` checks that,
+and the unit tests in `db.rs` (`lock_wait_tests`) check the bounds.
+
+Remaining limit: a commit that holds the mutex for longer than the wait still makes
+database-backed requests answer 503 for its duration. Page-cache write stalls on the
+card itself are outside what the process can control; the backup no longer causes them.

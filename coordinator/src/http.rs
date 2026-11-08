@@ -90,6 +90,15 @@ pub fn err(status: StatusCode, code: &'static str, message: impl Into<String>) -
 impl From<rusqlite::Error> for ApiError {
     fn from(e: rusqlite::Error) -> Self {
         eprintln!("database error: {e}");
+        if crate::db::is_busy(&e) {
+            let mut busy = err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database-busy",
+                "the database did not answer in time; retry shortly",
+            );
+            busy.retry_after = Some(2);
+            return busy;
+        }
         err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
 }

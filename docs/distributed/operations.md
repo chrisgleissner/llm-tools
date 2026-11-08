@@ -120,6 +120,17 @@ pages, the measured write rate and the estimated duration against the budget.
 - `scripts/coordinator_offsite_backup.py` prints which stage failed and the command that
   resumes it; see install.md (Backup and restore).
 
+### Requests answer 503 `database-busy`
+
+The coordinator keeps answering `/healthz`, accepting connections and completing TLS
+handshakes while the database is slow, but a request that needs the database waits at most
+3 s for it and then gets 503 `database-busy` (`Retry-After: 2`). Workers close and
+reconnect with their backoff. A short burst is a slow commit on the storage; a lasting
+one means something holds the database write lock for long (a backup from an older
+version, a second process) or the card is failing. `bridge-coordinator health` and the
+coordinator's standard error (`database error: ...`) show it; the service recovers by
+itself when the commit ends.
+
 ### Worker shows offline
 
 A worker is offline when it has no open control connection. The worker retries with an

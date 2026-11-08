@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 /// Session lifetime of a device the administrator chose to remember at sign-in.
@@ -89,8 +90,69 @@ CREATE TABLE audit(
   detail TEXT NOT NULL, remote TEXT NOT NULL);
 ";
 
+/// Run `f` (a database call: SQLite work or a wait for the connection) so that it never occupies an
+/// async worker thread. On a multi-thread runtime the worker hands its queue to another thread for the
+/// duration (`block_in_place`), so accepting connections, TLS handshakes and requests that need no
+/// database continue while a commit is slow. Outside a runtime, and on a current-thread runtime, the
+/// call just runs.
+pub(crate) fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
+/// Wraps the body of every `pub fn` of an `impl` block in [`blocking`]; other functions are copied
+/// unchanged (they are only called from wrapped ones).
+macro_rules! offload_impl {
+    () => {};
+    ($(#[$m:meta])* pub fn $name:ident ($($args:tt)*) -> $ret:ty $body:block $($rest:tt)*) => {
+        $(#[$m])* pub fn $name($($args)*) -> $ret { $crate::db::blocking(|| -> $ret { $body }) }
+        $crate::db::offload_impl! { $($rest)* }
+    };
+    ($(#[$m:meta])* pub fn $name:ident ($($args:tt)*) $body:block $($rest:tt)*) => {
+        $(#[$m])* pub fn $name($($args)*) { $crate::db::blocking(|| { $body }) }
+        $crate::db::offload_impl! { $($rest)* }
+    };
+    ($(#[$m:meta])* $vis:vis fn $name:ident ($($args:tt)*) $(-> $ret:ty)? $body:block $($rest:tt)*) => {
+        $(#[$m])* $vis fn $name($($args)*) $(-> $ret)? $body
+        $crate::db::offload_impl! { $($rest)* }
+    };
+}
+pub(crate) use offload_impl;
+
+/// Longest a caller waits for the connection before getting a busy error.
+static LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(3_000);
+/// Callers allowed to wait for the connection at once. Each waiter occupies a thread that the
+/// runtime handed over, so the number is bounded.
+pub const MAX_LOCK_WAITERS: usize = 48;
+
+pub fn lock_wait() -> std::time::Duration {
+    std::time::Duration::from_millis(LOCK_WAIT_MS.load(Ordering::Relaxed))
+}
+
+/// Change the connection wait (process wide). Tests use it to keep a stall short.
+pub fn set_lock_wait(d: std::time::Duration) {
+    LOCK_WAIT_MS.store(d.as_millis() as u64, Ordering::Relaxed);
+}
+
+/// The error a caller gets when the database does not answer in time: `SQLITE_BUSY`, which the HTTP layer
+/// reports as 503 `database-busy`.
+pub(crate) fn busy(message: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), Some(message.to_string()))
+}
+
+/// True for the busy and locked errors of SQLite and of [`busy`].
+pub fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _) if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
+    waiters: AtomicUsize,
     path: PathBuf,
     /// Stored event rows per worker, kept so that retention does not have to count them on every batch.
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
@@ -382,6 +444,7 @@ type R<T> = rusqlite::Result<T>;
 type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String, String);
 
 impl Db {
+    offload_impl! {
     pub fn open(path: &Path) -> R<Db> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -559,13 +622,45 @@ impl Db {
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
+            waiters: AtomicUsize::new(0),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
         })
     }
 
-    pub(crate) fn c(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    /// The connection, waiting at most [`lock_wait`] for it. A caller that waits longer, or that finds
+    /// [`MAX_LOCK_WAITERS`] others already waiting, gets a busy error (HTTP 503) instead of queueing
+    /// without bound behind a slow commit.
+    pub(crate) fn c(&self) -> R<MutexGuard<'_, Connection>> {
+        match self.conn.try_lock() {
+            Ok(g) => return Ok(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        let _waiting = Waiting(&self.waiters);
+        if self.waiters.fetch_add(1, Ordering::Relaxed) >= MAX_LOCK_WAITERS {
+            return Err(busy("too many requests are waiting for the database"));
+        }
+        let deadline = std::time::Instant::now() + lock_wait();
+        let mut pause = std::time::Duration::from_micros(200);
+        loop {
+            match self.conn.try_lock() {
+                Ok(g) => return Ok(g),
+                Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(busy("the database is busy (a write is taking too long)"));
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(std::time::Duration::from_millis(5));
+        }
     }
 
     /// Persist server-side ceremony state for at most five minutes. Binding is an opaque
@@ -581,7 +676,7 @@ impl Db {
         {
             return Err(rusqlite::Error::InvalidParameterName("invalid WebAuthn challenge bounds".into()));
         }
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", [now])?;
         tx.execute(
@@ -595,7 +690,7 @@ impl Db {
     /// Consume once, only for the matching principal and session/setup binding. Expired
     /// challenges are deleted; a mismatched caller cannot invalidate another session's challenge.
     pub fn webauthn_challenge_take(&self, id: &str, principal: &str, binding: &str, kind: &str) -> R<Option<WebauthnChallengeRow>> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let row = tx
             .query_row(
@@ -638,7 +733,7 @@ impl Db {
     }
 
     pub fn passkey_put(&self, row: &PasskeyCredentialRow) -> R<()> {
-        self.c().execute("INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        self.c()?.execute("INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             params![row.credential_id,row.principal_id,row.credential,row.user_name,row.created_at,row.last_used,row.aaguid,row.transports,row.backup_eligible as i64,row.backed_up as i64,row.sign_count])?;
         Ok(())
     }
@@ -646,7 +741,7 @@ impl Db {
     /// Store the first credential and its canonical origin atomically. A racing first registration
     /// at a different origin loses without leaving a locked origin or a credential behind.
     pub fn passkey_put_at_origin(&self, row: &PasskeyCredentialRow, origin: &str) -> R<bool> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let existing: Option<String> = tx
             .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [&row.principal_id], |r| r.get(0))
@@ -674,7 +769,7 @@ impl Db {
     }
 
     pub fn passkeys_for_principal(&self, principal: &str) -> R<Vec<PasskeyCredentialRow>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut stmt = c.prepare("SELECT credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count FROM passkeys WHERE principal_id=? ORDER BY created_at,credential_id")?;
         let rows = stmt
             .query_map([principal], |r| {
@@ -697,7 +792,7 @@ impl Db {
     }
 
     pub fn passkey_update(&self, row: &PasskeyCredentialRow) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "UPDATE passkeys SET credential=?,last_used=?,backup_eligible=?,backed_up=?,sign_count=? WHERE credential_id=? AND principal_id=?",
             params![
                 row.credential,
@@ -714,7 +809,7 @@ impl Db {
     /// Bind the first passkey to the canonical origin. A caller cannot silently move an existing
     /// principal's credentials to a different RP ID; explicit re-enrolment must clear them first.
     pub fn passkey_origin_bind(&self, principal: &str, origin: &str) -> R<bool> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let existing: Option<String> = tx
             .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))
@@ -734,7 +829,7 @@ impl Db {
     /// Explicit password-confirmed re-enrolment: clear every credential and switch the RP origin
     /// in one transaction so no credential remains bound to the previous RP ID.
     pub fn passkey_rebind_origin(&self, principal: &str, origin: &str) -> R<()> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("DELETE FROM passkeys WHERE principal_id=?", [principal])?;
         tx.execute(
@@ -745,26 +840,26 @@ impl Db {
     }
 
     pub fn passkey_origin(&self, principal: &str) -> R<Option<String>> {
-        self.c()
+        self.c()?
             .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))
             .optional()
             .map(Option::flatten)
     }
 
     pub fn passkey_count(&self, principal: &str) -> R<i64> {
-        self.c()
+        self.c()?
             .query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?", [principal], |r| r.get(0))
     }
 
     // ---- admin ----
     pub fn admin_get(&self) -> R<Option<(String, String)>> {
-        self.c()
+        self.c()?
             .query_row("SELECT username, password_hash FROM admin WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()
     }
     pub fn admin_create(&self, username: &str, hash: &str) -> R<bool> {
         let now = crate::now();
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO admin(id, username, password_hash, created_at) VALUES(1,?,?,?)",
@@ -780,12 +875,12 @@ impl Db {
         Ok(inserted)
     }
     pub fn admin_principal_id(&self) -> R<Option<String>> {
-        self.c()
+        self.c()?
             .query_row("SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1", [], |r| r.get(0))
             .optional()
     }
     pub fn principals_list(&self) -> R<Vec<Value>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut stmt = c.prepare("SELECT id,username,role,created_at FROM principals ORDER BY id")?;
         let rows = stmt
             .query_map([], |r| {
@@ -797,7 +892,7 @@ impl Db {
     /// Set the password and delete every session in one transaction. Unless `keep_api_tokens`,
     /// every API token is revoked in the same transaction; returns how many were revoked.
     pub fn admin_set_password(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
@@ -819,7 +914,7 @@ impl Db {
     pub fn session_create_for(&self, principal_id: &str, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
         let now = crate::now();
         let (_, absolute) = session_policy(remember);
-        self.c().execute(
+        self.c()?.execute(
             "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id) VALUES(?,?,?,?,?,?,?)",
             params![token_hash, csrf, now, now, now + absolute, remember, principal_id],
         )?;
@@ -827,7 +922,7 @@ impl Db {
     }
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
-        let c = self.c();
+        let c = self.c()?;
         let row: Option<(String, i64, i64, bool, String)> = c
             .query_row(
                 "SELECT csrf, last_seen, expires_at, remember,principal_id FROM sessions WHERE token_hash=?",
@@ -856,12 +951,12 @@ impl Db {
         }))
     }
     pub fn session_delete(&self, token_hash: &str) -> R<()> {
-        self.c().execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
+        self.c()?.execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
         Ok(())
     }
     /// Test hook and maintenance: age a session so idle/absolute expiry can be exercised.
     pub fn session_age(&self, token_hash: &str, last_seen: i64, expires_at: i64) -> R<()> {
-        self.c().execute(
+        self.c()?.execute(
             "UPDATE sessions SET last_seen=?, expires_at=? WHERE token_hash=?",
             params![last_seen, expires_at, token_hash],
         )?;
@@ -869,21 +964,21 @@ impl Db {
     }
     /// Test hook: backdate a command's last update so retention can be exercised without waiting.
     pub fn command_age(&self, id: &str, updated_at: i64) -> R<()> {
-        self.c()
+        self.c()?
             .execute("UPDATE commands SET updated_at=? WHERE request_id=?", params![updated_at, id])?;
         Ok(())
     }
     /// Test hook: backdate a worker's stored `last_seen`.
     pub fn worker_age(&self, name: &str, last_seen: i64) -> R<()> {
-        self.c().execute("UPDATE workers SET last_seen=? WHERE name=?", params![last_seen, name])?;
+        self.c()?.execute("UPDATE workers SET last_seen=? WHERE name=?", params![last_seen, name])?;
         Ok(())
     }
     pub fn sessions_clear(&self) -> R<()> {
-        self.c().execute("DELETE FROM sessions", [])?;
+        self.c()?.execute("DELETE FROM sessions", [])?;
         Ok(())
     }
     pub fn session_count(&self) -> R<i64> {
-        self.c().query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        self.c()?.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
     }
 
     // ---- api tokens ----
@@ -893,7 +988,7 @@ impl Db {
     }
     /// Create a token with the explicitly granted API scopes.
     pub fn token_create_scoped(&self, name: &str, hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes,principal_id) VALUES(?,?,?,?,?,'admin')",
             params![
                 name,
@@ -929,7 +1024,7 @@ impl Db {
         })
     }
     pub fn token_create_identified_with_restrictions(&self, token: ApiTokenCreate<'_>) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs, allowed_workers,principal_id) VALUES(?,?,?,?,?,?,?,?,?)",
             params![
                 token.name,
@@ -946,13 +1041,13 @@ impl Db {
     }
     /// (name, expires_at) of every API token, by name.
     pub fn tokens_list(&self) -> R<Vec<(String, Option<i64>)>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare("SELECT name, expires_at FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
         rows
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare(
             "SELECT name, principal_id, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs, allowed_workers, sender_constraint_kind, sender_constraint_id FROM api_tokens ORDER BY name",
         )?;
@@ -976,14 +1071,14 @@ impl Db {
     }
     /// Internet exposure requires every API token to have an explicit expiry.
     pub fn non_expiring_api_token_count(&self) -> R<i64> {
-        self.c().query_row("SELECT COUNT(*) FROM api_tokens WHERE expires_at IS NULL", [], |r| r.get(0))
+        self.c()?.query_row("SELECT COUNT(*) FROM api_tokens WHERE expires_at IS NULL", [], |r| r.get(0))
     }
     /// Record a bounded token-use projection. Repeated calls from the same address update only
     /// the timestamp at the existing low-write touch interval.
     pub fn api_token_record_use(&self, name: &str, address: &str) -> R<()> {
         let now = crate::now();
         let touch_before = now - TOUCH_EVERY_SECS;
-        self.c().execute(
+        self.c()?.execute(
             "UPDATE api_tokens SET last_address=?, last_used=CASE WHEN last_used IS NULL OR last_used<=? THEN ? ELSE last_used END
              WHERE name=? AND (last_address IS NOT ? OR last_used IS NULL OR last_used<=?)",
             params![address, touch_before, now, name, address, touch_before],
@@ -991,13 +1086,13 @@ impl Db {
         Ok(())
     }
     pub fn token_revoke(&self, name: &str) -> R<bool> {
-        Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
+        Ok(self.c()?.execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
     /// Look up a pre-identification API token without relying on SQLite's early-exit string
     /// equality. Every legacy digest is compared in constant time; new tokens use the indexed ID
     /// lookup below. Touch `last_used` at most every `TOUCH_EVERY_SECS`.
     pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
-        let c = self.c();
+        let c = self.c()?;
         let now = crate::now();
         let mut stmt = c.prepare(
             "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id IS NULL ORDER BY name",
@@ -1042,7 +1137,7 @@ impl Db {
     /// Look up an identifiable token by its public ID, then compare the supplied secret hash
     /// against the stored hash in constant time.
     pub fn token_lookup_identified(&self, token_id: &str, secret_hash: &str) -> R<Option<ApiToken>> {
-        let c = self.c();
+        let c = self.c()?;
         let row: Option<IdentifiedTokenRow> = c
             .query_row(
                 "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id=?",
@@ -1086,7 +1181,7 @@ impl Db {
     }
     /// Remember that `addr_key` had a successful login now.
     pub fn known_addr_remember(&self, addr_key: &str) -> R<()> {
-        let c = self.c();
+        let c = self.c()?;
         let h = Self::addr_hash(&c, addr_key)?;
         c.execute(
             "INSERT INTO known_addrs(hash, last_success) VALUES(?,?) ON CONFLICT(hash) DO UPDATE SET last_success=excluded.last_success",
@@ -1096,7 +1191,7 @@ impl Db {
     }
     /// True when `addr_key` had a successful login within [`KNOWN_ADDR_SECS`].
     pub fn known_addr(&self, addr_key: &str) -> R<bool> {
-        let c = self.c();
+        let c = self.c()?;
         let h = Self::addr_hash(&c, addr_key)?;
         let last: Option<i64> = c
             .query_row("SELECT last_success FROM known_addrs WHERE hash=?", params![h], |r| r.get(0))
@@ -1105,7 +1200,7 @@ impl Db {
     }
     /// Test hook: age a known address.
     pub fn known_addr_age(&self, addr_key: &str, last_success: i64) -> R<()> {
-        let c = self.c();
+        let c = self.c()?;
         let h = Self::addr_hash(&c, addr_key)?;
         c.execute("UPDATE known_addrs SET last_success=? WHERE hash=?", params![last_success, h])?;
         Ok(())
@@ -1118,7 +1213,7 @@ impl Db {
         const RETAIN_SECS: i64 = 30 * 86_400;
         const MAX_DEVICES: i64 = 64;
         let now = crate::now();
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let hash = Self::addr_hash(&tx, &format!("device:{fingerprint}"))?;
         tx.execute(
@@ -1145,7 +1240,7 @@ impl Db {
     pub fn security_notification_add(&self, principal_id: &str, category: &str) -> R<Option<String>> {
         let now = crate::now();
         let id = crate::auth::sha256_hex(&format!("{}:{}:{}", principal_id, category, crate::auth::random_token()))[..24].to_string();
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         tx.execute("DELETE FROM security_notifications WHERE created_at < ?", [now - 30 * 86_400])?;
         if category == "repeated_sign_in_failures" {
@@ -1172,7 +1267,7 @@ impl Db {
     }
 
     pub fn security_notifications_list(&self, principal_id: &str) -> R<Vec<Value>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare("SELECT id, category, created_at FROM security_notifications WHERE principal_id=? AND dismissed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 20")?;
         let rows = st
             .query_map([principal_id], |r| {
@@ -1183,7 +1278,7 @@ impl Db {
     }
 
     pub fn security_notification_dismiss(&self, principal_id: &str, id: &str) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "UPDATE security_notifications SET dismissed_at=? WHERE principal_id=? AND id=? AND dismissed_at IS NULL",
             params![crate::now(), principal_id, id],
         )? == 1)
@@ -1191,31 +1286,31 @@ impl Db {
 
     // ---- workers ----
     pub fn worker_add(&self, name: &str, hash: &str) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO workers(name, token_hash, created_at) VALUES(?,?,?)",
             params![name, hash, crate::now()],
         )? == 1)
     }
     pub fn worker_add_with_client_certificate(&self, name: &str, hash: &str, fingerprint: &str) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO workers(name, token_hash, created_at, client_cert_fingerprint) VALUES(?,?,?,?)",
             params![name, hash, crate::now(), fingerprint],
         )? == 1)
     }
     pub fn worker_revoke(&self, name: &str) -> R<bool> {
-        let revoked = self.c().execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
+        let revoked = self.c()?.execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         Ok(revoked)
     }
     pub fn worker_by_token(&self, hash: &str) -> R<Option<WorkerRow>> {
-        self.c()
+        self.c()?
             .query_row(&format!("SELECT {WCOLS} FROM workers WHERE token_hash=?"), params![hash], worker_row)
             .optional()
     }
     /// Authenticate a worker channel handshake with either the active token or a staged
     /// rotation token. A pending token is not promoted until the worker sends a valid hello.
     pub fn worker_by_connection_token(&self, hash: &str, now: i64) -> R<Option<(WorkerRow, bool)>> {
-        self.c()
+        self.c()?
             .query_row(
                 &format!(
                     "SELECT {WCOLS}, (pending_token_hash IS NOT NULL AND pending_token_hash=?1) FROM workers
@@ -1228,21 +1323,21 @@ impl Db {
     }
     /// Stage a new worker token while the old token remains valid for the given grace window.
     pub fn worker_stage_token_rotation(&self, name: &str, hash: &str, expires_at: i64) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "UPDATE workers SET pending_token_hash=?, pending_token_expires_at=? WHERE name=?",
             params![hash, expires_at, name],
         )? == 1)
     }
     /// Promote a staged token only after the matching token completed a valid worker hello.
     pub fn worker_promote_token_rotation(&self, name: &str, hash: &str, now: i64) -> R<bool> {
-        Ok(self.c().execute(
+        Ok(self.c()?.execute(
             "UPDATE workers SET token_hash=pending_token_hash, pending_token_hash=NULL, pending_token_expires_at=NULL
              WHERE name=? AND pending_token_hash=? AND pending_token_expires_at>?",
             params![name, hash, now],
         )? == 1)
     }
     pub fn worker_by_client_certificate(&self, fingerprint: &str) -> R<Option<WorkerRow>> {
-        self.c()
+        self.c()?
             .query_row(
                 &format!("SELECT {WCOLS} FROM workers WHERE client_cert_fingerprint=?"),
                 params![fingerprint],
@@ -1251,26 +1346,26 @@ impl Db {
             .optional()
     }
     pub fn worker_client_certificate_matches(&self, name: &str, fingerprint: &str) -> R<bool> {
-        Ok(self.c().query_row(
+        Ok(self.c()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM workers WHERE name=? AND client_cert_fingerprint=?)",
             params![name, fingerprint],
             |r| r.get::<_, i64>(0),
         )? != 0)
     }
     pub fn worker_get(&self, name: &str) -> R<Option<WorkerRow>> {
-        self.c()
+        self.c()?
             .query_row(&format!("SELECT {WCOLS} FROM workers WHERE name=?"), params![name], worker_row)
             .optional()
     }
     pub fn workers_list(&self) -> R<Vec<WorkerRow>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare(&format!("SELECT {WCOLS} FROM workers ORDER BY name"))?;
         let rows = st.query_map([], worker_row)?.collect();
         rows
     }
     /// Stable database-local HMAC key used to sign opaque pagination cursors.
     pub fn cursor_key(&self) -> R<String> {
-        let c = self.c();
+        let c = self.c()?;
         c.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('cursor_hmac_key',?1)",
             params![crate::auth::random_token()],
@@ -1283,7 +1378,7 @@ impl Db {
     /// matches no row writes nothing to the database files.
     pub fn worker_seen(&self, name: &str, min_interval: i64) -> R<()> {
         let now = crate::now();
-        self.c().execute(
+        self.c()?.execute(
             "UPDATE workers SET last_seen=?1 WHERE name=?2 AND (last_seen IS NULL OR last_seen <= ?1 - ?3)",
             params![now, name, min_interval],
         )?;
@@ -1292,7 +1387,7 @@ impl Db {
 
     /// Record the final disconnect time and clear the address of the closed socket.
     pub fn worker_disconnected(&self, name: &str) -> R<()> {
-        self.c()
+        self.c()?
             .execute("UPDATE workers SET last_seen=?, remote_address=NULL WHERE name=?", params![crate::now(), name])?;
         Ok(())
     }
@@ -1306,7 +1401,7 @@ impl Db {
         capabilities: &Value,
         remote_address: &str,
     ) -> R<HelloOutcome> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let row: Option<(Option<String>, i64, i64)> = tx
             .query_row("SELECT worker_id, generation, event_cursor FROM workers WHERE name=?", params![name], |r| {
@@ -1352,7 +1447,7 @@ impl Db {
     }
 
     pub fn missions_list(&self) -> R<Vec<(String, Value)>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare("SELECT worker, info FROM missions ORDER BY worker, mission_id")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.map(|r| r.map(|(w, i)| (w, serde_json::from_str(&i).unwrap_or(Value::Null)))).collect()
@@ -1369,7 +1464,7 @@ impl Db {
             missions,
             max,
         } = batch;
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;
         if after != cursor as u64 {
@@ -1426,7 +1521,7 @@ impl Db {
     }
 
     pub fn events_list(&self, worker: Option<&str>, after: u64, limit: u64) -> R<Vec<Value>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare("SELECT worker, id, body FROM events WHERE (?1 IS NULL OR worker=?1) AND id > ?2 ORDER BY worker, id LIMIT ?3")?;
         let rows = st.query_map(params![worker, after as i64, limit as i64], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
@@ -1437,7 +1532,7 @@ impl Db {
 
     // ---- commands ----
     pub fn command_get(&self, id: &str) -> R<Option<CommandRow>> {
-        self.c()
+        self.c()?
             .query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
             .optional()
     }
@@ -1448,7 +1543,7 @@ impl Db {
         if request_json.len() > MAX_COMMAND_REQUEST_BYTES {
             return Ok(InsertOutcome::RequestTooLarge);
         }
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let existing: Option<CommandRow> = tx
             .query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
@@ -1489,7 +1584,7 @@ impl Db {
     /// Unfinished mutating commands, oldest first, for redelivery after a reconnect.
     /// Read-only commands are not redelivered: see [`Db::commands_expire_reads`].
     pub fn commands_resend(&self, worker: &str) -> R<Vec<CommandRow>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare(&format!(
             "SELECT {CCOLS} FROM commands WHERE worker=? AND mutating=1 AND state IN ('pending','sent','acked') ORDER BY rowid"
         ))?;
@@ -1503,7 +1598,7 @@ impl Db {
     /// The failure is the same `command.result` shape a worker sends, so a client polling the
     /// journal entry sees a normal failed read.
     pub fn commands_expire_reads(&self, worker: &str) -> R<Vec<CommandRow>> {
-        let mut c = self.c();
+        let mut c = self.c()?;
         let tx = c.transaction()?;
         let rows: Vec<CommandRow> = {
             let mut st = tx.prepare(&format!(
@@ -1535,7 +1630,7 @@ impl Db {
     }
 
     fn transition(&self, sql: &str, args: &[&dyn rusqlite::ToSql], id: &str) -> R<Option<CommandRow>> {
-        let c = self.c();
+        let c = self.c()?;
         if c.execute(sql, args)? == 1 {
             c.query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
                 .optional()
@@ -1571,14 +1666,14 @@ impl Db {
     }
 
     pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
-        self.c().execute(
+        self.c()?.execute(
             "INSERT INTO audit(ts, actor, action, detail, remote,principal_id) VALUES(?,?,?,?,?,COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END))",
             params![crate::now(), actor, action, detail, remote, actor, actor, actor, actor],
         )?;
         Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
-        let c = self.c();
+        let c = self.c()?;
         let mut st = c.prepare("SELECT ts, actor, action, detail, remote FROM audit ORDER BY id DESC LIMIT ?")?;
         let rows = st
             .query_map(params![limit], |r| {
@@ -1596,7 +1691,7 @@ impl Db {
     fn in_batches(&self, sql: &str, cutoff: i64) -> R<usize> {
         let mut total = 0;
         loop {
-            let n = self.c().execute(sql, params![cutoff, MAINTENANCE_BATCH])?;
+            let n = self.c()?.execute(sql, params![cutoff, MAINTENANCE_BATCH])?;
             total += n;
             if (n as i64) < MAINTENANCE_BATCH {
                 return Ok(total);
@@ -1611,7 +1706,7 @@ impl Db {
     pub fn maintenance(&self) -> R<()> {
         let now = crate::now();
         {
-            let c = self.c();
+            let c = self.c()?;
             c.execute(
                 "DELETE FROM sessions WHERE expires_at <= ?1 OR last_seen <= ?2 - CASE remember WHEN 1 THEN ?3 ELSE ?4 END",
                 params![now, now, SESSION_IDLE_SECS, SESSION_IDLE_SECS_SHORT],
@@ -1632,7 +1727,7 @@ impl Db {
         for (mutating, keep) in [(0_i64, READ_RESULT_KEEP_SECS), (1, MUTATING_RESULT_KEEP_SECS)] {
             loop {
                 let n = self
-                    .c()
+                    .c()?
                     .execute(stub, params![now - keep, MAINTENANCE_BATCH, mutating, RESULT_STUB_ABOVE_BYTES])?;
                 if (n as i64) < MAINTENANCE_BATCH {
                     break;
@@ -1642,7 +1737,7 @@ impl Db {
         }
         // Row cap on finished commands, oldest first.
         loop {
-            let c = self.c();
+            let c = self.c()?;
             let done: i64 = c.query_row("SELECT COUNT(*) FROM commands WHERE state='done'", [], |r| r.get(0))?;
             let excess = (done - MAX_DONE_COMMANDS).min(MAINTENANCE_BATCH);
             if excess <= 0 {
@@ -1655,7 +1750,7 @@ impl Db {
             drop(c);
             std::thread::sleep(MAINTENANCE_PAUSE);
         }
-        self.c()
+        self.c()?
             .execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
         self.shrink()
     }
@@ -1663,11 +1758,11 @@ impl Db {
     /// Return a bounded number of free pages to the file (databases created with incremental
     /// auto-vacuum only) and fold the write-ahead log back. Nothing here runs a full VACUUM.
     fn shrink(&self) -> R<()> {
-        let mode: i64 = self.c().query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        let mode: i64 = self.c()?.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
         if mode == 2 {
             let mut left = INCREMENTAL_VACUUM_PAGES;
             while left > 0 {
-                let c = self.c();
+                let c = self.c()?;
                 let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
                 if free == 0 {
                     break;
@@ -1684,13 +1779,13 @@ impl Db {
                 std::thread::sleep(MAINTENANCE_PAUSE);
             }
         }
-        self.c().query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+        self.c()?.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
         Ok(())
     }
 
     /// Free pages that the file still holds and whether it can give them back without a rebuild.
     pub fn free_space(&self) -> R<(i64, i64, bool)> {
-        let c = self.c();
+        let c = self.c()?;
         let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         let total: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
@@ -1699,7 +1794,7 @@ impl Db {
     }
 
     pub fn diagnostics(&self) -> R<Value> {
-        let c = self.c();
+        let c = self.c()?;
         let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let wal = std::fs::metadata(format!("{}-wal", self.path.display())).map(|m| m.len()).unwrap_or(0);
@@ -1710,6 +1805,7 @@ impl Db {
             depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
         }
         Ok(json!({"db_bytes": pages * size + wal as i64, "command_queue_depths": depths}))
+    }
     }
 }
 
@@ -1741,7 +1837,7 @@ mod batch_write_cost {
             let dir = std::env::temp_dir().join(format!("bridge-batch-cost-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(&dir).unwrap();
             let db = Db::open(&dir.join("test.sqlite3")).unwrap();
-            db.c().pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            db.c().unwrap().pragma_update(None, "wal_autocheckpoint", 0).unwrap();
             assert!(db.worker_add("w", "hash").unwrap());
             Fixture { dir, db, next_id: 1 }
         }
@@ -1835,9 +1931,9 @@ mod batch_write_cost {
         let summary = json!({"id": "m1", "name": "n", "status": "RUNNING", "folder": "f", "updated_at": 1});
         f.batch(5, 50_000, Some(std::slice::from_ref(&summary)));
         let rows_changed = |f: &mut Fixture, summary: &Value| {
-            let before = f.db.c().total_changes();
+            let before = f.db.c().unwrap().total_changes();
             f.batch(0, 50_000, Some(std::slice::from_ref(summary)));
-            f.db.c().total_changes() - before
+            f.db.c().unwrap().total_changes() - before
         };
         assert_eq!(rows_changed(&mut f, &summary), 1, "the worker row only");
         let changed = json!({"id": "m1", "name": "n", "status": "DONE", "folder": "f", "updated_at": 2});
@@ -1890,5 +1986,82 @@ mod batch_write_cost {
         f.batch(10, 100, None);
         f.batch(10, 100, None);
         assert_eq!(f.stored().len(), 20, "a new worker of the same name starts from an empty count");
+    }
+}
+
+#[cfg(test)]
+mod lock_wait_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{Duration, Instant};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn open() -> (PathBuf, Db) {
+        let dir = std::env::temp_dir().join(format!("bridge-lock-wait-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("test.sqlite3")).unwrap();
+        (dir, db)
+    }
+
+    /// One test changes the process-wide wait, so the cases run in sequence inside it.
+    #[test]
+    fn a_caller_waits_a_bounded_time_and_the_queue_is_bounded_and_released() {
+        let (dir, db) = open();
+        let db = std::sync::Arc::new(db);
+        set_lock_wait(Duration::from_millis(150));
+        let held = db.c().unwrap();
+
+        // A caller behind a held connection gets a busy error after the wait, not later and not never.
+        let started = Instant::now();
+        let err = db.worker_get("w").unwrap_err();
+        let took = started.elapsed();
+        assert!(is_busy(&err), "{err:?}");
+        assert!(took >= Duration::from_millis(140) && took < Duration::from_secs(2), "{took:?}");
+
+        // More waiters than the queue allows are refused at once.
+        set_lock_wait(Duration::from_secs(5));
+        let waiting: Vec<_> = (0..MAX_LOCK_WAITERS)
+            .map(|_| {
+                let db = db.clone();
+                std::thread::spawn(move || db.worker_get("w"))
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while db.waiters.load(Ordering::Relaxed) < MAX_LOCK_WAITERS {
+            assert!(Instant::now() < deadline, "waiters never queued: {}", db.waiters.load(Ordering::Relaxed));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let started = Instant::now();
+        let err = db.worker_get("w").unwrap_err();
+        assert!(
+            is_busy(&err) && started.elapsed() < Duration::from_millis(500),
+            "{err:?} after {:?}",
+            started.elapsed()
+        );
+
+        // When the connection is released the queued callers are served and the count returns to zero.
+        drop(held);
+        for w in waiting {
+            assert!(w.join().unwrap().is_ok());
+        }
+        assert_eq!(db.waiters.load(Ordering::Relaxed), 0);
+        assert!(db.worker_get("w").unwrap().is_none());
+        set_lock_wait(Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_poisoned_connection_mutex_does_not_stop_the_database() {
+        let (dir, db) = open();
+        let db = std::sync::Arc::new(db);
+        let poisoner = db.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.c().unwrap();
+            panic!("a request handler panicked while holding the connection");
+        })
+        .join();
+        assert!(db.worker_get("w").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -357,7 +357,7 @@ beside it, `/healthz` and `/api/v1/auth/state` polled four times a second):
 | Same database and traffic, no backup | 698 MiB | none | 113 ms | 118 ms |
 
 The old method does not stall requests on NVMe; the Pi's stall is the same defect on
-slow storage (see `DECISIONS.md`, D27). Pi Zero 2 W estimate: the default pace is
+slow storage (see `DECISIONS.md`, D29). Pi Zero 2 W estimate: the default pace is
 6 MiB/s, so a copy of 450 MiB takes about 75 s plus an `integrity_check` that reads the
 copy back from the card, 30 to 60 s at 8 to 15 MiB/s, which is 2 to 3 minutes. This
 assumes a card that sustains 8 MiB/s of synced writes and 15 MiB/s of reads; a slower
@@ -386,7 +386,7 @@ version with the binary and fails when it is older than the limit. The upgrade t
 at most the age of the snapshot of coordinator-local changes, and no replicated events.
 Choose `--max-age-hours` as the amount of that state you accept to lose.
 Continuous WAL shipping (Litestream style) would reduce that to seconds; it is not
-implemented, and the design is in `DECISIONS.md` D27.
+implemented, and the design is in `DECISIONS.md` D29.
 
 Off-device copy. `scripts/coordinator_offsite_backup.py` runs the backup on the device
 over ssh, fetches the finished file with resume, checks its SHA-256 and runs

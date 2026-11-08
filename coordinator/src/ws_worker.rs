@@ -31,6 +31,15 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
         .into_response()
 }
 
+/// 503 when the database did not answer in time (a slow commit), 500 for any other storage error.
+fn db_failure(e: &rusqlite::Error) -> Response {
+    if crate::db::is_busy(e) {
+        plain(StatusCode::SERVICE_UNAVAILABLE, "the database did not answer in time; retry shortly")
+    } else {
+        plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+    }
+}
+
 pub async fn connect(
     State(st): State<St>,
     Extension(peer): Extension<Peer>,
@@ -47,7 +56,7 @@ pub async fn connect(
         Some(Ok(Some(authenticated))) => authenticated,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
-            return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            return db_failure(&e);
         }
         _ => return plain(StatusCode::UNAUTHORIZED, "invalid or revoked worker token"),
     };
@@ -61,7 +70,7 @@ pub async fn connect(
             Ok(false) => return plain(StatusCode::UNAUTHORIZED, "worker client certificate does not match token"),
             Err(e) => {
                 eprintln!("database error: {e}");
-                return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+                return db_failure(&e);
             }
         }
     }
