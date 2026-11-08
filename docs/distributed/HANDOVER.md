@@ -22,7 +22,7 @@ At handover the weekly windows were almost spent: Claude 4% left, Codex 7% left.
 
 ### Known defect found while stopping
 
-`llm-bridge finish` typed `/quit` into the Codex pane of `abffc02b` but the command was not submitted, so the provider kept running and the stop needed `--force`. File it as a DOG row (finish must submit the exit command and confirm the provider exited) and fix it in work item 5.
+`llm-bridge finish` typed `/quit` into the Codex pane of `abffc02b` but the command was not submitted, so the provider kept running and the stop needed `--force`. File it as a DOG row (finish must submit the exit command and confirm the provider exited) and fix it in work item 4.
 
 ### Step 1: clean up the missions of this work
 
@@ -30,18 +30,16 @@ The missions below belong to the distributed Bridge and 1.5.0 work. Missions not
 
 | Mission | State at handover | Action |
 |---|---|---|
-| `48ead01a` Release readiness | STOPPED (force) 10:06 | push, cancel |
-| `94912428` Distributed follow-up (Codex) | STOPPED (force) 10:06 | push, cancel |
-| `abffc02b` Pi Zero 2 W verification | STOPPED (force) 10:05, work done | cancel |
-| `13ab4055` Pi remote operation verification | CREATED | cancel |
-| `62fd1b9c` x | CREATED | cancel |
-| `a325bc58` Distributed LLM-Bridge | STOPPED | cancel |
-| `50bcb24b` Productionize LLM Bridge | CREATED | check it is superseded, then cancel |
-| `dd3800e2`, `956536d5` Demo | CANCELLED | none |
+| `48ead01a` Release readiness | STOPPED (force) 10:06 | push, delete |
+| `94912428` Distributed follow-up (Codex) | STOPPED (force) 10:06 | push, delete |
+| `abffc02b` Pi Zero 2 W verification | STOPPED (force) 10:05, work done | delete |
+| `13ab4055` Pi remote operation verification | CREATED | delete |
+| `a325bc58` Distributed LLM-Bridge | STOPPED | delete |
+| `50bcb24b` Productionize LLM Bridge | CREATED | check it is superseded, then delete |
 
-The overseer force-stopped the three running missions at 10:05 to 10:06 on 2026-11-08, killed the release mission's leftover Playwright loop (`~/llm-tools-infra/redesign-final/chain.sh` and its container) and three leaked chaos-test workers. Their in-flight work was interrupted: the #57 redesign verification run, the 50 repeat runs of the mobile Firefox worker test, the tmux start and soak flake agent, and Codex's #64 edits. In each worktree that mission used, run `git status` and `git log @{u}..` and push any commits that are not yet on the remote. Do not discard uncommitted changes: commit them to their branch as work in progress, or record them in the matching task. Worktrees with unpushed work at handover include `~/llm-tools-infra/wt/redesign` (`feat/web-redesign`), `~/llm-tools-infra/wt/prd038` (`feat/prd038-mission-delete`) and `~/dev/llm-tools-secapi` (`feat/security-api-completion`). Then run `llm-bridge cancel --mission ID` for every mission in the table.
+The overseer force-stopped the three running missions at 10:05 to 10:06 on 2026-11-08, killed the release mission's leftover Playwright loop (`~/llm-tools-infra/redesign-final/chain.sh` and its container) and three leaked chaos-test workers. Their in-flight work was interrupted: the #57 redesign verification run, the 50 repeat runs of the mobile Firefox worker test, the tmux start and soak flake agent, and Codex's #64 edits. In each worktree that mission used, run `git status` and `git log @{u}..` and push any commits that are not yet on the remote. Do not discard uncommitted changes: commit them to their branch as work in progress, or record them in the matching task. At handover the redesign worktree was fully pushed; check `~/llm-tools-infra/wt/prd038`, `~/dev/llm-tools-secapi` and `~/dev/llm-tools-prd` in particular. Then update the main checkout (`git -C ~/dev/llm-tools pull --ff-only`; it was still at `b421a58` at handover, which has no `mission delete`) and run `llm-bridge mission delete --mission ID --yes` for every mission in the table.
 
-`llm-bridge` on main has no mission delete yet. PRD-038 adds `llm-bridge mission delete`, and the last task deletes all of these missions once it is merged. Afterwards `llm-bridge mission list` shows only the new mission and the unrelated ones. Also check `systemd-inhibit --list` for `sleep` blockers (none were held at handover).
+PRD-038 `llm-bridge mission delete` is on main (PR #68). The stray missions `dd3800e2`, `956536d5` and `62fd1b9c` were already deleted with it on 2026-11-08. Afterwards `llm-bridge mission list` shows only the new mission and the unrelated ones. Also check `systemd-inhibit --list` for `sleep` blockers (none were held at handover).
 
 ### Step 2: create the mission and its tasks
 
@@ -61,15 +59,15 @@ add() { ./llm-bridge task add --mission "$M" --prompt "Work item $1 of $B. Read 
 add 1 "Merge #57 redesign"            1   "#57 merged, UXR rows [x] with proof"
 add 2 "Merge #71 flake fixes"         1   "#71 merged"
 add 3 "Merge #64 security and API"    1   "#64 merged, API SEC2 PK rows [x] or waived"
-add 4 "PRD-038 mission delete"        1   "mission delete merged with CLI, web and REST parity"
+add 4 "Fix llm-bridge finish"          1   "finish submits the exit command and confirms the provider exited, with a test"
 add 5 "Remaining PRD PAR UX DOG rows" 5   "those rows [x] on main"
 add 6 "Settle PI rows"                1   "PI rows [x] or waived on main"
 add 7 "Final review REV-002..008"     2,3,4,6,7 "REV rows [x] on main"
-add 8 "Close out and release 1.5.0"   8   "all rows [x], v1.5.0 tagged and released, stray missions deleted"
+add 8 "Close out and release 1.5.0"   8   "all rows [x], v1.5.0 tagged and released"
 ./llm-bridge start --mission "$M"
 ```
 
-Check the task numbers with `llm-bridge task list --mission "$M"` and the field name of the mission ID in the `--json` output before relying on them; adjust `--depends-on` if the numbering differs. Work item 5 depends on work item 4 so that new rows start from a main that already has `mission delete`.
+Check the task numbers with `llm-bridge task list --mission "$M"` and the field name of the mission ID in the `--json` output before relying on them; adjust `--depends-on` if the numbering differs. Work item 5 depends on work item 4 so that the two do not edit the same Bridge code at once.
 
 The Task 1 simulated proof: run a short native mission against a fake capacity file (`LLM_SCHEDULER_USAGE_JSON_FILE`, as `scripts/bridge_demo.py --storyboard limits` does) with `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1`, and confirm the events listed in its acceptance criteria and that the task continues. Optionally prove one real cycle with `./llm-sleep-soak --cycles 1 --period 3m`. This host has had flaky NVIDIA/xHCI resumes; if a wake lands far from its target, Ralph latches to awake-only waits for the rest of the run, so the mission still finishes, only without sleeping.
 
@@ -88,7 +86,7 @@ You lead the work that finishes LLM Bridge release 1.5.0, delegating it to subag
   - #57 `feat/web-redesign` (PRD-037, UXR-001 to UXR-046, plus the DOG row for live lists that patch rows in place). Ready for review, 3 Playwright jobs failing at `2ae30c2`. Newer commits exist in the worktree `~/llm-tools-infra/wt/redesign`. Remaining steps: rerun the redraw tests, run the worker spec 50 times on mobile Firefox without the click retry added by PR #70, remove that retry, get CI green, check the register, the first-load size limits and DOG-026, merge.
   - #64 `feat/security-api-completion` (API, SEC2 and PK rows), draft. All 21 checks passed at `d7a460b`; later pushes not yet checked. The Codex mission that owned it is stopped; its unpushed work is in `~/dev/llm-tools-secapi`.
   - #71 `fix/flake-tmux-start-soak`: fixes two intermittent tests (tmux outer socket reuse, short soak floors).
-- Unmerged branch with work in progress: `feat/prd038-mission-delete` (worktree `~/llm-tools-infra/wt/prd038`), PRD-038 `llm-bridge mission delete` with CLI, web and REST parity.
+- PRD-038 `llm-bridge mission delete` is merged (PR #68). The worktree `~/llm-tools-infra/wt/prd038` can be removed once it has nothing unpushed.
 - Register on main at handover (done / in progress / open / blocked):
   PRD 3/15/20, UXR 0/0/46 (all on #57), API 0/16/0, SEC2 4/15/1, PK 4/4/4, UX 0/11/0, PAR 2/3/9, REV 1/0/7, DOG 20/2/1, PI 55/13/1/5.
 - Not yet in any PR: the remaining PRD and PAR rows, the UX rows, DOG-021 (125 KB `mission.status` replies every ~10 s and replay of queued commands after a reconnect), worker memory growth, and REV-002 to REV-008.
@@ -98,7 +96,7 @@ You lead the work that finishes LLM Bridge release 1.5.0, delegating it to subag
 - No phone passkey tests: PK-012 and PI-VERIFY-013 are waived.
 - No 24-hour re-measurement on the Pi: DOG-023 is closed on local measurements.
 - Merge each PR as soon as its rows are `[x]` and its checks are green. No new scope.
-- Delete the stray missions `dd3800e2`, `956536d5` and `62fd1b9c` once PRD-038 `mission delete` is merged, using that command.
+- The stray missions `dd3800e2`, `956536d5` and `62fd1b9c` are deleted.
 - The full list is in `~/llm-tools-infra/watch/operator-decisions-2311.md`. The PRD-037 design decisions are in `~/llm-tools-infra/watch/prd037-overseer-review.md`.
 
 ## How to work
@@ -119,7 +117,7 @@ Each work item is one Bridge task in the mission (task numbers are the item numb
 1. **#57 redesign:** finish and merge it as listed above, in `~/llm-tools-infra/wt/redesign` only.
 2. **#71:** merge it when green.
 3. **#64 security and API:** finish the API, SEC2 and PK rows (API-013 redaction-list parity) in `~/dev/llm-tools-secapi`, starting from the work Codex left there, then merge.
-4. **PRD-038:** finish `feat/prd038-mission-delete` and merge it.
+4. **`llm-bridge finish`:** file a DOG row and fix the defect described in the setup section: `finish` must submit the exit command and confirm that the provider exited.
 5. **Remaining rows:** the open PRD, PAR and UX rows, DOG-021 and the worker memory growth. One PR per coherent group, each started from current main.
 6. **PI rows:** settle the open PI rows from existing evidence or the recorded waivers.
 7. **Final review:** after everything else is merged, run REV-002 to REV-008 against main.
@@ -128,7 +126,7 @@ Work item 8, close out:
 
 1. Update the controllers' main checkout to the final main.
 2. Remove the worker hotfix drop-in `~/.config/systemd/user/llm-bridge-worker.service.d/hotfix.conf` and restarts the worker.
-3. Delete every mission cancelled in step 1 of the setup, including `dd3800e2`, `956536d5` and `62fd1b9c`, with `llm-bridge mission delete`.
+3. Confirm that `llm-bridge mission list` no longer shows the missions deleted in setup step 1.
 4. Tag `v1.5.0` and publish the GitHub release.
 
 ## Running across usage-limit pauses
