@@ -427,6 +427,13 @@ not at a tmpfs.
 | Fixed binary, 400 MiB data + 200 MiB free pages, default options | 698 MiB (470 MiB in use) | backup 44 s (copy 445 MiB, written at 10.9 MiB/s on average against a 6 MiB/s cap, pacing is per statement step), `integrity_check` 0.4 s; slowest `/healthz` 131 ms, `/auth/state` 308 ms, event batch 248 ms |
 | Same, control without backup | 698 MiB | slowest `/healthz` 113 ms, `/auth/state` 118 ms, event batch 221 ms |
 
+The test runs the backup with the product default write cap (6 MiB/s). With `--max-mb-s 40` on
+the GitHub-hosted runners the copy saturated the disk that the coordinator also commits to, and
+one commit, with the request queued behind it, took 1.2 s on Linux and 2.9 s on Windows
+(CI run 42445440538, 174 MiB database, backup finished in 2.7 s). That is the disk contention
+described in decision D29, not a runtime-thread stall: `/healthz` stayed under 10 ms in both runs.
+A high cap is therefore a measurement option (`BACKUP_TEST_FLAGS`), not the test default.
+
 The control run shows the database's own retention work after start (the fixture holds
 53,000 finished commands with bulky results) as the main source of the larger figures.
 The test requires no polled request at or over 1 s and the backup to finish within 90 s.

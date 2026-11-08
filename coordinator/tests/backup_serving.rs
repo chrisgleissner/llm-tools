@@ -300,7 +300,9 @@ async fn a_backup_of_a_large_database_does_not_stop_serving() {
     let flags: Vec<String> = match std::env::var("BACKUP_TEST_FLAGS") {
         Ok(f) => f.split_whitespace().map(str::to_string).collect(),
         Err(_) if old_binary => vec![],
-        Err(_) => vec!["--max-mb-s".into(), "40".into(), "--assume-mb-s".into(), "100".into()],
+        // The product default write cap (6 MiB/s) is kept: at 40 MiB/s the copy saturated the shared disk of
+        // the CI runners and a commit (and the request queued behind it) took 1.2 s on Linux and 3 s on Windows.
+        Err(_) => vec!["--assume-mb-s".into(), "100".into()],
     };
     let live_mb = env_u64("BACKUP_TEST_MB", 100);
     let bloat_mb = env_u64("BACKUP_TEST_BLOAT_MB", 60);
