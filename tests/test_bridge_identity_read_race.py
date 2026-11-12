@@ -68,10 +68,48 @@ def test_identity_that_stays_unreadable_is_still_refused_and_nothing_is_signalle
 def test_a_different_identity_is_refused_at_once_without_rereading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pid, token, provider = _live_provider(tmp_path)
     try:
-        monkeypatch.setattr(bridge_runtime, "IDENTITY_READ_DELAY_SECONDS", 0.0)
+        calls = _flaky_token(monkeypatch, failures=0)  # reads are real; the wrapper only counts them
         with pytest.raises(PermissionError, match="persisted identity does not match"):
             _terminate_owned_process_group(pid, token + "-reused")
+        assert len(calls) == 1, "a readable, different identity is not read again"
         assert _alive(provider)
     finally:
         os.killpg(pid, signal.SIGKILL)
         provider.wait(timeout=5)
+
+
+def test_owned_tree_of_an_alive_root_with_unreadable_identity_raises_instead_of_returning_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pid, token, provider = _live_provider(tmp_path)
+    try:
+        real_info = bridge_runtime._proc_process_info
+        monkeypatch.setattr(bridge_runtime, "_proc_process_info", lambda p: None if p == pid else real_info(p))
+        _flaky_token(monkeypatch, failures=None)
+        with pytest.raises(PermissionError, match="cannot be read"):
+            bridge_runtime._owned_process_tree(pid, token)
+    finally:
+        os.killpg(pid, signal.SIGKILL)
+        provider.wait(timeout=5)
+
+
+def test_managed_process_stop_rereads_a_transiently_unreadable_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_tools.bridge_store import BridgeStore
+
+    pid, token, provider = _live_provider(tmp_path)
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    try:
+        mission = store.create_mission("m", "o", cwd=tmp_path)
+        store.set_mission_status(mission["id"], "RUNNING")
+        task_id = store.add_task(mission["id"], "work")
+        operation = store.begin_operation(task_id, iteration=1, station="codex")
+        store.finish_operation(operation, exit_code=0)
+        process_id = store.prepare_managed_process(mission["id"], task_id, kind="verifier")
+        store.mark_managed_process_running(process_id, process_pid=pid, process_start=token)
+        _flaky_token(monkeypatch, failures=2)
+        bridge_runtime.terminate_managed_processes(store, mission["id"])
+        assert store.get_managed_process(process_id)["status"] == "TERMINATED"
+        wait_for(lambda: not _alive(provider), 10, 0.05, "verifier ended")
+    finally:
+        store.close()
+        if _alive(provider):
+            os.killpg(pid, signal.SIGKILL)
+            provider.wait(timeout=5)

@@ -1776,8 +1776,12 @@ def _process_group_absent(process_group: int) -> bool:
     return False
 
 
-def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, Any]]:
-    """Snapshot a process and its current descendants with /proc start tokens."""
+def _owned_process_tree(root_pid: int, root_start: str, *, _rescanned: bool = False) -> dict[int, dict[str, Any]]:
+    """Snapshot a process and its current descendants with /proc start tokens.
+
+    A root that is missing from the scan while the process is alive had an unreadable identity: it is read
+    again (bounded), and one that stays unreadable raises ``PermissionError`` instead of yielding an empty tree.
+    """
     try:
         entries = os.scandir("/proc")
     except OSError as exc:
@@ -1793,6 +1797,10 @@ def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, A
     if root and root["start"] != root_start:
         raise PermissionError("provider PID no longer matches its persisted process identity")
     if root is None:
+        if not _settled_process_start_token(root_pid) and _process_alive_but_unverifiable(root_pid):
+            raise PermissionError("provider PID is alive but its persisted process identity cannot be read")
+        if not _rescanned and _process_start_token(root_pid):
+            return _owned_process_tree(root_pid, root_start, _rescanned=True)  # readable now: scan again
         return {}
     children: dict[int, list[int]] = {}
     for pid, info in processes.items():
@@ -1849,7 +1857,7 @@ def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
                 f"managed {process['kind']} process {process['id']} has no verified identity; refusing stop/recovery"
             )
         process_pid = int(pid)
-        current = _process_start_token(process_pid)
+        current = _settled_process_start_token(process_pid)
         status = "UNCERTAIN"
         if current == expected:
             try:
@@ -1858,8 +1866,8 @@ def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
             except PermissionError:
                 # It may have exited between the preflight and signal check.
                 # A live process with changed identity remains a hard refusal.
-                after = _process_start_token(process_pid)
-                if after:
+                after = _settled_process_start_token(process_pid)
+                if after or _process_alive_but_unverifiable(process_pid):
                     raise
         elif not current and _process_alive_but_unverifiable(process_pid):
             raise PermissionError(f"managed process pid {process_pid} is alive but its identity cannot be verified")
