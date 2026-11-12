@@ -56,8 +56,8 @@ class _Sim:
         monkeypatch.setattr(ralph_robin, "run_scheduler_inline", self.run)
         monkeypatch.setenv("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "1")
         monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "100000")
-        monkeypatch.delenv("LLM_TOOLS_FAILURE_BACKOFF_BASE", raising=False)
-        monkeypatch.delenv("LLM_TOOLS_FAILURE_BACKOFF_MAX", raising=False)
+        monkeypatch.setenv("LLM_TOOLS_FAILURE_BACKOFF_BASE", "30")
+        monkeypatch.setenv("LLM_TOOLS_FAILURE_BACKOFF_MAX", "900")
 
     def sleep(self, seconds: float) -> None:
         self.clock += int(seconds)

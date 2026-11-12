@@ -226,8 +226,6 @@ def _run_mission(
     usage_file.write_text(json.dumps({"codex": _ready_payload()}), encoding="utf-8")
     monkeypatch.setenv("LLM_SCHEDULER_USAGE_JSON_FILE", str(usage_file))
     monkeypatch.delenv("LLM_USAGE_NOW_EPOCH", raising=False)
-    # These tests cover the capacity wait; their stubbed wait does not advance the clock.
-    monkeypatch.setenv("LLM_TOOLS_FAILURE_BACKOFF_BASE", "0")
     template, attempts = _failing_provider(tmp_path, usage_file, exhausted_reset=exhausted_reset)
     calls: list[tuple[str, int]] = []
 
