@@ -1785,14 +1785,20 @@ def read_native_provider_wait(
             _PROVIDER_PROMPT_SEEN.popitem(last=False)
     idle_seconds = max(0, int(moment - changed_at))
     normalized_provider = provider.casefold().split("-", 1)[0]
-    question_count = _codex_queued_question_count(screen) if normalized_provider == "codex" else 0
-    questions = _codex_queued_questions(screen) if normalized_provider == "codex" else []
+    from . import bridge_providers
+
+    spec = bridge_providers.get(normalized_provider)
+    detector = spec.question_detector if spec is not None else bridge_providers.QUESTION_NONE
+    codex_queued = detector == bridge_providers.QUESTION_CODEX_QUEUED
+    claude_idle = detector == bridge_providers.QUESTION_CLAUDE_IDLE
+    question_count = _codex_queued_question_count(screen) if codex_queued else 0
+    questions = _codex_queued_questions(screen) if codex_queued else []
     if (
         not questions
         and session_id
         and cwd
-        and normalized_provider in {"codex", "claude"}
-        and (question_count or (idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS and normalized_provider == "claude"))
+        and (codex_queued or claude_idle)
+        and (question_count or (idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS and claude_idle))
     ):
         try:
             from .bridge_sessions import pending_operator_questions

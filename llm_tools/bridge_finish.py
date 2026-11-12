@@ -34,10 +34,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from . import bridge_providers
 from .bridge_store import BridgeStore, store_path
 from .bridge_states import ACTIVE_OPERATION_STATUSES
 
-DEFAULT_EXIT_COMMANDS = {"claude": "/exit", "codex": "/quit", "copilot": "/exit"}
 SETTLE_SECONDS = 0.3
 EXIT_TIMEOUT_SECONDS = 10.0
 TASK_SETTLE_SECONDS = 5.0
@@ -78,7 +78,7 @@ APPROVAL_PATTERNS = tuple(
     )
 )
 # A composer line: optional box-drawing border, then a prompt glyph.
-COMPOSER_LINE = re.compile(r"^[\s│┃|]*[›❯>](?:\s|$)")
+COMPOSER_LINE = bridge_providers.COMPOSER_LINE
 SCREEN_TAIL_LINES = 12
 SKIP_CHECK_ENV = "LLM_BRIDGE_FINISH_SKIP_CHECK"
 
@@ -183,7 +183,8 @@ def exit_command(provider: str, env: dict[str, str] | None = None) -> str | None
     """Exit command for ``provider``: an environment override, else the default."""
     source = os.environ if env is None else env
     override = source.get("LLM_BRIDGE_FINISH_" + "".join(c if c.isalnum() else "_" for c in provider.upper()), "").strip()
-    return override or DEFAULT_EXIT_COMMANDS.get(provider)
+    spec = bridge_providers.get(provider)
+    return override or (spec.exit_command if spec is not None else None)
 
 
 def _active_operation(store: BridgeStore, mission_id: str) -> dict[str, Any] | None:

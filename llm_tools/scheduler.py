@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import bridge_providers
 from . import common
 from . import config as toolconfig
 
@@ -491,11 +492,7 @@ MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "kilo", "opencod
 # real provider-rotation attempts.
 SLASH_MODEL_PROVIDERS = frozenset({"kilo", "opencode"})
 
-ZAI_LAUNCH_HINT = (
-    "--provider zai has no launch CLI. Launch Kilo or OpenCode instead: use a route "
-    '(e.g. [routes.kilo-zai-glm-47] with capacity.policy = "delegate" and provider = "zai") '
-    'or set [providers.kilo] capacity_provider = "zai"'
-)
+ZAI_LAUNCH_HINT = bridge_providers.ZAI_LAUNCH_HINT
 
 
 def provider_model_flags(provider: str, model: str) -> list[str]:
@@ -511,54 +508,18 @@ def model_missing_slash(provider: str, model: str | None) -> bool:
 
 
 def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
-    m = provider_model_flags(cfg.provider, cfg.model)
+    """The launch argv for ``cfg.provider``; the templates and refusals come from ``bridge_providers``."""
+    spec = bridge_providers.get(cfg.provider) or bridge_providers.REGISTRY["copilot"]
+    flags = provider_model_flags(cfg.provider, cfg.model)
     if cfg.attached:
-        if cfg.provider == "codex":
-            return ["codex", *m, "-C", cfg.cwd, prompt]
-        if cfg.provider == "claude":
-            return ["claude", *m, prompt]
-        if cfg.provider == "kilo":
-            return ["kilo", *m, "--prompt", prompt]
-        if cfg.provider == "opencode":
-            return ["opencode", *m, "--prompt", prompt]
-        if cfg.provider == "minimax":
-            common.err("MiniMax mmx exposes text chat, not a native engineering session for LLM Bridge")
-            raise SystemExit(2)
-        if cfg.provider == "zai":
-            # zai is a capacity-only provider: it is launched through a
-            # route (``provider=kilo``/``opencode``), not directly. A bare
-            # ``--provider zai`` invocation has no launch CLI, so we surface
-            # the contract here.
-            common.err(ZAI_LAUNCH_HINT)
-            raise SystemExit(2)
-        return ["copilot", *m, "-C", cfg.cwd, "-i", prompt]
-    if cfg.provider == "codex":
-        return ["codex", "exec", *m, "-C", cfg.cwd, prompt]
-    if cfg.provider == "claude":
-        if cfg.claude_stream_json:
-            return ["claude", "--print", "--output-format", "stream-json", "--verbose", *m, prompt]
-        return ["claude", "--print", *m, prompt]
-    if cfg.provider == "kilo":
-        # kilo uses `--dir` for the working directory and ``-m, --model
-        # provider/model`` to pick a model (e.g. ``-m zai/glm-4.7``). We
-        # do not inject any permission-bypassing flag (e.g. ``--auto``):
-        # whether a headless run may act without prompting is governed by
-        # the user's own Kilo `permission` config, not by this framework.
-        return ["kilo", "run", *m, "--dir", cfg.cwd, prompt]
-    if cfg.provider == "opencode":
-        # opencode uses `--dir` (not `-C`) for the working directory. The
-        # model flag uses the same ``provider/model`` convention as Kilo
-        # (e.g. ``-m zai/glm-5.2``). We do not inject any
-        # permission-bypassing flag: whether a headless run may act
-        # without prompting is governed by the user's own OpenCode
-        # `permission` config, not by this framework.
-        return ["opencode", "run", *m, "--dir", cfg.cwd, prompt]
-    if cfg.provider == "minimax":
-        return ["mmx", "text", "chat", "--message", prompt]
-    if cfg.provider == "zai":
-        common.err(ZAI_LAUNCH_HINT)
+        unavailable, template = spec.native_unavailable, spec.native_argv
+    else:
+        unavailable = spec.headless_unavailable
+        template = spec.headless_stream_argv if cfg.claude_stream_json and spec.headless_stream_argv else spec.headless_argv
+    if unavailable is not None or template is None:
+        common.err(unavailable or f"{spec.name} has no launch command")
         raise SystemExit(2)
-    return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]
+    return bridge_providers.expand(template, model_flags=flags, cwd=cfg.cwd, prompt=prompt)
 
 
 _CODEX_GLOBAL_OPTIONS_WITH_VALUE = {
