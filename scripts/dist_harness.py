@@ -55,6 +55,8 @@ LLM_BRIDGE = ROOT / "llm-bridge"
 HOST = "127.0.0.1"
 DB_NAME = "coordinator.sqlite3"
 WORKER_DB_NAME = "bridge.sqlite3"
+MAX_DONE_COMMANDS = 5_000  # coordinator db.rs: finished commands kept in the journal, oldest deleted first
+RETENTION_ORDER_MARGIN = 200  # the coordinator deletes by completion time, the ledger is in issue order: exempt a few more of the oldest
 MAX_EVENTS_PER_WORKER = 50_000  # coordinator default `max_events_per_worker`
 
 
@@ -957,6 +959,7 @@ class Verification:
     unfinished: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     uncertain: list[str] = field(default_factory=list)
+    pruned_by_retention: int = 0  # accepted commands older than the journal row cap: only their worker-side effect is checked
 
     @property
     def ok(self) -> bool:
@@ -965,7 +968,7 @@ class Verification:
     def to_json(self) -> dict[str, Any]:
         return {"issued": self.issued, "accepted": self.accepted, "outcomes": dict(self.outcomes), "unfinished": self.unfinished[:20],
                 "unfinished_count": len(self.unfinished), "violations": self.violations[:50], "violation_count": len(self.violations),
-                "uncertain": self.uncertain[:20], "uncertain_count": len(self.uncertain), "ok": self.ok}
+                "uncertain": self.uncertain[:20], "uncertain_count": len(self.uncertain), "pruned_by_retention": self.pruned_by_retention, "ok": self.ok}
 
 
 class Ledger:
@@ -1039,9 +1042,14 @@ def verify_exactly_once(ledger: Ledger, api: ApiClient, nodes: dict[str, WorkerN
     report = Verification()
     items = list(ledger.mutating())
     report.issued = len(items)
+    # The coordinator deletes the oldest finished commands above MAX_DONE_COMMANDS rows (and old audit rows), so in a long run the
+    # journal and the audit no longer hold them. They are still checked on the worker: an effect more than once is a violation.
+    accepted_items = [item for item in items if item.accepted]
+    pruned = {item.request_id for item in accepted_items[:max(0, len(accepted_items) - MAX_DONE_COMMANDS + RETENTION_ORDER_MARGIN)]}
+    report.pruned_by_retention = len(pruned)
     deadline = time.monotonic() + settle_seconds
     entries: dict[str, dict[str, Any]] = {}
-    pending = [item for item in items if item.accepted]
+    pending = [item for item in accepted_items if item.request_id not in pruned]
     while pending:  # at least one pass, so a zero settle time still looks at every command once
         still = []
         for item in pending:
@@ -1056,6 +1064,10 @@ def verify_exactly_once(ledger: Ledger, api: ApiClient, nodes: dict[str, WorkerN
         time.sleep(1.0)
     for item in items:
         report.accepted += int(item.accepted)
+        if item.request_id in pruned:
+            if (count := nodes[item.worker].marker_count(item.marker or "")) > 1:
+                report.violations.append(f"{item.request_id}: applied {count} times (duplicate)")
+            continue
         if audit is not None and item.accepted and audit.get(item.request_id, 0) != 1:
             report.violations.append(f"{item.request_id}: {audit.get(item.request_id, 0)} submit audit entries, expected 1")
         node = nodes[item.worker]

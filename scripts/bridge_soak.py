@@ -46,7 +46,7 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_NO_BINARY = 3
 MIN_SAMPLES_AFTER_WARMUP = 4
-WARMUP_SECONDS = 1200.0  # memory of controllers, workers and the coordinator is settled 20 minutes after the start (soak-and-chaos.md)
+WARMUP_SECONDS = 1800.0  # controller memory is settled 30 minutes after the start on a 2-core runner, and 1800 s is two periods of the 900 s retention pass of the capacity refresh worker (soak-and-chaos.md)
 WARMUP_MAX_SHARE = 2 / 3  # a short run cannot ignore more than two thirds of itself
 
 # Items that need features which are not on this branch (PR #31); each names what it expects.

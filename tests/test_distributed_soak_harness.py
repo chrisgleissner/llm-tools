@@ -282,6 +282,29 @@ def test_verify_checks_the_coordinator_audit_when_given_one():
     assert ok.ok and "2 submit audit entries" in twice.violations[0] and "0 submit audit entries" in missing.violations[0]
 
 
+def test_verify_does_not_expect_commands_the_coordinator_pruned_above_its_row_cap(monkeypatch):
+    # The coordinator keeps 5000 finished commands; a 4.5-hour soak issues 37000, so the oldest are legitimately gone from journal and audit.
+    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 2)
+    monkeypatch.setattr(h, "RETENTION_ORDER_MARGIN", 0)
+    ledger = h.Ledger("t")
+    issued = []
+    for _ in range(4):
+        item, _ = ledger.add_task_request("w", "m1")
+        item.accepted = True
+        issued.append(item)
+    markers = {item.marker: 1 for item in issued}
+    entries = {item.request_id: _done("applied") for item in issued[2:]}
+    node = FakeNode(markers, {item.request_id: ["APPLIED"] for item in issued})
+    report = h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0, audit=h.Counter({i.request_id: 1 for i in issued[2:]}))  # type: ignore[arg-type]
+    assert report.ok and report.pruned_by_retention == 2
+    # Without the cap the same journal is a loss, and a pruned command whose effect was applied twice is still a duplicate.
+    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 10)
+    assert not h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0).ok  # type: ignore[arg-type]
+    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 2)
+    node.markers[issued[0].marker] = 2
+    assert "duplicate" in h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0).violations[0]  # type: ignore[arg-type]
+
+
 def test_verify_requires_exactly_one_command_row_on_the_worker():
     assert "command rows" in _scenario("applied", effects=1, rows=2).violations[0]
 
@@ -833,6 +856,35 @@ def test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per
     summed = h.check_slope("workers_rss_kib", [(s["t"], s["workers"]["rss_kib"]) for s in _worker_fleet(2048.0)],
                            h.SlopeBound(3 * 1024 * 4, 1024 * 4, "KiB"), warmup_seconds=1200.0)
     assert summed.verdict == "pass"
+
+
+# Median resident size (MiB) of the 50 controllers, one sample every 60 s from t=60 s, recorded in the 4.5-hour nightly run 43134569798
+# (GitHub-hosted runner). The jumps at 900 s and 1800 s are the 900 s retention pass of the capacity refresh worker; the
+# series is still settling until about 1800 s. The first 30 values are the same as in the 30-minute nightly run of that day.
+RECORDED_CONTROLLER_MEDIAN_MIB = [
+    32.068, 32.225, 32.377, 32.508, 32.6, 32.705, 32.828, 32.936, 33.051, 33.176, 33.271, 33.387, 33.496, 33.613, 35.551,
+    34.822, 34.896, 35.006, 35.078, 35.178, 35.551, 35.754, 35.814, 35.863, 35.887, 35.9, 35.922, 35.928, 35.943, 36.867,
+    36.035, 36.049, 36.07, 36.074, 36.088, 36.094, 36.119, 36.137, 36.145, 36.156, 36.164, 36.184, 36.188, 36.191, 36.441]
+
+
+def _recorded_controllers(samples: int, leak_kib_per_hour: float = 0.0, leak_from: float = 1800.0) -> dict[str, list[tuple[float, float]]]:
+    series = [((index + 1) * 60.0, mib * 1024.0) for index, mib in enumerate(RECORDED_CONTROLLER_MEDIAN_MIB[:samples])]
+    return {str(pid): [(t, kib + pid * 8.0 + leak_kib_per_hour / 3600.0 * max(0.0, t - leak_from)) for t, kib in series] for pid in range(5)}
+
+
+def test_recorded_nightly_series_fails_the_old_30_minute_gate_and_passes_the_45_minute_gate():
+    bound = h.SlopeBound(1536, 512, "KiB", per_process=True)
+    old = h.check_per_process_slope("controllers_rss_kib", _recorded_controllers(30), bound, warmup_seconds=1200.0)
+    assert old.verdict == "fail" and old.slope_per_hour > 4000  # the 1800 s retention pass lands on the last sample of a 10-minute fit
+    new = h.check_per_process_slope("controllers_rss_kib", _recorded_controllers(45), bound, warmup_seconds=bridge_soak.WARMUP_SECONDS)
+    assert bridge_soak.WARMUP_SECONDS == 1800.0 and new.verdict == "pass" and abs(new.slope_per_hour) < 1536
+
+
+def test_the_45_minute_gate_still_fails_a_leak_above_what_its_floor_can_resolve():
+    bound = h.SlopeBound(1536, 512, "KiB", per_process=True)
+    # A 900 s fit can only see a rise above the 512 KiB floor: 2.5 MiB per hour is 640 KiB in the window. Smaller leaks are for the long run.
+    leaking = _recorded_controllers(45, leak_kib_per_hour=2.5 * 1024)
+    assert h.check_per_process_slope("controllers_rss_kib", leaking, bound, warmup_seconds=1800.0).verdict == "fail"
 
 
 def test_a_growing_worker_command_backlog_is_reported():
