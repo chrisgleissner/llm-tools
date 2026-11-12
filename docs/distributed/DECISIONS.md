@@ -626,3 +626,7 @@ A mission created through the coordinator may name only a verifier that the work
 ## D53 Old mode names are normalised on read, not migrated (FIND-018)
 
 Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
+
+## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
+
+Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.
