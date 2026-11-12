@@ -1998,14 +1998,30 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         delay = backoff.record_failure(key, common.now_epoch())
         common.log_event(logs, "failure_backoff", {"key": key, "consecutive_failures": backoff.failures.get(key, 0), "delay_seconds": delay})
 
-    def backoff_only_wait() -> bool:
-        """True when failure backoff, not a known capacity reset, is what the rotation waits for."""
+    def backoff_only_wait(key: str) -> bool:
+        """True when failure backoff, not a capacity limit, is what the rotation waits for.
+
+        A re-read of capacity that shows the failed provider unusable, or any
+        known reset, means the failure was a rate limit: its backoff is cleared
+        and the existing capacity wait applies.
+        """
         if not backoff.blocked(common.now_epoch()):
             return False
         try:
-            return soonest_wait_until(refresh_blocked_selection()) is None
+            fresh = refresh_blocked_selection()
         except Exception:  # a failed re-read keeps the existing wait path
             return False
+        decision = fresh.get("decision") if isinstance(fresh.get("decision"), dict) else {}
+        limited = (
+            int(fresh.get("index", -1)) == -1
+            or bool(fresh.get("all_rate_limited"))
+            or soonest_wait_until(fresh) is not None
+            or decision.get("usable") is False
+        )
+        if limited:
+            backoff.record_success(key)
+            return False
+        return True
 
     def out_of_time() -> bool:
         return bool(max_duration) and (monotonic() - start_monotonic) >= max_duration
@@ -2230,7 +2246,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
             if len(skipped) >= rotation_size:
                 # All providers aborted this pass. Do not stop: wait and retry.
-                if backoff_only_wait():
+                if backoff_only_wait(selected_route_id if selected_route_id else selected_provider):
                     skipped = set()
                     continue
                 if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort", bridge_wait_interrupted if bridge_hooks is not None else None, **suspend_kwargs()):
@@ -2257,7 +2273,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
         if len(skipped) >= rotation_size:
             # Every provider hard-failed this pass. Do not stop: wait and retry.
-            if backoff_only_wait():
+            if backoff_only_wait(selected_route_id if selected_route_id else selected_provider):
                 skipped = set()
                 continue
             if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed", bridge_wait_interrupted if bridge_hooks is not None else None, **suspend_kwargs()):
