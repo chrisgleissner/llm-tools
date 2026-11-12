@@ -70,7 +70,7 @@ Each is a line in the report. Any failure gives exit status 1.
 | Check | Rule |
 |---|---|
 | Commands exactly once | After the load stops, every accepted command reaches `done` within `--settle-seconds`. Then the coordinator journal, the worker `commands` table and the worker `tasks` table are compared. Failures: an `applied` command whose effect is missing (silent loss); an effect present more than once; an effect present for a `rejected` or `failed` command (phantom); a command row count other than one; an accepted command missing from the journal; a command that never finished. `uncertain` outcomes are allowed and counted, and their effect may exist at most once. |
-| Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1200, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 20 minutes (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers and the workers are judged one process at a time (see the table below). |
+| Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1800, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 30 minutes on a hosted runner (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers and the workers are judged one process at a time (see the table below). |
 | Memory ceilings | The largest sample of any single controller or worker, and of the coordinator, stays under the absolute ceilings in the table below. A process that settles at a size it should never reach fails even when its slope is flat. The warm-up is included. |
 | Database explained by rows | At every sample the coordinator database (main file plus WAL) is at most 8 MiB + 4096 bytes times the row count of `events`, `commands` and `audit`. The database slope floor also grows with the new rows, so the slope check fails only for growth that rows do not explain. |
 | Worker command backlog | At no sample does one worker have more than 100 unfinished commands (any state but `done`, from `command_queue_depths` in `GET /api/v1/diagnostics`, sampled with the resources). The measured peak over a 4.5-hour run was 2 commands in total. A growing backlog fails during the run, not only as the final `unfinished` count. |
@@ -129,7 +129,7 @@ controller's database writes.
 | Where | Size | Why |
 |---|---|---|
 | Pull requests (`soak-chaos` job in `test.yml`) | 5 minutes, 3 workers, 10 missions, sample every 15 s | The PRD asks for 30 minutes in pull-request CI. That would make every pull request wait for a run that is longer than the rest of the suite, on a 2-4 vCPU runner shared with the Rust, web and cross-platform jobs. The same harness runs in 5 minutes with about 20 samples (15 after warm-up), which catches a stall, a leak that grows by megabytes per minute, a latency regression and any exactly-once violation. The 30-minute run is executed every night. |
-| Nightly `soak-30min` (`soak-nightly.yml`) | 30 minutes, 10 workers, 50 missions, sample every 60 s | The PRD's scaled-down run. |
+| Nightly `soak-30min` (`soak-nightly.yml`) | 45 minutes, 10 workers, 50 missions, sample every 60 s | The PRD's scaled-down run. |
 | Nightly `soak-long` | 4.5 hours (16 200 s), same size | A GitHub-hosted job is limited to 6 hours, so 24 hours cannot run there. |
 | By hand (`workflow_dispatch`, input `duration` and `runner`) | 24 hours (`86400`) on a self-hosted runner | The full PRD run. |
 
@@ -264,6 +264,50 @@ failed `workers_rss_kib` (3.7 MiB per hour per worker) and `coordinator_rss_kib`
 (this was judged against 3 MiB per hour summed over the fleet; the bound is now 0.5 MiB per hour per worker, see Worker memory), and the coordinator's growth is
 explained by its row count (256 bytes per row allowed, 81 to 96 measured). The coordinator figures come from
 the debug build; the release build is smaller.
+
+### Nightly controller memory failure (FIND-001, 2026-11)
+
+The nightly 30-minute soak failed four nights running on `controllers_rss_kib` (median slope 4518 to 5578 KiB per
+hour against 1536, fitted rise 751 to 924 KiB per controller against 512), on a 600 s window after the 1200 s warm-up.
+The 4.5-hour run passed the same check on the same nights (median slope 0.73 to 0.77 MiB per hour from 1200 s).
+
+**Cause: the fit window, not a leak.** The median per-controller series of the hosted runs (one sample per minute,
+runs 43134569798 and 42939042206) has two features that the 600 s window cannot separate from a slope:
+
+- The controller's capacity refresh worker runs a retention pass every 900 s (`bridge_refresh.PRUNE_INTERVAL_SECONDS`).
+  Each pass raises the median by 1 to 2 MiB for one sample and the memory falls back by about 0.9 MiB in the next
+  minute (900 s: 34.4 to 36.4 to 35.7 MiB; 1800 s: 36.8 to 37.8 to 36.9 MiB). The window 1200 s to 1800 s ends on
+  such a peak, so the last point alone adds about 1 MiB to a fit over 10 points.
+- Growth is not finished at 1200 s on a hosted runner: 35.7 MiB at 960 s, 36.9 MiB at 1860 s, 37.0 MiB at 2400 s, then
+  +0.03 MiB per 3 minutes. D16 measured the plateau at about 20 minutes on an 8-core host.
+
+In the 4.5-hour run the same median goes from 37.0 MiB (2400 s) to 39.2 MiB (14 400 s), one step of +1.0 MiB at 9007 s
+(the retention pass again) and otherwise flat. That is 0.6 MiB per hour, inside the bound, and it does not accelerate.
+No allocation grows with the run: nothing was changed in the controller.
+
+Fits of the recorded series (`check_per_process_slope`, bound 1536 KiB per hour above a rise of 512 KiB):
+
+| Series | Warm-up | Window | Median slope per hour | Verdict |
+|---|---|---|---|---|
+| 30-minute run, 4 nights | 1200 s | 600 s | 4518, 4806, 5550, 5578 KiB | fail (the old gate) |
+| 4.5-hour run, 4 nights, first 2700 s | 1800 s | 900 s | -412 to +474 KiB | pass |
+| 4.5-hour run, first 3600 s | 1800 s | 1800 s | 289 to 386 KiB | pass |
+| 4.5-hour run, whole | 1800 s | 14 400 s | 664 to 749 KiB | pass |
+
+**Change.** `--warmup-seconds` defaults to 1800 s (it is still capped at two thirds of a run). The nightly `soak-30min`
+job runs 2700 s, so its window is 900 s: two peaks of the retention pass at its ends, 15 samples. The job id and the
+report name keep `soak-30min`. A fit of 900 s resolves a rise of 512 KiB (the floor), that is 2 MiB per hour; a controller
+leak between 1.5 and 2 MiB per hour is seen only by the 4.5-hour run. `tests/test_distributed_soak_harness.py` holds the
+recorded series (`RECORDED_CONTROLLER_MEDIAN_MIB`): the old gate fails it, the new one passes it, and a synthetic leak of
+2.5 MiB per hour added after 1800 s fails the new gate.
+
+**Second nightly failure: exactly once at 4.5 hours.** The long run also failed `commands exactly once` on all four
+nights with about 30 000 violations of the form `accepted but missing from the journal` and `0 submit audit entries`.
+The coordinator keeps at most 5000 finished commands (`MAX_DONE_COMMANDS`, oldest deleted first) and 100 000 audit rows,
+and the run issues about 37 000 commands (2 per second). The older commands are gone by design. `verify_exactly_once`
+now exempts the accepted commands older than the newest 5000 (plus a margin of 200, because the coordinator deletes by
+completion time) from the journal and audit checks and still checks their effect on the worker (more than once is a
+violation). The report carries `pruned_by_retention`.
 
 ### Worker memory
 
