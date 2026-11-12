@@ -1,0 +1,17 @@
+# PROV requirements
+
+Requirement text is taken from spec-addendum-2026-11-12.md.
+
+- PROV-001: One provider registry. A module `llm_tools/bridge_providers.py` holds one typed record per provider: native argv, headless argv, session identity source, resume form, exit command, input-prompt detector, limit-notice patterns, question detector, notice delivery, and whether the prompt can be passed outside the process arguments. `bridge_sessions`, `bridge_finish`, `bridge_limit_notice`, `bridge_task_notice`, `bridge_runtime` and `terminal` read the registry.
+- PROV-002: Capability matrix from the registry. `llm-bridge doctor --capabilities` (and `--json`) prints, per provider and capability, `supported`, `unsupported` or `unverified`, with the evidence date and CLI version of `PROV-010`. `DOCS-003` is generated from it; a test compares the document with the registry.
+- PROV-003: Kilo session capture and exact resume. Bridge records the session ID that Kilo creates for the run it started (never "the newest session"), and resumes exactly that session. Tests: session-boundary tests as for Codex, with a fake Kilo that writes the session store.
+- PROV-004: OpenCode session capture and exact resume. As `PROV-003`.
+- PROV-005: Finish for every native provider. Kilo and OpenCode have a default exit command; Copilot's is tested. `finish` never types into a pane that is not at the provider's input prompt.
+- PROV-006: Mid-run limit detection for Copilot, Kilo and OpenCode from screen fixtures captured from the real CLIs. Where a CLI prints no notice, the registry says so, and the documented behaviour is the existing status-75 route block. No pattern may match ordinary agent output; each pattern has a negative fixture.
+- PROV-007: Question and blocked-prompt detection. Claude Code permission and question screens are detected from the screen structure, not only by the 60 s idle rule. Copilot, Kilo and OpenCode get detectors from fixtures. A detected question raises `needs you` within one refresh.
+- PROV-008: Task notices and steering are delivered to Copilot, Kilo and OpenCode with the same delivery states as Claude Code and Codex (`DOG-017`).
+- PROV-009: Routes. A model-pinned route keeps its `--model` on launch and on resume, and reports the capability row of its launch CLI. Test: a native end-to-end run of a Kilo route and an OpenCode route with fake CLIs, including one resume.
+- PROV-010: Live evidence. `scripts/bridge_provider_probe.py --provider NAME` runs one short prompt on the real CLI and records CLI version, launch, reply, stop, exact resume and context recall in `docs/llm-bridge/evidence/<provider>.json`. It uses a private state directory and costs provider credits, so the operator starts it. Evidence exists for Claude Code, Codex, Copilot, Kilo and OpenCode at the versions installed at release time.
+- PROV-011: Version drift. Bridge records the provider CLI version per run. `doctor` warns when the installed minor version is newer than the evidence of `PROV-010`.
+- PROV-012: Unsupported providers say what to do. Starting a native mission on MiniMax or z.ai fails with a message that names the route alternative. Test for both.
+- PROV-013: Prompts outside process arguments. Where the CLI accepts the prompt from a file or standard input, Bridge uses that for Kilo and OpenCode, so the prompt is not visible in the process list. Where it does not, the registry and `operations.md` say so.

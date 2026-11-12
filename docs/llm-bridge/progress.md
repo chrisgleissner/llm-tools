@@ -1,3 +1,5 @@
+> Historical: describes release 1.1.1 (progress). Current status: [specification register](../distributed/SPEC_STATUS.md).
+
 # LLM Bridge implementation progress
 
 ## Durable contracts
