@@ -44,6 +44,29 @@ Three facts explain most of Bridge's behaviour:
    Add `--providers claude,codex` to choose the rotation, or `--verifier
    'python -m pytest -q'` to check each finished task.
 
+   Bridge can commit and push for you. `--commit per-task` makes Bridge itself
+   commit the mission's folder (the worktree when isolated) after the verifier
+   passes for each task; the provider is told not to commit. The commit
+   message is `Task N: <title>` with the mission and task numbers and the
+   verifier summary, and the author comes from the repository's git
+   configuration. A task that changed nothing records "nothing to commit".
+   `--push per-task` or `--push per-mission` (needs `--commit per-task`) pushes
+   to the branch's upstream, or to `branch.<name>.pushRemote` / `remote.pushDefault`
+   with the same branch name. Bridge never force-pushes, never chooses a remote,
+   and refuses to push to the repository's default branch unless the mission
+   was created with `--push-default-branch`. A failed commit or push holds the
+   mission (status PAUSED, shown as `Held`) and records an event; fix the cause
+   and run `llm-bridge start`. Change both later with `llm-bridge mission set
+   --commit ... --push ...`.
+
+   `--budget-runs N`, `--budget-minutes N`, `--budget-provider-changes N` and
+   `--budget-spend AMOUNT --budget-currency CODE` limit a mission. When one is
+   reached, before the next provider run, the mission is held with the reason
+   `budget-exhausted` and a `Budget` line in `llm-bridge status` shows the use.
+   Spend counts only what a provider reports in that currency. Raise a limit
+   with `llm-bridge mission set --budget-runs N` (or `none` to remove it); the
+   mission resumes at once when no limit is reached any more.
+
    Add `--isolate worktree` to run the mission in its own git worktree, so
    several missions can work on one repository at the same time. Bridge
    creates the worktree under its state directory on a new branch

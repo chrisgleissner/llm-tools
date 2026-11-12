@@ -344,6 +344,15 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
                 rows.append(_review_hold_text(number))
                 continue
             rows.append(approval_row("console", [number]))
+    budget = _dict(data.get("budget"))
+    if budget.get("hold_reason"):
+        from .bridge_budget import summary
+
+        limits, used = _dict(budget.get("limits")), _dict(budget.get("used"))
+        if budget["hold_reason"] == "budget-exhausted":
+            rows.append(f"held: budget exhausted ({_text(summary(limits, used), 160)}){_SEP}raise a limit with: llm-bridge mission set --budget-runs N")
+        else:
+            rows.append(f"held: {_text(budget['hold_reason'], 40)} · {_text(budget.get('hold_detail') or '', 160)}{_SEP}fix it, then /resume")
     pending = _dict(data.get("proposal_counts")).get("PENDING")
     if isinstance(pending, (int, float)) and pending:
         rows.append(proposals_row("console", int(pending)))

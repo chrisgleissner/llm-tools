@@ -1588,7 +1588,28 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     verifier = _verifier_config(args)
     if verifier:
         config["verifier"] = verifier
+    config.update(_orchestration_config(args))
     return prompt, config
+
+
+def _orchestration_config(args: argparse.Namespace) -> dict[str, Any]:
+    """Commit, push and budget settings from the create options; only the ones given are saved. Raises ``ValueError`` when invalid."""
+    from . import bridge_budget, bridge_publish
+
+    commit, push = getattr(args, "commit", None), getattr(args, "push", None)
+    out: dict[str, Any] = {}
+    if commit is not None or push is not None:
+        out["commit"], out["push"] = bridge_publish.validate_policy(commit, push)
+    if getattr(args, "push_default_branch", False):
+        out["push_default_branch"] = True
+    limits: dict[str, Any] = {key: getattr(args, name, None) for key, name in (("runs", "budget_runs"), ("wall_seconds", "budget_minutes"), ("provider_changes", "budget_provider_changes"), ("spend", "budget_spend"), ("currency", "budget_currency"))}
+    budget: dict[str, Any] = {}
+    for key, value in limits.items():
+        if value not in (None, 0, 0.0):
+            budget[key] = int(value) * 60 if key == "wall_seconds" else value
+    if budget:
+        out["budget"] = bridge_budget.validate_budget(budget)
+    return out
 
 
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -1864,6 +1885,61 @@ def _set_mission_policy(store: BridgeStore, mission_id: str, *, teams: str | Non
         "execution_policy": bridge_policy.effective_settings(resolved),
         "detail": f"Teams {'on' if resolved['team_policy_enabled'] else 'off'} · token spend {resolved['token_spend']}",
     }
+
+
+def orchestration_patch_params(args: argparse.Namespace) -> dict[str, Any]:
+    """The commit, push and budget options of ``mission set`` as typed ``mission.settings.patch`` parameters."""
+    return {"commit": args.commit, "push": args.push, "budget_runs": args.budget_runs, "budget_minutes": args.budget_minutes,
+            "budget_provider_changes": args.budget_provider_changes, "budget_spend": args.budget_spend, "budget_currency": args.budget_currency}
+
+
+def validated_orchestration_patch(mission_id: str, params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Validate the commit, push and budget parts of a settings patch against the mission's current values.
+
+    Returns ``(policy values to save, new budget or None when no budget option was given)``; raises ``ValueError``
+    with an operator-facing message before anything is written. For a budget limit, 0 removes the limit.
+    """
+    from . import bridge_budget, bridge_publish
+
+    if all(value is None for value in params.values()):
+        return {}, None
+    with open_store(readonly=True) as reader:
+        config = reader.get_mission(mission_id).get("config") or {}
+    policy: dict[str, Any] = {}
+    if params.get("commit") is not None or params.get("push") is not None:
+        commit, push = bridge_publish.validate_policy(
+            params["commit"] if params.get("commit") is not None else config.get("commit"),
+            params["push"] if params.get("push") is not None else config.get("push"))
+        policy = {"commit": commit, "push": push}
+    budget: dict[str, Any] | None = None
+    names = (("runs", "budget_runs"), ("wall_seconds", "budget_minutes"), ("provider_changes", "budget_provider_changes"), ("spend", "budget_spend"), ("currency", "budget_currency"))
+    given = {key: params[name] for key, name in names if params.get(name) is not None}
+    if given:
+        budget = dict(bridge_budget.budget_of(config))
+        for key, value in given.items():
+            if key == "currency":
+                budget[key] = value
+            elif value == 0:
+                budget.pop(key, None)
+            else:
+                budget[key] = int(value) * 60 if key == "wall_seconds" else value
+        budget = bridge_budget.validate_budget(budget)
+    return policy, budget
+
+
+def _set_mission_commit_policy(store: BridgeStore, mission_id: str, values: dict[str, Any]) -> dict[str, Any]:
+    store.set_mission_config_values(mission_id, values, event_kind="mission-commit-policy-changed")
+    return {"commit": values["commit"], "push": values["push"], "detail": f"Commit {values['commit']} · push {values['push']}"}
+
+
+def _set_mission_budget(store: BridgeStore, mission_id: str, budget: dict[str, Any]) -> dict[str, Any]:
+    """Save the budget. A mission held for its budget resumes when the new limits are no longer reached."""
+    from . import bridge_budget
+
+    store.set_mission_config_values(mission_id, {"budget": budget}, event_kind="mission-budget-changed")
+    released = bridge_budget.release_if_raised(store, mission_id)
+    detail = "Budget " + bridge_budget.summary(budget) + (" · mission resumed" if released else "")
+    return {"budget": budget, "budget_released": released, "detail": detail}
 
 
 def _set_mission_suspend_when_rate_limited(store: BridgeStore, mission_id: str, enabled: bool) -> dict[str, Any]:
@@ -2533,12 +2609,13 @@ def _main(argv: list[str] | None = None) -> int:
                         "token_spend": args.token_spend,
                         "suspend_when_rate_limited": None if args.suspend_when_rate_limited is None else args.suspend_when_rate_limited == "on",
                         "colour": None,
+                        **orchestration_patch_params(args),
                     }, mission_id=args.mission))
                     _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
                     return 0
                 elif args.mission_action == "settings":
                     result = commands.dispatch(commands.CommandRequest("mission.settings.get", mission_id=args.mission))
-                    _print_result(result, bool(getattr(args, "json", False)), lambda value: f"Auto-continue {'on' if value['auto_continue'] else 'off'} · capacity-wait suspend {'on' if value['suspend_when_rate_limited'] else 'off'} · teams {'on' if value['execution_policy']['teams_enabled'] else 'off'} · token spend {value['execution_policy']['token_spend']}")
+                    _print_result(result, bool(getattr(args, "json", False)), fmt.format_mission_settings)
                     return 0
                 elif args.mission_action in {"colour", "color"}:
                     result = commands.dispatch(commands.CommandRequest("mission.settings.patch", {

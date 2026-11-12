@@ -156,6 +156,8 @@ def validate_target(name: str) -> str:
 
 def _is_kind(value: Any, kind: type) -> bool:
     # bool is an int subclass; never accept True where a number is expected.
+    if kind is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     return isinstance(value, kind) and not (kind is int and isinstance(value, bool))
 
 
@@ -269,18 +271,23 @@ def _mission_settings_get(store: BridgeStore | None, request: CommandRequest, pa
     assert store is not None and request.mission_id is not None
     mission = store.get_mission(request.mission_id)
     from .bridge_policy import effective_settings
+    from .bridge_publish import orchestration_settings
 
     config = mission.get("config") or {}
     return {"schema_version": 1, "mission_id": request.mission_id,
             "auto_continue": bool(config.get("auto_continue", False)),
             "suspend_when_rate_limited": bool(config.get("suspend_when_rate_limited", False)),
             "colour": config.get("colour"),
-            "execution_policy": effective_settings(config)}
+            "execution_policy": effective_settings(config),
+            **orchestration_settings(config)}
+
+
+_PUBLISH_BUDGET_PARAMS = ("commit", "push", "budget_runs", "budget_minutes", "budget_provider_changes", "budget_spend", "budget_currency")
 
 
 def _mission_settings_patch(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert request.mission_id is not None
-    if all(params[name] is None for name in ("auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour")):
+    if all(params[name] is None for name in ("auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour", *_PUBLISH_BUDGET_PARAMS)):
         raise CommandFailure("invalid-argument", "mission.settings.patch requires at least one setting")
     cli = _cli()
     # Validate the whole patch before writing any setting. A valid early field
@@ -301,7 +308,22 @@ def _mission_settings_patch(store: BridgeStore | None, request: CommandRequest, 
     if colour is not None and not (colour == "auto" or (colour.isdigit() and 1 <= int(colour) <= cli.MISSION_COUNT)):
         raise CommandFailure("invalid-argument", f"colour must be a number from 1 to {cli.MISSION_COUNT}, or auto")
     result: dict[str, Any] = {"schema_version": 1, "mission_id": request.mission_id}
+    try:
+        policy_change, budget_change = cli.validated_orchestration_patch(request.mission_id, {name: params[name] for name in _PUBLISH_BUDGET_PARAMS})
+    except ValueError as exc:
+        raise CommandFailure("invalid-argument", str(exc)) from None
     with cli.open_store() as writer:
+        details: list[str] = []
+        if policy_change:
+            changed = cli._set_mission_commit_policy(writer, request.mission_id, policy_change)
+            details.append(changed.pop("detail"))
+            result.update(changed)
+        if budget_change is not None:
+            changed = cli._set_mission_budget(writer, request.mission_id, budget_change)
+            details.append(changed.pop("detail"))
+            result.update(changed)
+        if details:
+            result["detail"] = " · ".join(details)
         if params["auto_continue"] is not None:
             result.update(cli._set_mission_auto_continue(writer, request.mission_id, params["auto_continue"]))
         if params["teams"] is not None or params["token_spend"] is not None:
@@ -740,7 +762,9 @@ OPERATIONS: dict[str, OperationSpec] = {
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),
-                       "suspend_when_rate_limited": Param(bool), "colour": Param(str)}, _mission_settings_patch),
+                       "suspend_when_rate_limited": Param(bool), "colour": Param(str),
+                       "commit": Param(str), "push": Param(str), "budget_runs": Param(int), "budget_minutes": Param(int),
+                       "budget_provider_changes": Param(int), "budget_spend": Param(float), "budget_currency": Param(str)}, _mission_settings_patch),
         OperationSpec("mission.steer", "Queue typed steering for a mission task or safe boundary", True, True,
                       {"kind": Param(str, required=True), "task": Param(int), "task_id": Param(int),
                        "route": Param(str), "prompt": Param(str, default="")}, _mission_steer),

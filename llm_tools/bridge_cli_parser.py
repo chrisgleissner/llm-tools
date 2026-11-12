@@ -182,6 +182,48 @@ class _RotationDefaultText:
         return self._render(*resolved_default_rotation())
 
 
+def _limit_value(text: str) -> int:
+    """A budget limit: a whole number of at least 1, or ``none`` (stored as 0) to remove the limit."""
+    import argparse
+
+    if text.strip().lower() == "none":
+        return 0
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number or none") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("a limit must be at least 1, or none")
+    return value
+
+
+def _spend_value(text: str) -> float:
+    import argparse
+
+    if text.strip().lower() == "none":
+        return 0.0
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number or none") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("a spend limit must be above 0, or none")
+    return value
+
+
+def _add_orchestration_args(parser: argparse.ArgumentParser, *, create: bool) -> None:
+    """Commit, push and budget options shared by ``mission create`` and ``mission set``."""
+    parser.add_argument("--commit", choices=("none", "per-task"), default=None, help="per-task: Bridge commits the working directory after the verifier passes for each task (the provider is told not to commit); none: Bridge never commits (default)")
+    parser.add_argument("--push", choices=("never", "per-task", "per-mission"), default=None, help="when Bridge pushes its commits to the branch's configured upstream or push remote: never (default), after each task, or after the last task. Needs --commit per-task. Bridge never force-pushes and refuses a branch with no configured remote")
+    if create:
+        parser.add_argument("--push-default-branch", action="store_true", help="allow Bridge to push to the repository's default branch (refused without this flag)")
+    parser.add_argument("--budget-runs", metavar="N|none", type=_limit_value, default=None, help="hold the mission as budget-exhausted after N provider runs")
+    parser.add_argument("--budget-minutes", metavar="N|none", type=_limit_value, default=None, help="hold the mission after N minutes of wall-clock time since its first provider run")
+    parser.add_argument("--budget-provider-changes", metavar="N|none", type=_limit_value, default=None, help="hold the mission after N changes of provider or route")
+    parser.add_argument("--budget-spend", metavar="AMOUNT|none", type=_spend_value, default=None, help="hold the mission after this much spend, counted only for providers that report a cost in --budget-currency")
+    parser.add_argument("--budget-currency", metavar="CODE", default=None, help="currency of --budget-spend, for example USD")
+
+
 def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = False) -> None:
     """Options shared by ``mission create`` and the legacy bare ``--prompt`` form."""
     import argparse
@@ -201,6 +243,7 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
         "none (default): the providers work in --cwd itself. worktree: create a git worktree under the Bridge state directory on a new branch "
         "bridge/<name>-<id> from the current commit and run the mission there, so several missions can work on one repository at once; "
         "needs a git repository with a clean working tree; merge the branch back with git merge bridge/<name>-<id>"))
+    _add_orchestration_args(create, create=True)
     create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the first task; repeat for several")
     create.add_argument("--teams", choices=("on", "off"), default=None, help="provider-native team guidance (default: on; global default: [bridge].teams)")
     create.add_argument("--token-spend", choices=("low", "medium", "high"), default=None, help="token spend preference (default: medium; global default: [bridge].token_spend)")
@@ -321,6 +364,7 @@ def _build_parser(
     mission_set.add_argument("--teams", choices=("on", "off"), help="enable or disable provider-native team guidance")
     mission_set.add_argument("--token-spend", choices=("low", "medium", "high"), help="set token spend preference")
     mission_set.add_argument("--suspend-when-rate-limited", choices=("on", "off"), help="on: suspend at an idle capacity wait when no Bridge operation is active; off: wait awake (default)")
+    _add_orchestration_args(mission_set, create=False)
     _add_json_arg(mission_set)
     mission_settings = mission_sub.add_parser("settings", help="show a mission's saved execution settings")
     _add_mission_arg(mission_settings, default_mission)

@@ -338,6 +338,14 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--log-max-bytes` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--isolate` | Local worktree isolation (ORCH-001); remote mission creation returns `unsupported-remote-option` until ORCH-008 maps it to the typed `isolate` field. |
+| `--commit` | `mission.settings.patch` field `commit` (`none`, `per-task`; ORCH-003); on `mission create` local only, remote create returns `unsupported-remote-option` until ORCH-008. |
+| `--push` | `mission.settings.patch` field `push` (`never`, `per-task`, `per-mission`; ORCH-003); on `mission create` local only until ORCH-008. |
+| `--push-default-branch` | Local mission creation only (ORCH-003); remote create returns `unsupported-remote-option`. |
+| `--budget-runs` | `mission.settings.patch` field `budget_runs` (ORCH-005; 0 removes the limit); on `mission create` local only until ORCH-008. |
+| `--budget-minutes` | `mission.settings.patch` field `budget_minutes` (ORCH-005); on `mission create` local only until ORCH-008. |
+| `--budget-provider-changes` | `mission.settings.patch` field `budget_provider_changes` (ORCH-005); on `mission create` local only until ORCH-008. |
+| `--budget-spend` | `mission.settings.patch` field `budget_spend` (ORCH-005; needs a currency); on `mission create` local only until ORCH-008. |
+| `--budget-currency` | `mission.settings.patch` field `budget_currency` (ORCH-005); on `mission create` local only until ORCH-008. |
 | `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
 | `--native` | `mission.start` params or `mission.create` body `native_tui`. |

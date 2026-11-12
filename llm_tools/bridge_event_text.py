@@ -369,6 +369,66 @@ def _h_mission_status(ctx: _EventContext) -> str:
     return f"{_MISSION_STATE_WORDS.get(ctx.new_state, 'Mission ' + (ctx.new_state.lower() or 'changed'))}{ctx.reason}"
 
 
+@_humanizer(EventKind.TASK_COMMITTED)
+def _h_task_committed(ctx: _EventContext) -> str:
+    if ctx.data.get("committed") is False:
+        return f"{ctx.task}: nothing to commit"
+    return f"{ctx.task} committed · {_text(str(ctx.data.get('sha') or '')[:10], 12)} on {_text(ctx.data.get('branch') or '', 40)}"
+
+
+@_humanizer(EventKind.TASK_COMMIT_FAILED)
+def _h_task_commit_failed(ctx: _EventContext) -> str:
+    return _with_reason(f"{ctx.task} commit failed · mission held", ctx.data, 160)
+
+
+@_humanizer(EventKind.TASK_PUSHED)
+def _h_task_pushed(ctx: _EventContext) -> str:
+    return f"Pushed to {_text(ctx.data.get('remote') or '', 30)} {_text(ctx.data.get('branch') or '', 40)}"
+
+
+@_humanizer(EventKind.PUSH_FAILED)
+def _h_push_failed(ctx: _EventContext) -> str:
+    return _with_reason("Push refused · mission held" if ctx.data.get("refused") else "Push failed · mission held", ctx.data, 160)
+
+
+@_humanizer(EventKind.BUDGET_EXHAUSTED)
+def _h_budget_exhausted(ctx: _EventContext) -> str:
+    return "Budget exhausted · mission held" + (f" · {_text(ctx.data['summary'], 140)}" if _known(ctx.data.get("summary")) else "")
+
+
+@_humanizer(EventKind.PROVIDER_SPEND)
+def _h_provider_spend(ctx: _EventContext) -> str:
+    return f"Spend {_text(ctx.data.get('amount') or '', 12)} {_text(ctx.data.get('currency') or '', 8)}".rstrip()
+
+
+@_humanizer(EventKind.MISSION_HELD)
+def _h_mission_held(ctx: _EventContext) -> str:
+    values = ctx.data.get("values")
+    reason = values.get("hold_reason") if isinstance(values, dict) else None
+    return "Mission held" + (f" · {_text(reason, 40)}" if reason else " · hold released" if reason == "" else "")
+
+
+@_humanizer(EventKind.MISSION_HOLD_RELEASED)
+def _h_mission_hold_released(ctx: _EventContext) -> str:
+    return "Hold released"
+
+
+@_humanizer(EventKind.MISSION_COMMIT_POLICY_CHANGED)
+def _h_commit_policy_changed(ctx: _EventContext) -> str:
+    values = ctx.data.get("values")
+    values = values if isinstance(values, dict) else {}
+    return "Commit policy " + ", ".join(f"{key} {_text(value, 20)}" for key, value in values.items())
+
+
+@_humanizer(EventKind.MISSION_BUDGET_CHANGED)
+def _h_budget_changed(ctx: _EventContext) -> str:
+    values = ctx.data.get("values")
+    budget = values.get("budget") if isinstance(values, dict) else None
+    from .bridge_budget import summary
+
+    return "Budget " + (summary(budget) if isinstance(budget, dict) else "changed")
+
+
 @_humanizer(EventKind.MISSION_SUSPEND_WHEN_RATE_LIMITED)
 def _h_mission_suspend_when_rate_limited(ctx: _EventContext) -> str:
     return "Capacity-wait suspend " + ("on" if ctx.data.get("value") is True else "off")

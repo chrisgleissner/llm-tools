@@ -318,6 +318,10 @@ class BridgeMissionHooks:
                 time.sleep(0.5)
                 continue
 
+            if mission["config"].get("hold_reason"):
+                # The operator resumed a mission that Bridge held (budget, commit or push). The budget is checked
+                # again before the next run, so a limit that is still reached holds the mission again.
+                self.store.set_mission_config_values(self.mission_id, {"hold_reason": "", "hold_detail": ""}, event_kind="mission-hold-released")
             hold = self.store.sync_review_hold_events(self.mission_id)
             if hold is not None:
                 # A native operator is at the station: do not start the next
@@ -333,6 +337,10 @@ class BridgeMissionHooks:
                 self._operator_wait_state = None
                 self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
+                from . import bridge_budget
+
+                if bridge_budget.hold_if_reached(self.store, mission) is not None:
+                    continue  # held as budget-exhausted; the PAUSED branch waits for the operator
                 current = self.store.begin_iteration(int(task["id"]))
                 self._iteration += 1
                 history = self.store.recent_task_history(self.mission_id, int(current["id"]))
@@ -371,6 +379,11 @@ class BridgeMissionHooks:
                     f"Durable checkpoint (latest bounded history):\n{_format_checkpoint(checkpoint)}\n\n"
                     "Continue from this state. Do not claim work from an earlier provider session unless supported by the evidence above."
                 )
+                from .bridge_publish import policy_prompt
+
+                policy_text = policy_prompt(mission["config"]).strip()
+                if policy_text:
+                    prompt += "\n\n" + policy_text
                 if self.native_tui and not self.headless:
                     prompt += f" {NATIVE_COMPLETION_NOTE}"
                 return {
@@ -396,6 +409,10 @@ class BridgeMissionHooks:
             total = sum(counts.values())
             completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
             if completed and completed + cancelled == total:
+                from .bridge_publish import push_mission
+
+                if not push_mission(self.store, mission):
+                    continue  # the push failed or was refused: the mission is held PAUSED until the operator fixes it
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
             if total and cancelled == total:
@@ -1700,6 +1717,11 @@ def run_configured_verifier(
             except TransitionError:
                 current = store.get_task(task_id)
                 outcome.update(status=current["status"], passed=False, reason="task-changed-during-verification")
+            else:
+                from .bridge_publish import commit_task
+
+                # Bridge commits (and pushes, per the mission's policy) itself; a failure holds the mission.
+                outcome["committed"] = commit_task(store, store.get_mission(mission_id), store.get_task(task_id), summary)
             return outcome
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             outcome["reason"] = f"invalid-result: {exc}"
