@@ -4,6 +4,8 @@ This page records a walk-through of the Bridge first-run path as a new user woul
 
 ## Setup of the walk-through (2026-10-30)
 
+* Platform: Linux only. This walk-through was not repeated on macOS or Windows. CI runs the Python test suite on macOS and the Windows component tests on Windows, but the Bridge console and missions need Linux and tmux, and suspend and wake need Linux with systemd.
+
 * Install: `pipx install <checkout>` into a fresh `PIPX_HOME` and `PIPX_BIN_DIR`. The documented `pipx install git+https://github.com/chrisgleissner/llm-tools.git` was also run into a second fresh pipx home and installed llm-tools 1.2.1.
 * No llm-tools configuration: `LLM_TOOLS_CONFIG=/nonexistent`.
 * State directory: `XDG_STATE_HOME` pointed at a directory that did not exist, so Bridge had to create `llm-tools/llm-bridge` itself. The leaf directory was created with mode `700` and `bridge.sqlite3` with mode `600`. The parent directories that Bridge creates take the user's umask (`775` here).
