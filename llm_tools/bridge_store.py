@@ -31,7 +31,7 @@ from .bridge_vocab import status_label
 if TYPE_CHECKING:
     import sqlite3
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # Written into every event row. It is independent of SCHEMA_VERSION: index-only
 # schema changes do not change what an event row means.
 EVENT_SCHEMA_VERSION = 7
@@ -251,7 +251,12 @@ _BASE_SCHEMA: tuple[str, ...] = (
     config_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    isolation TEXT NOT NULL DEFAULT 'none',
+    origin_cwd TEXT,
+    branch TEXT,
+    base_commit TEXT,
+    worktree_path TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -513,6 +518,11 @@ class BridgeStore:
         for statement in _BASE_SCHEMA:
             self.db.execute(statement)
         self._ensure_column("missions", "config_json", "TEXT NOT NULL DEFAULT '{}'" )
+        # Schema 11 (ORCH-001): a mission may run in its own git worktree. ``cwd`` and ``repo_identity``
+        # then name that worktree, so the one-active-mission index below is per effective directory.
+        self._ensure_column("missions", "isolation", "TEXT NOT NULL DEFAULT 'none'")
+        for column in ("origin_cwd", "branch", "base_commit", "worktree_path"):
+            self._ensure_column("missions", column, "TEXT")
         self._ensure_column("tasks", "original_prompt", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("tasks", "ordinal", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("tasks", "origin", "TEXT NOT NULL DEFAULT 'operator'")
@@ -798,7 +808,13 @@ class BridgeStore:
         initial_prompt: str | None = None,
         initial_acceptance: list[str] | tuple[str, ...] = (),
         config: dict[str, Any] | None = None,
+        isolation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Create a mission; ``cwd`` is its effective working directory.
+
+        ``isolation`` (from ``bridge_isolation.prepare``) records that ``cwd`` is a worktree of
+        ``origin_cwd``; the one-active-mission rule applies to ``cwd``, not to the source repository.
+        """
         import sqlite3
 
         if not name.strip() or not objective:
@@ -818,8 +834,11 @@ class BridgeStore:
                 if owned:
                     raise TransitionError(f"an active mission already owns worktree: {canonical_cwd}")
                 self.db.execute(
-                    "INSERT INTO missions(id,name,objective,cwd,repo_identity,config_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'CREATED',?,?)",
-                    (mid, name.strip(), objective, canonical_cwd, repo_root, self._json(config or {}), now, now),
+                    "INSERT INTO missions(id,name,objective,cwd,repo_identity,config_json,status,created_at,updated_at,"
+                    "isolation,origin_cwd,branch,base_commit,worktree_path) VALUES(?,?,?,?,?,?,'CREATED',?,?,?,?,?,?,?)",
+                    (mid, name.strip(), objective, canonical_cwd, repo_root, self._json(config or {}), now, now,
+                     (isolation or {}).get("isolation", "none"), (isolation or {}).get("origin_cwd"), (isolation or {}).get("branch"),
+                     (isolation or {}).get("base_commit"), (isolation or {}).get("worktree_path")),
                 )
                 self._event(mid, "mission-created", {"name": name.strip(), "cwd": canonical_cwd})
                 task_id: int | None = None
