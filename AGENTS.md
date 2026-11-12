@@ -24,7 +24,7 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Import/test bootstrap: `sitecustomize.py`.
 * CI: `.github/workflows/test.yml`.
 * User docs: `README.md`.
-* Local planning/work logs: `PLANS.md`, `WORKLOG.md`.
+* Local planning/work logs: `docs/archive/PLANS.md` (historical), `WORKLOG.md`.
 * Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `llm_tools/common.py`.
 * Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
 * Usage service history/logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage/service` (`latest.json`, `history.jsonl`, service logs)

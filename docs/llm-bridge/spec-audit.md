@@ -1,3 +1,5 @@
+> Historical: describes the 2026-10-26 review at baseline `066af5c` (spec-audit; no release number is stated in the file). Current status: [specification register](../distributed/SPEC_STATUS.md).
+
 # Bridge specification audit
 
 Independent review on 2026-10-26 against `docs/features/llm-bridge/prompt.md`,
