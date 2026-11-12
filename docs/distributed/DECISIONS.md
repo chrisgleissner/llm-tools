@@ -622,3 +622,7 @@ A mission created through the coordinator may name only a verifier that the work
 ## D49 Rich is the only runtime dependency (FIND-017)
 
 `AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.
+
+## D53 Old mode names are normalised on read, not migrated (FIND-018)
+
+Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
