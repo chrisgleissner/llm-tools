@@ -1,0 +1,50 @@
+# UXR requirements
+
+Source: the web console redesign task of 2026-11-07 (PRD-037).
+
+- UXR-001: Design spec with tokens (type scale, spacing, colour roles light/dark, radii, elevation) documented and the only source of styles; no hard-coded colours in components (lint/test).
+- UXR-002: One state pill per item everywhere; a test fails if any row renders two state pills; "stale" replaced by derived Offline/last seen.
+- UXR-003: Single truncation rule: never truncate twice in one element chain; titles wrap to max 2 lines; ids middle-truncated with full value in tooltip and copy; test over all pages at 320, 412 and 1440 widths finds no nested ellipsis and no mid-word wrap of short fields (e.g. worker names, states).
+- UXR-004: Mission detail: live session pane visible on arrival without a click, above the fold, >= 60% viewport height on desktop, >= 14 rows on Pixel 4.
+- UXR-005: Read-only watch by default; typing requires explicit Take control; terminal:write permission unchanged (security test).
+- UXR-006: Sticky steer composer never scrolls out of view; works with the virtual keyboard open on phones.
+- UXR-007: Pause and Stop always visible on mission detail; Pause 1 interaction, Stop 2 with confirmation; optimistic state within 500 ms.
+- UXR-008: Task panel with row actions in an overflow menu; no per-row button stacks.
+- UXR-009: Activity shows humanised milestones by default; heartbeats, capacity refreshes and other plumbing counted and hidden ("12 heartbeats hidden"), expandable; raw JSON only behind a per-row disclosure.
+- UXR-010: Zero toasts and zero default-visible rows from plumbing events during a 10-minute soak (automated).
+- UXR-011: Toasts only for user-initiated results and actionable events; announced politely; dismissible; never cover primary controls.
+- UXR-012: Inbox: "Needs you" queue first with inline actions (approve, reject, answer, open); visible with 0 interactions at every viewport.
+- UXR-013: Inbox: running missions show what each provider is doing now (last output line or provider state, time in state) without a click.
+- UXR-014: Capacity chips (per provider, scope, percent, reset) in the header; Usage page per the brief.
+- UXR-015: Missions list: active and needs-you first, finished collapsed or filtered; compact rows; no wrapping of short fields.
+- UXR-016: Sessions: active first, history collapsed; no wrapped identifiers.
+- UXR-017: Workers page per the brief: health, connection state, host and address, last seen.
+- UXR-018: Approve with evidence in <= 2 interactions from Inbox; summary, verifier result and changed files on the same screen.
+- UXR-019: Reject with required reason in <= 3 interactions.
+- UXR-020: Add a task in <= 3 interactions plus typing; steer in <= 3.
+- UXR-021: Command palette (Ctrl/Cmd-K) finds missions, sessions and actions; keyboard shortcuts documented and discoverable.
+- UXR-022: Calm design: healthy running items quiet (subtle activity indicator, no motion loops beyond one small indicator); attention colour reserved for needs-you and failure; reduced motion respected.
+- UXR-023: Progressive disclosure map (level 0/1/2) per page documented and implemented; no primary control hidden behind a disclosure.
+- UXR-024: Above-the-fold budget per page and viewport (from the addendum) met; Playwright asserts the level-0 elements are in the initial viewport at each matrix viewport.
+- UXR-025: Fluid layout: container queries, clamp() type and spacing, dvh and safe-area insets; no horizontal page scroll from 320 to 2560 CSS px.
+- UXR-026: Reflow at 320 CSS px and 400% zoom (WCAG 1.4.10), text spacing (1.4.12), orientation both ways.
+- UXR-027: Touch: targets >= 44 px on coarse pointers, >= 24 px minimum everywhere (WCAG 2.5.8); no hover-only affordances.
+- UXR-028: Terminal on tiny screens: font-size floor, full-screen mode, on-screen modifier keys (Esc, Tab, Ctrl, arrows), no lost input.
+- UXR-029: Mobile layouts designed per page (no tables collapsed into label/value cards); bottom navigation never overlaps content.
+- UXR-030: Dark and light themes both pass contrast (WCAG AA) and the full visual baseline set.
+- UXR-031: axe-core zero serious or critical on every page, every matrix viewport, both themes.
+- UXR-032: Lighthouse performance >= 90 and accessibility 100 on the console's main pages at mobile settings.
+- UXR-033: INP <= 200 ms and CLS <= 0.1 at Pixel 4 with 4x CPU throttling on mission detail with a live terminal.
+- UXR-034: Skeletons and optimistic updates; no layout shift on live refresh; keyboard focus kept across refreshes.
+- UXR-035: Teaching empty states and first-run guidance on every page.
+- UXR-036: Every page answers: what is happening, does it need me, what next (checked in the critique with screenshots).
+- UXR-037: Device test matrix from the addendum (2560x1440, 1440x900, 1280x720, 768x1024, 430x932, 412x915, 360x640, 320x568; touch; reduced motion; 200%/400% zoom; both themes) runs in CI.
+- UXR-038: Visual baselines regenerated in the same commits as the visible change, reviewed as screenshot diffs.
+- UXR-039: Bundle budget kept, or raised only with a measured, recorded reason.
+- UXR-040: Fresh-eyes principal UX critique of every page at 1440 and 360 widths in both themes; every finding filed as a UXR row and closed with proof; overseer screenshot review passed.
+- UXR-041: Viewing on a small screen never resizes the shared provider PTY (other clients and the native tmux station keep their size); phones fit the width or scroll, with a plain-text transcript toggle.
+- UXR-042: Addendum adopted: interrupt ladder, one-animation motion budget, last-known state with age when disconnected, viewport meta with interactive-widget and viewport-fit, nav labels in full words (no abbreviations).
+- UXR-043: Click-path inventory: a table in ux-audit.md of every operator task (see what needs me, open a live session, watch, take control and type, steer, answer a provider question, approve, reject with reason, pause, resume, stop, force stop, add/amend/reorder a task, start a mission, find a mission, check capacity, check a worker, sign in/out, reset-password hint) with before and after interaction counts at 1440x900 and 320x568, and the target for each. Every path is the shortest that keeps destructive actions confirmed; deep links land directly on the target state (e.g. a notification opens the question with the answer field focused).
+- UXR-044: Playwright measures each path's interaction count at 1440x900 and 320x568 and fails if it exceeds the target in the inventory.
+- UXR-045: Every operator task completes at 320x568 and 360x640 with a simulated on-screen keyboard covering half the viewport (visualViewport height halved / interactive-widget=resizes-content and overlays-content): the focused field, its submit control and any validation message stay visible without scrolling; the composer, answer, reject-reason, add-task and sign-in forms are covered; no action needs hover, long-press or a precise target.
+- UXR-046: Primary action of the current state reachable with one thumb on phones (bottom area), and every action has a keyboard path on desktop (shortcut or palette), listed in the inventory.

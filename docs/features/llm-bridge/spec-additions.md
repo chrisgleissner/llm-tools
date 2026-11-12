@@ -2,7 +2,7 @@
 
 These extend the original directive in `prompt.md`; later user instructions
 supersede earlier defaults. Implementations and verification remain traceable in
-`../../llm-bridge/spec-audit.md` and `HANDOVER.md`.
+`../../llm-bridge/spec-audit.md` and `../../archive/HANDOVER-llm-bridge.md`.
 
 - Bridge code has a separate **90% branch coverage CI gate**, retaining global
   85%. CI tests Python 3.11 minimum and current 3.15 series.
