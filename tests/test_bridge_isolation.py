@@ -285,3 +285,64 @@ def test_slug_and_branch_names() -> None:
     assert bridge_isolation.mission_slug("  Fix: the/Tests!! ") == "fix-the-tests"
     assert bridge_isolation.mission_slug("???") == "mission"
     assert bridge_isolation.branch_name("A b", "0123456789abcdef") == "bridge/a-b-01234567"
+
+
+def test_delete_refuses_a_commit_made_on_a_detached_head_in_the_worktree(repo, state, capsys) -> None:
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    worktree = Path(mission["worktree_path"])
+    _git(worktree, "checkout", "-q", "--detach")
+    _commit_in(worktree)
+    assert _git(repo, "rev-parse", mission["branch"]) == mission["base_commit"]  # the mission branch itself holds nothing new
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes"]) == 4
+    assert "HEAD" in capsys.readouterr().err
+    assert _still_exists(mission["id"]) and (worktree / "new.txt").exists()
+
+
+def test_delete_refuses_git_ignored_files_and_names_them(repo, state, capsys) -> None:
+    (repo / ".gitignore").write_text(".env\n*.db\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore")
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    worktree = Path(mission["worktree_path"])
+    (worktree / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (worktree / "local.db").write_text("x\n", encoding="utf-8")
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes"]) == 4
+    error = capsys.readouterr().err
+    assert ".env" in error and "local.db" in error and "git-ignored" in error
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--force", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["worktree"]["removed"] is False
+    assert (worktree / ".env").exists()
+
+
+def test_a_failing_post_checkout_hook_leaves_no_worktree_or_branch(repo, state, capsys) -> None:
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    assert main(["mission", "create", "--prompt", "Do it", "--cwd", str(repo), "--isolate", "worktree"]) != 0
+    capsys.readouterr()
+    assert _git(repo, "branch", "--list", "bridge/*") == ""
+    assert not (state / "worktrees").exists() or list((state / "worktrees").iterdir()) == []
+    assert str(state) not in _git(repo, "worktree", "list")
+
+
+def test_the_typed_command_refuses_isolation_requested_by_a_coordinator(tmp_path, state) -> None:
+    from llm_tools.bridge_commands import CommandFailure, CommandRequest, _mission_create
+
+    params = {"prompt": "x", "cwd": str(tmp_path), "name": "", "acceptance": [], "providers": None, "routes": None, "headless": False,
+              "native_tui": False, "teams": None, "token_spend": None, "trust_folder": False, "unsupported_options": [], "isolate": "worktree"}
+    with pytest.raises(CommandFailure) as caught:
+        _mission_create(None, CommandRequest("mission.create", params), params)
+    assert caught.value.code == "unsupported-remote-option"
+
+
+def test_verifier_fingerprints_are_taken_in_the_worktree(repo, state, capsys) -> None:
+    from llm_tools.bridge_verifier_guard import changed_verifier_files
+
+    (repo / ".gitignore").write_text("check.sh\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore")
+    (repo / "check.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # ignored: exists in the source folder only
+    mission = _create(capsys, repo, "--isolate", "worktree", "--verifier-arg", "./check.sh")
+    with BridgeStore(_path(), readonly=True) as store:
+        stored = store.get_mission(mission["id"])
+    assert changed_verifier_files(stored["config"]["verifier"], stored["cwd"]) == []

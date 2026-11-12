@@ -401,6 +401,10 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
     if unsupported:
         raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(unsupported),
                              details={"options": unsupported})
+    if params["isolate"] != "none":
+        # Remote acceptance of worktree isolation is ORCH-008; until then a coordinator cannot request it.
+        raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): isolate",
+                             details={"options": ["--isolate"]})
     cli = _cli()
     args = argparse.Namespace(
         name=params["name"], cwd=params["cwd"], prompt=params["prompt"], prompt_file=None,

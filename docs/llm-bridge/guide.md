@@ -50,11 +50,15 @@ Three facts explain most of Bridge's behaviour:
    `bridge/<name>-<id>` from the current commit. The folder must be in a git
    repository with a clean working tree. `llm-bridge status` shows the branch;
    bring the work back from the repository with `git merge bridge/<name>-<id>`.
-   `llm-bridge mission delete` removes the worktree and branch when they hold no
-   uncommitted work and the branch is merged into the branch the mission was
-   created from. Otherwise it refuses (exit 4) and names the worktree, the branch
-   and the merge and discard commands; `--force` deletes the mission and keeps the
-   worktree and branch. Without `--isolate` the providers work in the folder itself, and two
+   `llm-bridge mission delete` removes the worktree and branch when the worktree
+   has no uncommitted changes and no git-ignored files (such as `.env` or a local
+   database), and its HEAD and the mission branch are merged into the branch the
+   mission was created from. Otherwise it refuses (exit 4) and names the
+   worktree, the branch, up to five ignored files and the merge and discard
+   commands; `--force` deletes the mission and keeps the worktree and branch.
+   Claude Code asks once to trust each new worktree folder (Bridge does not edit
+   Claude Code's trust settings); answer "Yes, I trust this folder" or create the
+   mission with `--trust-folder`. Without `--isolate` the providers work in the folder itself, and two
    such missions cannot be active in one folder.
 3. Start work. This uses paid capacity.
 

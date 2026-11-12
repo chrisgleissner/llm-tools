@@ -80,14 +80,18 @@ def prepare(origin_cwd: str | Path, *, mission_id: str, name: str, state_dir: Pa
     if path.exists():
         raise IsolationError(f"cannot isolate: {path} already exists")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    made = _git(root, "worktree", "add", "-b", branch, str(path), base)
-    if made.returncode != 0:
-        raise IsolationError(f"git could not create the worktree: {made.stderr.strip() or made.stdout.strip()}")
     try:
-        relative = origin.relative_to(root)
-    except ValueError:
-        relative = Path(".")
-    effective = (path / relative).resolve()
+        made = _git(root, "worktree", "add", "-b", branch, str(path), base)
+        if made.returncode != 0:
+            raise IsolationError(f"git could not create the worktree: {made.stderr.strip() or made.stdout.strip()}")
+        try:
+            relative = origin.relative_to(root)
+        except ValueError:
+            relative = Path(".")
+        effective = (path / relative).resolve()
+    except BaseException:
+        discard(root, path, branch)  # a timeout or a failing post-checkout hook may leave the directory and the branch behind
+        raise
     return {"isolation": ISOLATION_WORKTREE, "origin_cwd": str(origin), "branch": branch, "base_commit": base, "origin_branch": origin_branch or None,
             "worktree_path": str(path), "cwd": str(effective)}
 
@@ -122,11 +126,20 @@ def unmerged_reason(mission: dict[str, Any]) -> str | None:
                 return f"git status failed in the worktree: {state.stderr.strip()}"
             if state.stdout.strip():
                 return "the worktree has uncommitted changes"
-        if _git(origin, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
-            return None  # the branch is already gone; nothing is left to lose
+            ignored = _git(path, "status", "--porcelain", "--ignored")
+            names = [line[3:] for line in ignored.stdout.splitlines() if line.startswith("!! ")]
+            if names:
+                shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+                return f"the worktree holds git-ignored files that deleting it would lose ({shown})"
         into = f"refs/heads/{target}" if target else "HEAD"
         if target and _git(origin, "rev-parse", "--verify", "--quiet", into).returncode != 0:
             return f"branch {target}, which the mission was created from, no longer exists, so merging cannot be checked"
+        if path.is_dir():
+            head = _git(path, "rev-parse", "HEAD")
+            if head.returncode != 0 or _git(origin, "merge-base", "--is-ancestor", head.stdout.strip(), into).returncode != 0:
+                return f"the worktree's HEAD ({head.stdout.strip()[:10] or 'unreadable'}) has commits that are not merged into {target or 'the checked-out commit'}"
+        if _git(origin, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
+            return None  # the branch is already gone; nothing is left to lose
         if _git(origin, "merge-base", "--is-ancestor", f"refs/heads/{branch}", into).returncode != 0:
             return f"branch {branch} has commits that are not merged into {target or 'the checked-out commit'}"
     except IsolationError as exc:
