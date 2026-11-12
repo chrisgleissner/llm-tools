@@ -389,6 +389,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
 
         _resolve_mode_args(args)  # --mode and the older --native/--headless flags become one choice
         unsupported_options: list[str] = []
+        if getattr(args, "isolate", "none") != "none":
+            unsupported_options.append("--isolate")
         if args.verifier_command is not None:
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):

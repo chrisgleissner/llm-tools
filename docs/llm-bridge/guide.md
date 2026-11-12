@@ -43,6 +43,17 @@ Three facts explain most of Bridge's behaviour:
 
    Add `--providers claude,codex` to choose the rotation, or `--verifier
    'python -m pytest -q'` to check each finished task.
+
+   Add `--isolate worktree` to run the mission in its own git worktree, so
+   several missions can work on one repository at the same time. Bridge
+   creates the worktree under its state directory on a new branch
+   `bridge/<name>-<id>` from the current commit. The folder must be in a git
+   repository with a clean working tree. `llm-bridge status` shows the branch;
+   bring the work back from the repository with `git merge bridge/<name>-<id>`.
+   `llm-bridge mission delete` removes the worktree and branch when they hold no
+   unmerged or uncommitted work; otherwise it keeps them and prints where they
+   are. Without `--isolate` the providers work in the folder itself, and two
+   such missions cannot be active in one folder.
 3. Start work. This uses paid capacity.
 
    ```bash

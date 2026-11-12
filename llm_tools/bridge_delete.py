@@ -76,7 +76,8 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
 
     state = default_state_dir()
     with BridgeStore(store_path(), readonly=True) as reader:
-        status = str(reader.get_mission(mission_id)["status"])
+        before = reader.get_mission(mission_id)
+    status = str(before["status"])
     if status not in DELETABLE_MISSION_STATUSES:
         raise TransitionError(mission_delete_refusal(mission_id, status))
     short = mission_id[:8]
@@ -103,6 +104,11 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
         (state / "locks" / f"mission-{mission_id}.lock").unlink(missing_ok=True)
     finally:
         lock.release()
+    worktree: dict[str, Any] | None = None
+    if before.get("isolation") == "worktree":
+        from . import bridge_isolation
+
+        worktree = bridge_isolation.release(before)
     return {
         "status": "DELETED",
         "mission_id": mission_id,
@@ -111,5 +117,17 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
         "deleted_at": result["deleted_at"],
         "removed": {"tasks": result["tasks"], "events": result["events"], "operations": result["operations"],
                     "files": files, "station_files": station_files},
-        "detail": f"Deleted mission {short} \"{result['name']}\" ({result['tasks']} tasks, {result['events']} events, {files} files)",
+        "detail": f"Deleted mission {short} \"{result['name']}\" ({result['tasks']} tasks, {result['events']} events, {files} files)" + _worktree_note(worktree),
+        **({"worktree": worktree} if worktree is not None else {}),
     }
+
+
+def _worktree_note(worktree: dict[str, Any] | None) -> str:
+    """The sentence about an isolated mission's worktree: removed, or kept with where it is and why."""
+    if worktree is None:
+        return ""
+    if worktree["removed"]:
+        return f" · removed worktree {worktree['path']} and branch {worktree['branch']}"
+    return (f" · kept worktree {worktree['path']} on branch {worktree['branch']}: {worktree.get('reason', 'unmerged work')}; "
+            f"merge it from the repository with: git merge {worktree['branch']}; "
+            f"discard it with: git worktree remove --force {worktree['path']}")

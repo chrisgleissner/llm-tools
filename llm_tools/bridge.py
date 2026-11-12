@@ -1593,14 +1593,25 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
 
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and its first task; returns ``{"mission": ..., "task": ...}``."""
-    mission = store.create_mission(
-        args.name or derive_mission_name(prompt, "LLM Bridge mission"),
-        prompt,
-        cwd=args.cwd,
-        initial_prompt=prompt,
-        initial_acceptance=args.acceptance,
-        config=config,
-    )
+    name = args.name or derive_mission_name(prompt, "LLM Bridge mission")
+    if getattr(args, "isolate", "none") != "worktree":
+        mission = store.create_mission(name, prompt, cwd=args.cwd, initial_prompt=prompt, initial_acceptance=args.acceptance, config=config)
+        return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
+    import uuid
+
+    from . import bridge_isolation
+
+    mission_id = uuid.uuid4().hex
+    try:
+        facts = bridge_isolation.prepare(args.cwd, mission_id=mission_id, name=name, state_dir=default_state_dir())
+    except bridge_isolation.IsolationError as exc:
+        raise TransitionError(str(exc)) from None
+    try:
+        mission = store.create_mission(name, prompt, cwd=facts["cwd"], mission_id=mission_id, initial_prompt=prompt,
+                                       initial_acceptance=args.acceptance, config=config, isolation=facts)
+    except BaseException:
+        bridge_isolation.discard(facts["origin_cwd"], facts["worktree_path"], facts["branch"])
+        raise
     return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
 
 
