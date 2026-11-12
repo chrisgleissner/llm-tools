@@ -88,8 +88,8 @@ def _settled_entries(log: Path, who: str, quiet: float = 0.6) -> list[str]:
     raise AssertionError(f"the provider kept being resized: {seen}")
 
 
-def _attach_stream(handle, rows: int, columns: int) -> bytes:
-    """Run ``TmuxTerminalBackend.attach`` on a pseudo-terminal of the given size; return what tmux drew."""
+def _attach_stream(handle, rows: int, columns: int, *, via_switch: bool = False) -> bytes:
+    """Run ``TmuxTerminalBackend.attach`` (or the shell command a station switch runs) on a pseudo-terminal of the given size; return what tmux drew."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
@@ -103,8 +103,11 @@ def _attach_stream(handle, rows: int, columns: int) -> bytes:
     }
     env = {key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}
     env["TERM"] = "xterm-256color"
+    argv = [sys.executable, "-c", _ATTACH_CHILD, json.dumps(fields)]
+    if via_switch:
+        argv = ["sh", "-c", TmuxTerminalBackend._attach_if_present(handle)]
     child = subprocess.Popen(
-        [sys.executable, "-c", _ATTACH_CHILD, json.dumps(fields)], cwd=REPO_ROOT, env=env,
+        argv, cwd=REPO_ROOT, env=env,
         stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=controlling_terminal,
     )
     os.close(slave)
@@ -187,5 +190,23 @@ def test_attach_does_not_leave_the_window_at_a_fixed_size(tmp_path: Path) -> Non
         option = subprocess.run(["tmux", "-S", str(handle.socket_path), "show-options", "-w", "-t", "frames:station", "window-size"],
                                 capture_output=True, text=True).stdout.strip()
         assert option == ""
+    finally:
+        backend.stop(handle)
+
+
+@pytest.mark.parametrize("round_number", range(3))
+def test_station_switch_attach_draws_the_provider_pane_once_at_the_final_size(tmp_path: Path, round_number: int) -> None:
+    """DOG-029: the command a station switch runs must settle the layout before the client attaches."""
+    backend, handle, log = _start(tmp_path)
+    try:
+        assert wait_for(lambda: _entries(log, PROVIDER_MARK) and _entries(log, CONSOLE_MARK), scaled(5), 0.05)
+        backend.focus(handle, pane="provider", expand=True)
+        before = len(_settled_entries(log, PROVIDER_MARK))
+        text = _attach_stream(handle, rows=40, columns=140, via_switch=True).decode("utf-8", "replace")
+        first = text.find(PROVIDER_MARK)
+        assert first >= 0, f"the provider pane was never drawn: {text[-400:]!r}"
+        assert CONSOLE_MARK not in text
+        assert text.count("\x1b[2J") == 1, "the screen was cleared more than once"
+        assert _entries(log, PROVIDER_MARK)[before:] == ["39x140"]
     finally:
         backend.stop(handle)
