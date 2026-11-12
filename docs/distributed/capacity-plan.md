@@ -384,3 +384,18 @@ and the median. Record the spread in the notes column.
 - Findings F1 to F10 are not implemented by this document. Each needs its own change and
   test. F9 is a prerequisite for phase B measurements.
 - The provisional thresholds need an owner decision before phase B.
+
+## Dispositions
+
+| Finding | Disposition |
+| --- | --- |
+| F1 | FIND-006 |
+| F2 | FIND-006 |
+| F3 | FIND-006 |
+| F4 | FIND-006 |
+| F5 | FIND-006 |
+| F6 | FIND-006 |
+| F7 | FIND-006 |
+| F8 | FIND-006 |
+| F9 | FIND-006 |
+| F10 | FIND-006 |

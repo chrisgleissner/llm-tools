@@ -415,3 +415,41 @@ Recorded so that fixes do not regress it:
 | `wux-026-setup-mobile-light.png`, `wux-026-login-mobile-light.png` | WUX-026 |
 | `wux-027-account-desktop-light.png` | WUX-027 |
 | `wux-031-site-light-os-dark-default.png` | WUX-031 |
+
+## Dispositions
+
+| Finding | Disposition |
+| --- | --- |
+| WUX-001 | FIND-007 |
+| WUX-002 | FIND-007 |
+| WUX-003 | FIND-007 |
+| WUX-004 | FIND-007 |
+| WUX-005 | FIND-007 |
+| WUX-006 | FIND-007 |
+| WUX-007 | FIND-007 |
+| WUX-008 | FIND-007 |
+| WUX-009 | FIND-007 |
+| WUX-010 | FIND-007 |
+| WUX-011 | FIND-007 |
+| WUX-012 | FIND-007 |
+| WUX-013 | FIND-007 |
+| WUX-014 | FIND-007 |
+| WUX-015 | FIND-007 |
+| WUX-016 | FIND-007 |
+| WUX-017 | FIND-007 |
+| WUX-018 | FIND-007 |
+| WUX-019 | FIND-007 |
+| WUX-020 | FIND-007 |
+| WUX-021 | FIND-007 |
+| WUX-022 | FIND-007 |
+| WUX-023 | FIND-007 |
+| WUX-024 | FIND-007 |
+| WUX-025 | FIND-007 |
+| WUX-026 | FIND-007 |
+| WUX-027 | FIND-007 |
+| WUX-028 | FIND-007 |
+| WUX-029 | FIND-007 |
+| WUX-030 | FIND-007 |
+| WUX-031 | FIND-007 |
+| WUX-032 | FIND-007 |
+| WUX-033 | FIND-007 |

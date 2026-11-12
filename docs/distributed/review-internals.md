@@ -301,3 +301,27 @@ Throwaway scripts used for the reproductions (not committed): `/tmp/claude-1000/
 | INT-017 | low | Fixed | A failed lock setup does not leave a phantom lock; mission IDs that would name paths outside the runtime directory are rejected. Tests: `test_failed_lock_setup_does_not_leave_a_phantom_lock`, `test_create_mission_rejects_ids_that_would_name_paths_outside_the_runtime_directory` (`tests/test_bridge_internals_fixes.py`). |
 | INT-018 | low | Fixed | `cancel` ends the running provider process, names `stop --force` when the provider cannot be ended, and does not signal a reused PID. Tests: `test_int018_cancel_ends_the_running_provider_process`, `test_int018_cancel_names_stop_force_when_the_provider_cannot_be_ended`, `test_int018_cancel_does_not_signal_a_reused_pid` (`tests/test_bridge_internals_review.py`). |
 | INT-019 | high | Fixed | Quoted, indented, warning and traceback lines no longer block a headless or PTY task; a genuine unanswered question blocks it with a visible reason and actions. Tests: `test_warning_traceback_and_quoted_lines_are_not_questions`, `test_genuine_questions_are_still_recognised`, `test_progress_guard_uses_the_shared_classifier`, `test_a_long_traceback_cut_to_the_scan_tail_still_does_not_arm_the_guard`, `test_headless_run_ending_on_a_warning_or_quoted_line_is_not_aborted`, `test_pty_run_ending_on_a_warning_or_quoted_line_is_not_aborted`, `test_provider_that_prints_a_warning_last_and_pauses_completes_the_task`, `test_provider_that_asks_a_question_and_stalls_blocks_with_the_question_and_its_actions`, `test_answering_the_question_by_amending_and_retrying_runs_the_task_again` (`tests/test_bridge_question_blocking.py`). |
+
+## Dispositions
+
+| Finding | Disposition |
+| --- | --- |
+| INT-001 | fixed (tests/test_bridge_internals_review.py) |
+| INT-002 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-003 | fixed (tests/test_bridge_internals_review.py) |
+| INT-004 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-005 | fixed (tests/test_bridge_internals_review.py) |
+| INT-006 | fixed (tests/test_bridge_internals_review.py) |
+| INT-007 | fixed (tests/test_bridge_internals_review.py) |
+| INT-008 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-009 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-010 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-011 | FIND-015 |
+| INT-012 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-013 | fixed (tests/test_bridge_internals_review.py) |
+| INT-014 | fixed (tests/test_bridge_internals_review.py) |
+| INT-015 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-016 | FIND-015 |
+| INT-017 | fixed (tests/test_bridge_internals_fixes.py) |
+| INT-018 | fixed (tests/test_bridge_internals_review.py) |
+| INT-019 | fixed (tests/test_bridge_question_blocking.py) |
