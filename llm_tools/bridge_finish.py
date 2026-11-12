@@ -12,9 +12,10 @@ Exit commands (each verified in the installed CLI without starting a session):
 * GitHub Copilot CLI 1.0: built-in commands ``/exit`` and ``/quit``.
 
 Each provider's composer shows a slash-command popup, so the first Enter can
-only accept the popup selection. The plan therefore sends the command, Enter,
-a short pause and a second Enter only if the pane still shows the popup with
-the exit command as its first entry. The plan is data (``EXIT_STEPS``), and the
+only accept the popup selection. The plan therefore sends the command, a short
+pause (so the Enter is not taken as part of a pasted burst), Enter, another
+pause and a second Enter only if the pane still shows the popup with the exit
+command as its first entry or the composer still holds the command. The plan is data (``EXIT_STEPS``), and the
 command text can be replaced per provider with ``LLM_BRIDGE_FINISH_<PROVIDER>``
 (for example ``LLM_BRIDGE_FINISH_CODEX=/exit``).
 
@@ -45,10 +46,17 @@ NOT_EXITED_MESSAGE = "Provider did not exit · switch to it with Ctrl-] then P"
 ASKING_MESSAGE = "Provider is asking something — switch to it with Ctrl-] then P"
 
 # Steps: ("text", literal keys), ("key", tmux key name), ("pause", seconds),
-# ("key-if-popup", tmux key name; sent only while the pane is alive and still
-# shows the slash-command popup with the exit command as its first entry).
+# ("key-if-popup", tmux key name; sent only while the pane is alive and the
+# command has not been submitted: the slash-command popup is open with the exit
+# command as its first entry, or the composer still holds the command text).
+#
+# The pause between the typed text and the first Enter matters: Codex treats
+# characters that arrive in a rapid burst as pasted text, and an Enter inside
+# that burst inserts a newline instead of submitting. Waiting past the burst
+# window makes the Enter a real keypress.
 EXIT_STEPS: tuple[tuple[str, object], ...] = (
     ("text", "{command}"),
+    ("pause", SETTLE_SECONDS),
     ("key", "Enter"),
     ("pause", SETTLE_SECONDS),
     ("key-if-popup", "Enter"),
@@ -103,6 +111,15 @@ def exit_popup_open(screen: str, command: str) -> bool:
         entry = line.strip(" \t│┃|▶▸►›❯>")
         if entry.startswith("/"):
             return entry.split()[0] == command
+    return False
+
+
+def composer_holds_command(screen: str, command: str) -> bool:
+    """Whether a composer line still contains exactly ``command``: typed but not submitted."""
+    for line in _tail(screen):
+        match = COMPOSER_LINE.match(line)
+        if match and line[match.end():].strip(" \t│┃|") == command:
+            return True
     return False
 
 
@@ -224,7 +241,8 @@ def finish_mission(
                 elif kind == "pause":
                     sleep(float(value))  # type: ignore[arg-type]
                 elif kind == "key-if-popup" and backend.pane_is_alive(handle, pane="provider"):
-                    if exit_popup_open(backend.capture(handle, pane="provider"), command):
+                    pending = backend.capture(handle, pane="provider")
+                    if exit_popup_open(pending, command) or composer_holds_command(pending, command):
                         backend.send_keys(handle, pane="provider", keys=str(value))
             except (OSError, RuntimeError, PermissionError):
                 # The pane or station vanished while typing: the provider is gone.
