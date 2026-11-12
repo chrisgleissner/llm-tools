@@ -171,8 +171,11 @@ class ProgressCounter:
     """Count of passes the controller's main loop has made (INT-016).
 
     The heartbeat comes from the refresh thread, so a fresh heartbeat alone does not show that the main loop is
-    running. The main loop ticks this counter, and the heartbeat carries it: a value that stops changing between
-    heartbeats means the loop is blocked.
+    running. The heartbeat carries this counter as ``main_loop_progress``. It changes on every pass of
+    ``before_iteration`` (the wait for the next task) and about every 0.5 s while a verifier runs. It does not
+    change while a provider run is in progress, because that run is made inline by the scheduler, which does
+    not report to the controller: a value that stays the same across heartbeats therefore means either a
+    provider run in progress or a blocked loop, and the mission's operation status tells them apart.
     """
 
     def __init__(self) -> None:

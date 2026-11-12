@@ -464,7 +464,10 @@ class BridgeMissionHooks:
         for task_id in requests:
             task = self.store.get_task(task_id)
             if task["status"] == "VERIFYING":
-                run_configured_verifier(self.store, self.mission_id, task_id, runtime=self.controller_logs.parent, progress=self.progress)
+                outcome = run_configured_verifier(self.store, self.mission_id, task_id, runtime=self.controller_logs.parent, progress=self.progress)
+                if outcome.get("reason") in {"interrupted", "mission-cancelled"}:
+                    remaining.append(task_id)  # not run to the end: the request stays for the operator's next start
+                    continue
                 self.store.record_runtime_event(self.mission_id, "steering-verify-applied", {"task_id": task_id})
             else:
                 remaining.append(task_id)
@@ -1424,7 +1427,8 @@ def _kill_process_group(proc: subprocess.Popen[bytes], grace: float = 0.5) -> No
 
 
 VERIFIER_STOP_CHECK_SECONDS = 0.5
-VERIFIER_STOP_STATUSES = frozenset({"STOPPING", "CANCELLED"})
+# A graceful stop lets a running verifier finish (the provider already did); only a cancel ends it.
+VERIFIER_STOP_STATUSES = frozenset({"CANCELLED"})
 
 
 def _run_bounded_verifier(
@@ -1533,8 +1537,8 @@ def run_configured_verifier(
 ) -> dict[str, Any]:
     """Run the mission's explicit argv verifier and bind evidence to a revision.
 
-    A mission that becomes STOPPING or CANCELLED while the verifier runs ends it (INT-016) instead of making
-    the operator wait for it; ``progress`` is ticked while the verifier runs.
+    A mission that becomes CANCELLED while the verifier runs ends it (INT-016), and none is started for a
+    cancelled mission; a graceful stop (STOPPING) lets it finish. An interrupted verifier is never a pass; ``progress`` is ticked while the verifier runs.
     """
     mission = store.get_mission(mission_id)
     task = store.get_task(task_id)
@@ -1542,6 +1546,8 @@ def run_configured_verifier(
         raise TransitionError("configured verification task belongs to another mission")
     if task["status"] != "VERIFYING":
         return {"status": task["status"], "reason": "task-no-longer-verifying", "revision": int(task["revision"])}
+    if mission["status"] == "CANCELLED":
+        return {"status": task["status"], "reason": "mission-cancelled", "revision": int(task["revision"])}
     verifier = mission["config"].get("verifier")
     if not isinstance(verifier, dict) or not isinstance(verifier.get("argv"), list) or not verifier["argv"]:
         return {"status": "VERIFYING", "reason": "no-configured-verifier"}
@@ -1662,7 +1668,7 @@ def run_configured_verifier(
         "output_sha256": run_result["output_sha256"],
         "output_size": run_result["output_size"],
     }
-    if exit_code == 0 and not run_result["output_truncated"]:
+    if exit_code == 0 and not run_result["output_truncated"] and not run_result.get("interrupted"):
         try:
             try:
                 payload = json.loads(output) if output.strip() else {}
