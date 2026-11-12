@@ -45,12 +45,14 @@ test("Mission tasks: Resume is clicked although the task list is refreshed betwe
   const resume = page.locator('[data-entity^="task:"] [data-action="resume"]');
   await expect(resume).toHaveCount(1);
   const reads = mock.requestCounts().tasks;
-  // The page waits 150 ms after a change notice before it reads the tasks, so the notices come 200 ms apart to make it read after each.
-  await pressAcrossRedraws(page, resume, (n) => {
+  // Each redraw changes the tasks, pushes an event, and then waits until the page has actually read the task list again
+  // (bounded). The count of reads therefore does not depend on how fast the runner is.
+  await pressAcrossRedraws(page, resume, async (n) => {
     mock.setTasks(RUNNING, ["COMPLETED", "PAUSED", n % 2 ? "QUEUED" : "READY"]);
     mock.pushEvent({ kind: "task-status", task_id: 3, mission_id: RUNNING, data: { from: "QUEUED", to: "READY" } });
-  }, 200);
-  expect(mock.requestCounts().tasks - reads, "the task list was read and redrawn while the button was held").toBeGreaterThanOrEqual(4);
+    await expect.poll(() => mock.requestCounts().tasks - reads, { message: `read ${n + 1} of the task list while the button was held`, timeout: 10_000 }).toBeGreaterThanOrEqual(n + 1);
+  }, 50);
+  expect(mock.requestCounts().tasks - reads, "the task list was read and redrawn while the button was held").toBeGreaterThanOrEqual(6);
   await expect.poll(() => mock.operations()).toContain("task.resume");
 });
 
