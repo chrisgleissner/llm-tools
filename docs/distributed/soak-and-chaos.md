@@ -301,6 +301,15 @@ leak between 1.5 and 2 MiB per hour is seen only by the 4.5-hour run. `tests/tes
 recorded series (`RECORDED_CONTROLLER_MEDIAN_MIB`): the old gate fails it, the new one passes it, and a synthetic leak of
 2.5 MiB per hour added after 1800 s fails the new gate.
 
+**Local confirmation (60 minutes, nightly parameters, 4 cores, `nice -n 19`, on a host with load average 20 to 60).** The
+median controller went from 35.7 MiB at 0 s to 38.5 MiB (900 s, the retention pass), 39.4 MiB at 1850 s, then 39.8 MiB at
+3480 s: 0.3 MiB per hour after 1850 s. Median slope per hour on that series: 1882 KiB (30-minute fit, warm-up 1200 s; it
+passes only because the fitted rise of 255 KiB is under the floor), 791 KiB (first 2700 s, warm-up 1800 s) and 634 KiB (whole
+run, warm-up 1800 s). Many controllers exited before the end (50 running at 1100 s, 19 at 3480 s: their backlog was
+finished), so the late fits use 20 to 28 processes. The run failed only the `submit` p99 budget (1289 ms against 500) on that
+overloaded host. The coordinator (release build) was at 81 MiB after 6 minutes and 92 MiB from 2200 s on (129 000 events),
+against 34 to 40 MiB in the hosted runs; its ceiling is 96 MiB. That was not investigated here.
+
 **Second nightly failure: exactly once at 4.5 hours.** The long run also failed `commands exactly once` on all four
 nights with about 30 000 violations of the form `accepted but missing from the journal` and `0 submit audit entries`.
 The coordinator keeps at most 5000 finished commands (`MAX_DONE_COMMANDS`, oldest deleted first) and 100 000 audit rows,
