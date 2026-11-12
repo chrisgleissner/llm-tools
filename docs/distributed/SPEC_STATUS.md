@@ -533,6 +533,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-019 | [ ] | Not started. |
 | FIND-020 | [ ] | Not started. |
 | DOG-027 | [ ] | Not started. |
+| DOG-028 | [x] | An open overflow menu was replaced by a live refresh, so a click hit a detached element (`terminal.spec.ts` on firefox-desktop in CI). The session pane rebuilt "Session options" on every connection state change and the mission header was rebuilt with `replaceChildren`. The session menu is now created once and updated in place, and the header is patched in place. The header and session tests failed before the fix; the four list menus are guarded against regression. Tests: web/e2e/menu-refresh.spec.ts::"Mission header: the open More mission actions menu survives refreshes of the header", web/e2e/menu-refresh.spec.ts::"Session pane: the open Session options menu survives connection state changes" |
 | DOCS-001 | [x] | `docs/HANDOVER.md`, `PLANS.md` and `docs/features/llm-bridge/HANDOVER.md` moved to `docs/archive/`; `spec-audit.md` and `progress.md` open with the release or review they describe and link the register. Evidence: docs/archive/PLANS.md |
 | DOCS-002 | [x] | `AGENTS.md` names every `llm_tools/bridge*.py` module (13 were missing and are added). Revert: the previous `AGENTS.md` fails listing the missing modules. Tests: tests/test_distributed_spec_status.py::test_agents_md_names_every_bridge_module, tests/test_distributed_spec_status.py::test_unnamed_bridge_module_is_detected |
 | DOCS-003 | [ ] | Not started. |

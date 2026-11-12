@@ -27,3 +27,4 @@ Requirement text is taken from spec-addendum-2026-11-06.md, spec-addendum-2026-1
 - DOG-025: A native provider's final line must not be lost when it exits at once on tmux 3.4.
 - DOG-026: A live refresh never replaces a row element that the pointer or keyboard focus is on; rows of every live-refreshing list in the web console are keyed and updated in place.
 - DOG-027: `llm-bridge finish` typed `/quit` into Codex without submitting it. Test with the fake provider that requires the submit key.
+- DOG-028: An open overflow menu in the web console survives live refreshes; a click on one of its items always reaches a connected element.
