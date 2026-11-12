@@ -141,6 +141,12 @@ class _ViewRows:
         policy = _dict(_dict(data.get("mission")).get("execution_policy"))
         policy_text = bridge_format.LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
         rows.append(row("Policy", policy_text))
+        budget_data = _dict(data.get("budget"))
+        if budget_data.get("limits"):
+            from .bridge_budget import summary
+
+            reached = " · limit reached" if budget_data.get("reached") else ""
+            rows.append(row("Budget", _text(summary(_dict(budget_data["limits"]), _dict(budget_data.get("used"))), 200) + reached))
         needs = _needs_you_rows(data)
         for index, text in enumerate(needs):
             rows.append(row("Needs you" if index == 0 else "", text))

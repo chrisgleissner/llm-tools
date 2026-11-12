@@ -10,17 +10,23 @@ Two mission settings control what Bridge does with a task's result:
 Bridge runs git itself, so the policy does not depend on the provider or on the provider's sandbox.
 Rules that hold for every git call made here:
 
-* The git argument list is built by this module and run without a shell, in the mission's working directory
-  (the worktree for an isolated mission), with a timeout and with terminal prompts disabled.
+* Commit and push are for isolated missions only (``--isolate worktree``): a commit in a checkout that the
+  operator also works in would take their changes. Git runs at the mission's worktree path (the top of the
+  work tree, even when the mission's folder is a sub-folder), without a shell, with a timeout and with
+  terminal prompts disabled.
+* Both need a configured verifier: Bridge commits only after a verifier pass.
 * No force option or force refspec is ever used.
 * The push target is the branch's configured upstream, or the same-named branch on the configured push
   remote (``branch.<name>.pushRemote`` or ``remote.pushDefault``). With neither, the push is refused and the
   mission is held; Bridge does not choose a remote.
 * A push to the repository's default branch is refused unless the mission was created with
-  ``--push-default-branch``.
+  ``--push-default-branch``. The default branch is the one ``git ls-remote --symref REMOTE HEAD`` names; when
+  that cannot be determined the push is refused.
 * A commit with nothing to commit is not an error.
-* A failed commit or push holds the mission (status ``PAUSED``, ``hold_reason`` in its config) and records an
-  event. The task keeps its verified status.
+* A failed commit or push holds the mission (status ``PAUSED``, ``hold_reason`` in its config, saved in one
+  transaction) and records an event. The task keeps its verified status. The pending step is saved as
+  ``pending_publish``; when the operator resumes, the controller retries it, with the failed task's own commit
+  message, before the next task starts, so one task's changes never go into another task's commit.
 * The author and committer come from the repository's git configuration; Bridge sets neither.
 """
 
@@ -38,11 +44,11 @@ DEFAULT_COMMIT = "none"
 DEFAULT_PUSH = "never"
 GIT_TIMEOUT_SECONDS = 60.0
 PUSH_TIMEOUT_SECONDS = 180.0
+LS_REMOTE_TIMEOUT_SECONDS = 30.0
 SUBJECT_LIMIT = 72
 HOLD_COMMIT_FAILED = "commit-failed"
 HOLD_PUSH_FAILED = "push-failed"
 HOLD_PUSH_REFUSED = "push-refused"
-FALLBACK_DEFAULT_BRANCHES = ("main", "master")
 
 
 def validate_policy(commit: Any, push: Any) -> tuple[str, str]:
@@ -122,11 +128,14 @@ def _event(store: Any, mission_id: str, kind: str, data: dict[str, Any]) -> None
     store.record_runtime_event(mission_id, kind, data)
 
 
-def hold_mission(store: Any, mission_id: str, reason: str, detail: str) -> None:
-    """Hold the mission for the operator: ``PAUSED`` plus a saved reason, shown by status and the console."""
-    store.set_mission_config_values(mission_id, {"hold_reason": reason, "hold_detail": detail[:500]}, event_kind="mission-held")
-    if str(store.get_mission(mission_id)["status"]) == "RUNNING":
-        store.set_mission_status(mission_id, "PAUSED")
+def hold_mission(store: Any, mission_id: str, reason: str, detail: str, **extra: Any) -> None:
+    """Hold the mission for the operator: ``PAUSED`` plus a saved reason, in one transaction; status and the console show it."""
+    store.hold_mission(mission_id, {"hold_reason": reason, "hold_detail": detail[:500], **extra})
+
+
+def work_tree(mission: dict[str, Any]) -> str:
+    """The top of the mission's worktree, or an empty string for a mission that is not isolated."""
+    return str(mission.get("worktree_path") or "") if mission.get("isolation") == "worktree" else ""
 
 
 def _repo_state(cwd: str) -> tuple[str | None, str]:
@@ -152,14 +161,16 @@ def commit_task(store: Any, mission: dict[str, Any], task: dict[str, Any], summa
     if policy["commit"] != "per-task":
         return True
     mission_id = str(mission["id"])
-    cwd = str(mission["cwd"])
+    cwd = work_tree(mission)
     task_id = int(task["id"])
 
     def fail(reason: str) -> bool:
         _event(store, mission_id, "task-commit-failed", {"task_id": task_id, "reason": reason[:500]})
-        hold_mission(store, mission_id, HOLD_COMMIT_FAILED, reason)
+        hold_mission(store, mission_id, HOLD_COMMIT_FAILED, reason, pending_publish={"task_id": task_id, "stage": "commit"})
         return False
 
+    if not cwd:
+        return fail("this mission is not isolated; Bridge commits only in a worktree (create the mission with --isolate worktree)")
     branch, error = _repo_state(cwd)
     if branch is None:
         return fail(error)
@@ -181,13 +192,18 @@ def commit_task(store: Any, mission: dict[str, Any], task: dict[str, Any], summa
     return True
 
 
-def default_branches(cwd: str, remote: str) -> set[str]:
-    """Names that count as the repository's default branch: the remote's HEAD target, else main and master."""
-    prefix = f"refs/remotes/{remote}/"
-    head = git(cwd, "symbolic-ref", "--quiet", f"{prefix}HEAD")
-    if head.code == 0 and head.out.startswith(prefix):
-        return {head.out[len(prefix):]}
-    return set(FALLBACK_DEFAULT_BRANCHES)
+def default_branch(cwd: str, remote: str) -> tuple[str | None, str]:
+    """``(name, "")`` of the remote's default branch from ``git ls-remote --symref REMOTE HEAD``, else ``(None, why)``.
+
+    The local ``refs/remotes/REMOTE/HEAD`` is not used and there is no guess from branch names such as main.
+    """
+    done = git(cwd, "ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT_SECONDS)
+    if done.code != 0:
+        return None, f"git ls-remote failed: {done.err or done.out or 'no output'}"
+    for line in done.out.splitlines():
+        if line.startswith("ref: refs/heads/") and line.rstrip().endswith("HEAD"):
+            return line[len("ref: refs/heads/"):].split("\t")[0].strip(), ""
+    return None, "the remote did not report where HEAD points"
 
 
 def push_target(cwd: str, branch: str) -> tuple[str, str] | str:
@@ -206,14 +222,17 @@ def push_target(cwd: str, branch: str) -> tuple[str, str] | str:
 def push_branch(store: Any, mission: dict[str, Any], *, task_id: int | None = None) -> bool:
     """Push HEAD to the configured target. Never forced. Returns False after holding the mission."""
     mission_id = str(mission["id"])
-    cwd = str(mission["cwd"])
+    cwd = work_tree(mission)
     policy = policy_of(mission.get("config"))
 
     def refuse(reason: str, hold: str = HOLD_PUSH_REFUSED, **extra: Any) -> bool:
         _event(store, mission_id, "push-failed", {"task_id": task_id, "reason": reason[:500], "refused": hold == HOLD_PUSH_REFUSED, **extra})
-        hold_mission(store, mission_id, hold, reason)
+        pending = {"pending_publish": {"task_id": task_id, "stage": "push"}} if task_id is not None else {}
+        hold_mission(store, mission_id, hold, reason, **pending)
         return False
 
+    if not cwd:
+        return refuse("this mission is not isolated; Bridge pushes only from a worktree (create the mission with --isolate worktree)")
     branch, error = _repo_state(cwd)
     if branch is None:
         return refuse(error)
@@ -221,7 +240,11 @@ def push_branch(store: Any, mission: dict[str, Any], *, task_id: int | None = No
     if isinstance(target, str):
         return refuse(target)
     remote, remote_branch = target
-    if remote_branch in default_branches(cwd, remote) and not policy["push_default_branch"]:
+    default, why = default_branch(cwd, remote)
+    if default is None:
+        if not policy["push_default_branch"]:
+            return refuse(f"refusing to push: the default branch of {remote} could not be determined ({why}), so Bridge cannot tell whether {remote_branch} is it", remote=remote, branch=remote_branch)
+    elif remote_branch == default and not policy["push_default_branch"]:
         return refuse(f"refusing to push to the default branch {remote_branch} of {remote}; create the mission with --push-default-branch to allow it", remote=remote, branch=remote_branch)
     done = git(cwd, "push", remote, f"HEAD:refs/heads/{remote_branch}", timeout=PUSH_TIMEOUT_SECONDS)
     if done.code != 0:
@@ -237,6 +260,27 @@ def orchestration_settings(config: dict[str, Any] | None) -> dict[str, Any]:
     config = config if isinstance(config, dict) else {}
     return {**policy_of(config), "budget": budget_of(config),
             "hold_reason": str(config.get("hold_reason") or "") or None, "hold_detail": str(config.get("hold_detail") or "") or None}
+
+
+def retry_pending(store: Any, mission: dict[str, Any]) -> bool:
+    """After a resume: redo the commit or push that failed, for its own task, before any later task starts.
+
+    Returns False when it failed again (the mission is held again). The saved ``pending_publish`` is cleared on success.
+    """
+    pending = (mission.get("config") or {}).get("pending_publish")
+    if not isinstance(pending, dict) or pending.get("task_id") is None:
+        return True
+    mission_id = str(mission["id"])
+    task = store.get_task(int(pending["task_id"]))
+    if pending.get("stage") == "commit":
+        evidence = task.get("evidence") or []
+        summary = str(evidence[-1].get("summary", "")) if evidence and isinstance(evidence[-1], dict) else ""
+        ok = commit_task(store, mission, task, summary)
+    else:
+        ok = push_branch(store, mission, task_id=int(task["id"]))
+    if ok:
+        store.set_mission_config_values(mission_id, {"pending_publish": None}, event_kind="mission-hold-released")
+    return ok
 
 
 def push_mission(store: Any, mission: dict[str, Any]) -> bool:

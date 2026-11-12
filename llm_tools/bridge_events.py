@@ -65,6 +65,7 @@ EVENTS.update({str(kind): spec for kind, spec in {
     K.TASK_PROVIDER_CONTINUATION: _PLUMBING,
     # Steering requests are operator actions; their application is bookkeeping.
     K.PROVIDER_SPEND: _PLUMBING,
+    K.SPEND_BASELINE: _HIDDEN,
     K.STEERING_HANDOFF_CONSUMED: _PLUMBING,
     K.STEERING_PAUSE_APPLIED: _PLUMBING,
     K.STEERING_STOP_TASK_APPLIED: _PLUMBING,

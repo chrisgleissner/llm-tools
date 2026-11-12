@@ -70,6 +70,7 @@ class CommandRequest:
     mission_id: str | None = None
     target: str = LOCAL_TARGET
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    remote: bool = field(default=False, compare=False)  # set by the worker for a request that came from the coordinator; never serialised
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -282,13 +283,20 @@ def _mission_settings_get(store: BridgeStore | None, request: CommandRequest, pa
             **orchestration_settings(config)}
 
 
-_PUBLISH_BUDGET_PARAMS = ("commit", "push", "budget_runs", "budget_minutes", "budget_provider_changes", "budget_spend", "budget_currency")
+_PUBLISH_BUDGET_PARAMS = ("commit", "push", "push_default_branch", "budget_runs", "budget_minutes", "budget_provider_changes", "budget_spend", "budget_currency")
 
 
 def _mission_settings_patch(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert request.mission_id is not None
     if all(params[name] is None for name in ("auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour", *_PUBLISH_BUDGET_PARAMS)):
         raise CommandFailure("invalid-argument", "mission.settings.patch requires at least one setting")
+    local_only = [name for name in ("commit", "push", "push_default_branch") if params[name] is not None]
+    if request.remote and local_only:
+        # Bridge commits and pushes with the operator's own git identity and credentials on the worker; a coordinator may not change that.
+        raise CommandFailure("unsupported-remote-option", "mission.settings.patch does not support remote option(s): " + ", ".join(local_only),
+                             details={"options": [f"--{name}" for name in local_only]})
+    if params["push_default_branch"] is not None:
+        raise CommandFailure("invalid-argument", "push_default_branch is set only when the mission is created (--push-default-branch)")
     cli = _cli()
     # Validate the whole patch before writing any setting. A valid early field
     # must not be committed when a later color or token policy is invalid.
@@ -763,7 +771,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),
                        "suspend_when_rate_limited": Param(bool), "colour": Param(str),
-                       "commit": Param(str), "push": Param(str), "budget_runs": Param(int), "budget_minutes": Param(int),
+                       "commit": Param(str), "push": Param(str), "push_default_branch": Param(bool), "budget_runs": Param(int), "budget_minutes": Param(int),
                        "budget_provider_changes": Param(int), "budget_spend": Param(float), "budget_currency": Param(str)}, _mission_settings_patch),
         OperationSpec("mission.steer", "Queue typed steering for a mission task or safe boundary", True, True,
                       {"kind": Param(str, required=True), "task": Param(int), "task_id": Param(int),

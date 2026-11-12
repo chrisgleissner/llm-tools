@@ -1588,20 +1588,40 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     verifier = _verifier_config(args)
     if verifier:
         config["verifier"] = verifier
-    config.update(_orchestration_config(args))
+    config.update(_orchestration_config(args, config))
     return prompt, config
 
 
-def _orchestration_config(args: argparse.Namespace) -> dict[str, Any]:
+def _publish_requirements(isolated: bool, has_verifier: bool) -> None:
+    """Commit and push need an isolated mission and a configured verifier; raises ``ValueError`` naming the missing option."""
+    if not isolated:
+        raise ValueError("commit and push need an isolated mission: create it with --isolate worktree (Bridge does not commit in a checkout you also work in)")
+    if not has_verifier:
+        raise ValueError("commit and push need a verifier: Bridge commits only after the verifier passes (add --verifier COMMAND)")
+
+
+def _check_spend_currency(config: dict[str, Any], budget: dict[str, Any]) -> None:
+    from . import bridge_budget, bridge_rotation
+
+    if "spend" in budget:
+        ok, why = bridge_budget.spend_capable(bridge_rotation.parse_frozen(config.get("frozen_tool_config")), config.get("providers"), config.get("routes"), budget["currency"])
+        if not ok:
+            raise ValueError(why)
+
+
+def _orchestration_config(args: argparse.Namespace, config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Commit, push and budget settings from the create options; only the ones given are saved. Raises ``ValueError`` when invalid."""
     from . import bridge_budget, bridge_publish
 
+    config = config or {}
     commit, push = getattr(args, "commit", None), getattr(args, "push", None)
     out: dict[str, Any] = {}
     if commit is not None or push is not None:
         out["commit"], out["push"] = bridge_publish.validate_policy(commit, push)
     if getattr(args, "push_default_branch", False):
         out["push_default_branch"] = True
+    if out.get("commit", "none") != "none" or out.get("push", "never") != "never" or out.get("push_default_branch"):
+        _publish_requirements(getattr(args, "isolate", "none") == "worktree", bool((config.get("verifier") or {}).get("argv")))
     limits: dict[str, Any] = {key: getattr(args, name, None) for key, name in (("runs", "budget_runs"), ("wall_seconds", "budget_minutes"), ("provider_changes", "budget_provider_changes"), ("spend", "budget_spend"), ("currency", "budget_currency"))}
     budget: dict[str, Any] = {}
     for key, value in limits.items():
@@ -1609,6 +1629,7 @@ def _orchestration_config(args: argparse.Namespace) -> dict[str, Any]:
             budget[key] = int(value) * 60 if key == "wall_seconds" else value
     if budget:
         out["budget"] = bridge_budget.validate_budget(budget)
+        _check_spend_currency(config, out["budget"])
     return out
 
 
@@ -1904,13 +1925,16 @@ def validated_orchestration_patch(mission_id: str, params: dict[str, Any]) -> tu
     if all(value is None for value in params.values()):
         return {}, None
     with open_store(readonly=True) as reader:
-        config = reader.get_mission(mission_id).get("config") or {}
+        row = reader.get_mission(mission_id)
+    config = row.get("config") or {}
     policy: dict[str, Any] = {}
     if params.get("commit") is not None or params.get("push") is not None:
         commit, push = bridge_publish.validate_policy(
             params["commit"] if params.get("commit") is not None else config.get("commit"),
             params["push"] if params.get("push") is not None else config.get("push"))
         policy = {"commit": commit, "push": push}
+        if commit != "none" or push != "never":
+            _publish_requirements(row.get("isolation") == "worktree", bool((config.get("verifier") or {}).get("argv")))
     budget: dict[str, Any] | None = None
     names = (("runs", "budget_runs"), ("wall_seconds", "budget_minutes"), ("provider_changes", "budget_provider_changes"), ("spend", "budget_spend"), ("currency", "budget_currency"))
     given = {key: params[name] for key, name in names if params.get(name) is not None}
@@ -1924,6 +1948,7 @@ def validated_orchestration_patch(mission_id: str, params: dict[str, Any]) -> tu
             else:
                 budget[key] = int(value) * 60 if key == "wall_seconds" else value
         budget = bridge_budget.validate_budget(budget)
+        _check_spend_currency(config, budget)
     return policy, budget
 
 

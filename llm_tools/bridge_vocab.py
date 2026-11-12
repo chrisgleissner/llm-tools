@@ -176,6 +176,7 @@ class EventKind(StrEnum):
     PUSH_FAILED = "push-failed"
     BUDGET_EXHAUSTED = "budget-exhausted"
     PROVIDER_SPEND = "provider-spend"
+    SPEND_BASELINE = "spend-baseline"
     MISSION_REOPENED = "mission-reopened"
     MISSION_STATUS = "mission-status"
     MISSION_SUSPEND_WHEN_RATE_LIMITED = "mission-suspend-when-rate-limited"

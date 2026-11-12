@@ -189,7 +189,19 @@ class BridgeMissionHooks:
 
         return _safe_decision(selection)
 
+    def _sample_spend(self, selection: dict[str, Any]) -> None:
+        """At each provider selection: turn the rotation providers' reported spend into ``provider-spend`` events (best effort)."""
+        try:
+            from . import bridge_budget
+
+            mission = self.store.get_mission(self.mission_id)
+            if "spend" in bridge_budget.budget_of(mission.get("config")):
+                bridge_budget.sample_spend(self.store, mission, selection)
+        except Exception:  # noqa: BLE001 - a spend reading must never stop provider selection
+            pass
+
     def on_selection(self, selection: dict[str, Any]) -> None:
+        self._sample_spend(selection)
         projection = self._selection_projection(selection)
         station = projection["route"] or projection["provider"]
         if self._last_selected_station and station and station != self._last_selected_station:
@@ -322,6 +334,11 @@ class BridgeMissionHooks:
                 # The operator resumed a mission that Bridge held (budget, commit or push). The budget is checked
                 # again before the next run, so a limit that is still reached holds the mission again.
                 self.store.set_mission_config_values(self.mission_id, {"hold_reason": "", "hold_detail": ""}, event_kind="mission-hold-released")
+                from .bridge_publish import retry_pending
+
+                # A commit or push that failed is redone for its own task before the next task starts.
+                if not retry_pending(self.store, self.store.get_mission(self.mission_id)):
+                    continue
             hold = self.store.sync_review_hold_events(self.mission_id)
             if hold is not None:
                 # A native operator is at the station: do not start the next
@@ -585,6 +602,14 @@ class BridgeMissionHooks:
             return False
         provider = str(selection.get("provider") or scheduler_config.provider)
         route_id = str(selection.get("route") or "")
+        from . import bridge_budget
+
+        if bridge_budget.hold_if_reached(self.store, mission) is not None:
+            return False  # every launch is checked, so a retry of a failed run counts against the limit too
+        if "runs" in bridge_budget.budget_of(mission.get("config")):
+            # A scheduler-internal retry would start a provider process without passing here. With a run limit, each
+            # launch is a new, counted operation instead; Ralph's own loop retries it.
+            scheduler_config.retry_delays = ""
         try:
             operation_id = self.store.begin_operation(int(context["task_id"]), iteration=iteration, station=route_id or provider)
         except TransitionError:

@@ -401,6 +401,11 @@ def _h_provider_spend(ctx: _EventContext) -> str:
     return f"Spend {_text(ctx.data.get('amount') or '', 12)} {_text(ctx.data.get('currency') or '', 8)}".rstrip()
 
 
+@_humanizer(EventKind.SPEND_BASELINE)
+def _h_spend_baseline(ctx: _EventContext) -> str:
+    return "Spend baseline recorded"
+
+
 @_humanizer(EventKind.MISSION_HELD)
 def _h_mission_held(ctx: _EventContext) -> str:
     values = ctx.data.get("values")
