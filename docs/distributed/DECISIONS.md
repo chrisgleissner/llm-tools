@@ -628,3 +628,7 @@ A mission created through the coordinator may name only a verifier that the work
 This replaces the 1200 s warm-up recorded in D16. The controller memory slope is fitted after a 1800 s warm-up, and the nightly soak runs 2700 s so that the fit window lies between two 900 s retention passes. The recorded nightly series show no leak: the failures came from a fit window that ended on a retention peak. A 900 s window cannot resolve a controller leak below about 2 MiB/h; the long nightly run covers that range.
 
 The soak items `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore` are deferred to 1.6.0. Each needs a coordinator change (a task count in diagnostics, a native clock source, or a query of unfinished commands per worker). Until then the thread count, the `LD_PRELOAD` clock shim and the `db-corrupt-page` restore fault cover them in part.
+
+## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
+
+Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.

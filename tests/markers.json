@@ -417,6 +417,12 @@
    "subprocess"
   ]
  },
+ "tests/test_bridge_finish_submit.py": {
+  "test_finish_submits_exit_command_to_provider_that_treats_quick_enter_as_paste": [
+   "tmux",
+   "subprocess"
+  ]
+ },
  "tests/test_bridge_finished_station.py": {
   "test_a_live_native_provider_is_never_killed": [
    "tmux",
@@ -715,11 +721,60 @@
    "subprocess"
   ]
  },
+ "tests/test_bridge_identity_read_race.py": {
+  "test_a_different_identity_is_refused_at_once_without_rereading": [
+   "subprocess"
+  ],
+  "test_identity_that_stays_unreadable_is_still_refused_and_nothing_is_signalled": [
+   "subprocess"
+  ],
+  "test_managed_process_stop_rereads_a_transiently_unreadable_identity": [
+   "subprocess"
+  ],
+  "test_owned_tree_of_an_alive_root_with_unreadable_identity_raises_instead_of_returning_nothing": [
+   "subprocess"
+  ],
+  "test_transient_unreadable_identity_is_read_again_and_the_process_is_stopped": [
+   "subprocess"
+  ]
+ },
  "tests/test_bridge_idle_redraw.py": {
   "test_a_commit_by_another_process_reloads_the_list": [
    "subprocess"
   ],
   "test_an_idle_home_screen_draws_once_and_sleeps_between_wakeups": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_int011_int016.py": {
+  "test_int011_event_payload_over_the_cap_shortens_values_and_keeps_every_field": [
+   "subprocess"
+  ],
+  "test_int011_multibyte_payload_over_the_cap_in_bytes_is_capped_although_its_character_count_is_not": [
+   "subprocess"
+  ],
+  "test_int016_a_verifier_of_a_running_mission_is_not_interrupted": [
+   "subprocess"
+  ],
+  "test_int016_cancelled_mission_interrupts_a_running_verifier": [
+   "subprocess"
+  ],
+  "test_int016_graceful_stop_lets_the_verifier_finish_and_the_task_completes": [
+   "subprocess"
+  ],
+  "test_int016_heartbeat_carries_the_main_loop_progress_counter": [
+   "subprocess"
+  ],
+  "test_int016_hooks_tick_the_counter_in_the_main_loop": [
+   "subprocess"
+  ],
+  "test_int016_interrupted_verifier_is_never_a_pass_even_when_it_exits_zero": [
+   "subprocess"
+  ],
+  "test_int016_no_verifier_is_started_for_a_cancelled_mission": [
+   "subprocess"
+  ],
+  "test_int016_verify_request_stays_in_config_when_its_verifier_was_interrupted": [
    "subprocess"
   ]
  },
@@ -2306,13 +2361,13 @@
   "test_task_add_to_a_running_native_mission_says_the_provider_is_told_at_its_next_prompt": [
    "subprocess"
   ],
+  "test_the_config_can_turn_task_notices_off": [
+   "subprocess"
+  ],
   "test_the_console_acknowledgement_includes_the_delivery": [
    "subprocess"
   ],
   "test_the_typed_command_result_carries_the_delivery": [
-   "subprocess"
-  ],
-  "test_the_config_can_turn_task_notices_off": [
    "subprocess"
   ]
  },
@@ -2674,19 +2729,90 @@
    "subprocess"
   ]
  },
+ "tests/test_distributed_chaos.py": {
+  "test_clock_shim_shifts_wall_time_forward_and_backward_while_the_process_runs": [
+   "subprocess"
+  ],
+  "test_fault_meets_its_declared_outcome": [
+   "subprocess",
+   "slow"
+  ]
+ },
  "tests/test_distributed_crash.py": {
   "test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect": [
    "subprocess"
   ]
  },
  "tests/test_distributed_offline.py": {
-  "test_round_trip_opens_only_loopback_sockets": [
+  "test_inner_round_trip": [
    "subprocess"
   ],
   "test_round_trip_in_a_network_namespace_without_a_route": [
    "subprocess"
   ],
-  "test_inner_round_trip": [
+  "test_round_trip_opens_only_loopback_sockets": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_soak_harness.py": {
+  "test_cleanup_stops_every_process_that_carries_the_workers_runtime_directory": [
+   "subprocess"
+  ],
+  "test_provider_behaviours_have_distinct_observable_results": [
+   "subprocess"
+  ],
+  "test_proxy_delay_holds_frames_without_reordering_or_loss": [
+   "subprocess"
+  ],
+  "test_proxy_drops_exactly_the_requested_frames": [
+   "subprocess"
+  ],
+  "test_proxy_probability_drop_is_seeded_and_clearable": [
+   "subprocess"
+  ],
+  "test_proxy_relays_frames_in_both_directions_with_correct_masking": [
+   "subprocess"
+  ],
+  "test_proxy_reset_and_refusal_cut_the_link": [
+   "subprocess"
+  ],
+  "test_short_soak_with_real_coordinator_workers_and_fake_providers": [
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_distributed_storage_writes.py": {
+  "test_an_idle_coordinator_with_a_connected_worker_writes_nothing_per_heartbeat": [
+   "slow",
+   "subprocess"
+  ],
+  "test_one_thousand_command_round_trips_stay_within_the_write_bound": [
+   "subprocess"
+  ],
+  "test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_unreliable_network.py": {
+  "test_command_executed_but_unacknowledged_is_redelivered_and_applied_once": [
+   "subprocess"
+  ],
+  "test_commands_submitted_while_the_link_flaps_are_applied_exactly_once": [
+   "subprocess"
+  ],
+  "test_cut_off_worker_is_offline_and_stale_and_its_events_replicate_after_recovery": [
+   "subprocess"
+  ],
+  "test_half_open_stall_is_detected_by_silence_and_recovered": [
+   "subprocess"
+  ],
+  "test_queues_stay_bounded_while_the_worker_is_cut_off": [
+   "subprocess"
+  ],
+  "test_slow_jittery_throttled_link_loses_nothing": [
+   "subprocess"
+  ],
+  "test_worker_reconnects_within_bound_after_repeated_resets": [
    "subprocess"
   ]
  },
@@ -2921,6 +3047,29 @@
    "subprocess"
   ]
  },
+ "tests/test_standalone_compatibility.py": {
+  "test_llm_bridge_help_and_empty_mission_list": [
+   "subprocess"
+  ],
+  "test_llm_bridge_mission_create_and_list": [
+   "subprocess"
+  ],
+  "test_llm_bridge_worker_status_without_enrolment_creates_nothing": [
+   "subprocess"
+  ],
+  "test_llm_scheduler_dry_run": [
+   "subprocess"
+  ],
+  "test_llm_sleep_soak_simulated": [
+   "subprocess"
+  ],
+  "test_llm_usage_json_without_service": [
+   "subprocess"
+  ],
+  "test_ralph_robin_dry_run": [
+   "subprocess"
+  ]
+ },
  "tests/test_terminal_attach_frames.py": {
   "test_attach_does_not_leave_the_window_at_a_fixed_size": [
    "tmux",
@@ -2963,6 +3112,12 @@
    "subprocess"
   ],
   "test_terminal_backend_uses_only_its_private_tmux_server": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_console_copy_mode.py": {
+  "test_command_pane_leaves_copy_mode_and_provider_pane_keeps_it": [
    "tmux",
    "subprocess"
   ]
@@ -3214,138 +3369,6 @@
    "subprocess"
   ],
   "test_zai_json_top_level_in_llm_usage_json": [
-   "subprocess"
-  ]
- },
- "tests/test_distributed_unreliable_network.py": {
-  "test_worker_reconnects_within_bound_after_repeated_resets": [
-   "subprocess"
-  ],
-  "test_half_open_stall_is_detected_by_silence_and_recovered": [
-   "subprocess"
-  ],
-  "test_cut_off_worker_is_offline_and_stale_and_its_events_replicate_after_recovery": [
-   "subprocess"
-  ],
-  "test_command_executed_but_unacknowledged_is_redelivered_and_applied_once": [
-   "subprocess"
-  ],
-  "test_commands_submitted_while_the_link_flaps_are_applied_exactly_once": [
-   "subprocess"
-  ],
-  "test_queues_stay_bounded_while_the_worker_is_cut_off": [
-   "subprocess"
-  ],
-  "test_slow_jittery_throttled_link_loses_nothing": [
-   "subprocess"
-  ]
- },
- "tests/test_distributed_storage_writes.py": {
-  "test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds": [
-   "subprocess"
-  ],
-  "test_one_thousand_command_round_trips_stay_within_the_write_bound": [
-   "subprocess"
-  ],
-  "test_an_idle_coordinator_with_a_connected_worker_writes_nothing_per_heartbeat": [
-   "slow",
-   "subprocess"
-  ]
- },
- "tests/test_distributed_soak_harness.py": {
-  "test_provider_behaviours_have_distinct_observable_results": [
-   "subprocess"
-  ],
-  "test_proxy_relays_frames_in_both_directions_with_correct_masking": [
-   "subprocess"
-  ],
-  "test_proxy_drops_exactly_the_requested_frames": [
-   "subprocess"
-  ],
-  "test_proxy_probability_drop_is_seeded_and_clearable": [
-   "subprocess"
-  ],
-  "test_proxy_delay_holds_frames_without_reordering_or_loss": [
-   "subprocess"
-  ],
-  "test_proxy_reset_and_refusal_cut_the_link": [
-   "subprocess"
-  ],
-  "test_short_soak_with_real_coordinator_workers_and_fake_providers": [
-   "subprocess",
-   "slow"
-  ],
-  "test_cleanup_stops_every_process_that_carries_the_workers_runtime_directory": [
-   "subprocess"
-  ]
- },
- "tests/test_distributed_chaos.py": {
-  "test_clock_shim_shifts_wall_time_forward_and_backward_while_the_process_runs": [
-   "subprocess"
-  ],
-  "test_fault_meets_its_declared_outcome": [
-   "subprocess",
-   "slow"
-  ]
- },
- "tests/test_bridge_finish_submit.py": {
-  "test_finish_submits_exit_command_to_provider_that_treats_quick_enter_as_paste": [
-   "tmux",
-   "subprocess"
-  ]
- },
- "tests/test_terminal_console_copy_mode.py": {
-  "test_command_pane_leaves_copy_mode_and_provider_pane_keeps_it": [
-   "tmux",
-   "subprocess"
-  ]
- },
- "tests/test_bridge_identity_read_race.py": {
-  "test_a_different_identity_is_refused_at_once_without_rereading": [
-   "subprocess"
-  ],
-  "test_identity_that_stays_unreadable_is_still_refused_and_nothing_is_signalled": [
-   "subprocess"
-  ],
-  "test_managed_process_stop_rereads_a_transiently_unreadable_identity": [
-   "subprocess"
-  ],
-  "test_owned_tree_of_an_alive_root_with_unreadable_identity_raises_instead_of_returning_nothing": [
-   "subprocess"
-  ],
-  "test_transient_unreadable_identity_is_read_again_and_the_process_is_stopped": [
-   "subprocess"
-  ]
- },
- "tests/test_bridge_int011_int016.py": {
-  "test_int011_event_payload_over_the_cap_shortens_values_and_keeps_every_field": [
-   "subprocess"
-  ],
-  "test_int011_multibyte_payload_over_the_cap_in_bytes_is_capped_although_its_character_count_is_not": [
-   "subprocess"
-  ],
-  "test_int016_a_verifier_of_a_running_mission_is_not_interrupted": [
-   "subprocess"
-  ],
-  "test_int016_cancelled_mission_interrupts_a_running_verifier": [
-   "subprocess"
-  ],
-  "test_int016_graceful_stop_lets_the_verifier_finish_and_the_task_completes": [
-   "subprocess"
-  ],
-  "test_int016_heartbeat_carries_the_main_loop_progress_counter": [
-   "subprocess"
-  ],
-  "test_int016_hooks_tick_the_counter_in_the_main_loop": [
-   "subprocess"
-  ],
-  "test_int016_interrupted_verifier_is_never_a_pass_even_when_it_exits_zero": [
-   "subprocess"
-  ],
-  "test_int016_no_verifier_is_started_for_a_cancelled_mission": [
-   "subprocess"
-  ],
-  "test_int016_verify_request_stays_in_config_when_its_verifier_was_interrupted": [
    "subprocess"
   ]
  }
