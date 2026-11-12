@@ -422,6 +422,8 @@ def test_owned_process_tree_collects_only_descendants_of_matching_identity(monke
     monkeypatch.setattr(bridge_runtime, "_proc_process_info", lambda pid: processes[int(pid)])
 
     assert bridge_runtime._owned_process_tree(10, "root") == {pid: processes[pid] for pid in (10, 11, 12)}
+    monkeypatch.setattr(bridge_runtime, "_process_alive_but_unverifiable", lambda _pid: False)  # pid 99 is gone
+    monkeypatch.setattr(bridge_runtime, "_process_start_token", lambda _pid: "")
     assert bridge_runtime._owned_process_tree(99, "missing") == {}
 
 
