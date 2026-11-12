@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from llm_tools import bridge_finish
-from llm_tools.bridge_finish import composer_holds_command, finish_mission
+from llm_tools.bridge_finish import composer_holds_command, finish_mission, second_enter_needed
 from llm_tools.terminal import TmuxTerminalBackend
 from tests.conftest import wait_for
 from tests.test_bridge_switcher import running_native, state  # noqa: F401  (state is a fixture)
@@ -49,6 +49,18 @@ def test_composer_holds_command_only_when_typed_and_unsubmitted() -> None:
     assert not composer_holds_command("out\n› \n  gpt-5\n", "/quit")
     assert not composer_holds_command("out\n› /quit now please\n", "/quit")
     assert not composer_holds_command("/quit\n", "/quit")
+
+
+def test_second_enter_rules() -> None:
+    # popup open, exit command first: Enter accepts it
+    assert second_enter_needed("› /quit\n  /quit   Exit Codex\n  /quote  Other\n", "/quit")
+    # popup open with a different first entry while the composer shows the command: no Enter
+    assert not second_enter_needed("› /quit\n  /quote  Other\n  /quit   Exit Codex\n", "/quit")
+    # no popup, the current input line still holds the command: Enter
+    assert second_enter_needed("work\n› /quit\n  gpt-5\n", "/quit")
+    # Claude echoes the earlier input above an empty composer: no Enter
+    assert not second_enter_needed("> /exit\n\nbye soon\n\n╭──────╮\n│ > │\n╰──────╯\n", "/exit")
+    assert not second_enter_needed("work\n› \n  gpt-5\n", "/quit")
 
 
 @pytest.mark.tmux

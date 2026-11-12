@@ -114,13 +114,36 @@ def exit_popup_open(screen: str, command: str) -> bool:
     return False
 
 
-def composer_holds_command(screen: str, command: str) -> bool:
-    """Whether a composer line still contains exactly ``command``: typed but not submitted."""
+def slash_popup_open(screen: str) -> bool:
+    """Whether a slash-command popup (lines of ``/name  description`` outside the composer) is on screen."""
     for line in _tail(screen):
-        match = COMPOSER_LINE.match(line)
-        if match and line[match.end():].strip(" \t│┃|") == command:
+        if not COMPOSER_LINE.match(line) and line.strip(" \t│┃|▶▸►›❯>").startswith("/"):
             return True
     return False
+
+
+def composer_holds_command(screen: str, command: str) -> bool:
+    """Whether the current input line, the bottom-most composer line, holds exactly ``command``.
+
+    A transcript echo of an earlier input (Claude shows ``> /exit`` above its prompt) is not the input line.
+    """
+    current = None
+    for line in _tail(screen):
+        match = COMPOSER_LINE.match(line)
+        if match:
+            current = line[match.end():].strip(" \t│┃|")
+    return current == command
+
+
+def second_enter_needed(screen: str, command: str) -> bool:
+    """Whether the first Enter left the command unsubmitted.
+
+    With a slash popup open, only a popup whose first entry is the exit command is accepted by Enter.
+    Without a popup, the command must still be in the current input line.
+    """
+    if slash_popup_open(screen):
+        return exit_popup_open(screen, command)
+    return composer_holds_command(screen, command)
 
 
 class FinishError(ValueError):
@@ -242,7 +265,7 @@ def finish_mission(
                     sleep(float(value))  # type: ignore[arg-type]
                 elif kind == "key-if-popup" and backend.pane_is_alive(handle, pane="provider"):
                     pending = backend.capture(handle, pane="provider")
-                    if exit_popup_open(pending, command) or composer_holds_command(pending, command):
+                    if second_enter_needed(pending, command):
                         backend.send_keys(handle, pane="provider", keys=str(value))
             except (OSError, RuntimeError, PermissionError):
                 # The pane or station vanished while typing: the provider is gone.
