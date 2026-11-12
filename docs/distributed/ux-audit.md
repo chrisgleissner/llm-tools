@@ -148,3 +148,96 @@ Keyboard alone, on a desktop (`web/e2e/redesign/uxr-keyboard-only.spec.ts`): eac
 ## Remaining work
 
 This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores and Pixel 4 mission-journey metrics, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: complete the three persona walk-throughs, review/resolve every hesitation on every screen, obtain field INP (the lab proxy above is not a field sample), and finish the remaining console refinements. Do not mark UX-001–006 complete on the strength of this document alone.
+
+## Fresh-eyes critique (UXR-040)
+
+One screenshot per page, width (1440x900 and 360x640) and theme, taken on the deterministic mock (dense data for Inbox and Missions, a running mission with a terminal for Mission). The files are produced by `web/e2e/redesign/uxr-critique-capture.spec.ts` (`CRITIQUE_CAPTURE=1`; see the header of that file). The check `T46` in `uxr-critique.spec.ts` requires each file listed below to exist. The paragraph of a page applies to all four of its screenshots.
+
+### Inbox
+
+At 1440 the page answers the first question (15 need you, split by reason) and lists failed and approval rows before running ones, with the primary action (Retry, Approve) in each row and a preview of the selected row beside the list. At 360 the same rows fit as cards with the action under the title, the bottom navigation carries the badge, and no horizontal scroll occurs. Faults: at 1440 the reason line of an approval row is cut in the middle of a word ("Task 2 awaits yo...- 2 files") and the "Needs approval" pill wraps to two lines; at 360 the quota pill in the top bar shows "Claude resets 12:25" without the remaining percentage and omits Codex (see Proposed rows).
+
+- inbox 1440 light: `docs/distributed/ux-evidence/UXR-040/inbox-1440-light.png`
+- inbox 1440 dark: `docs/distributed/ux-evidence/UXR-040/inbox-1440-dark.png`
+- inbox 360 light: `docs/distributed/ux-evidence/UXR-040/inbox-360-light.png`
+- inbox 360 dark: `docs/distributed/ux-evidence/UXR-040/inbox-360-dark.png`
+
+### Missions
+
+The list is dense and scannable at 1440: state pill, name, task progress, provider, worker and age in aligned columns, with the filters above it and the attention states sorted first. At 360 each row becomes a two-line card with the pill on the first line and the facts on the second. Fault: at 1440 rows of failed missions leave the provider column blank, so the age column looks detached.
+
+- missions 1440 light: `docs/distributed/ux-evidence/UXR-040/missions-1440-light.png`
+- missions 1440 dark: `docs/distributed/ux-evidence/UXR-040/missions-1440-dark.png`
+- missions 360 light: `docs/distributed/ux-evidence/UXR-040/missions-360-light.png`
+- missions 360 dark: `docs/distributed/ux-evidence/UXR-040/missions-360-dark.png`
+
+### Mission
+
+At 1440 the terminal, tasks and evidence sit side by side, the state pill and the one-line reason are beside the title, and the primary action (Approve) is the first button. At 360 the page switches to Session, Tasks and Activity tabs and pins the Approve, Pause and Stop bar above the navigation, so the decision is always one tap away. Fault: at 360 the terminal is wider than the screen and its text is cut at the right edge; it scrolls horizontally, but nothing indicates that.
+
+- mission 1440 light: `docs/distributed/ux-evidence/UXR-040/mission-1440-light.png`
+- mission 1440 dark: `docs/distributed/ux-evidence/UXR-040/mission-1440-dark.png`
+- mission 360 light: `docs/distributed/ux-evidence/UXR-040/mission-360-light.png`
+- mission 360 dark: `docs/distributed/ux-evidence/UXR-040/mission-360-dark.png`
+
+### Sessions
+
+A one-sentence answer states that one session runs and nothing needs the operator, which matches the first question a visitor asks. The running session shows provider, model, mission link, task and age; history is collapsed. At 360 the row wraps cleanly. No fault found; the page is mostly empty space at 1440, which is correct for one session.
+
+- sessions 1440 light: `docs/distributed/ux-evidence/UXR-040/sessions-1440-light.png`
+- sessions 1440 dark: `docs/distributed/ux-evidence/UXR-040/sessions-1440-dark.png`
+- sessions 360 light: `docs/distributed/ux-evidence/UXR-040/sessions-360-light.png`
+- sessions 360 dark: `docs/distributed/ux-evidence/UXR-040/sessions-360-dark.png`
+
+### Workers
+
+The summary names the offline worker and the command to start it, and the offline worker is listed first with a "Why offline?" disclosure. Add worker is the single primary button. At 360 the rows keep the same content on two lines and the primary button keeps its size. No fault found.
+
+- workers 1440 light: `docs/distributed/ux-evidence/UXR-040/workers-1440-light.png`
+- workers 1440 dark: `docs/distributed/ux-evidence/UXR-040/workers-1440-dark.png`
+- workers 360 light: `docs/distributed/ux-evidence/UXR-040/workers-360-light.png`
+- workers 360 dark: `docs/distributed/ux-evidence/UXR-040/workers-360-dark.png`
+
+### Usage
+
+The headline sentence states which provider waits and until when. Each provider card shows one meter per window with the percentage left and the reset time, with details collapsed. At 360 the cards stack. Fault: at 360 the "All workers" filter next to the heading is clipped ("All worker"; see Proposed rows). At 1440 the 4 percent bar of the Claude meter in the top bar is nearly invisible in the light theme.
+
+- usage 1440 light: `docs/distributed/ux-evidence/UXR-040/usage-1440-light.png`
+- usage 1440 dark: `docs/distributed/ux-evidence/UXR-040/usage-1440-dark.png`
+- usage 360 light: `docs/distributed/ux-evidence/UXR-040/usage-360-light.png`
+- usage 360 dark: `docs/distributed/ux-evidence/UXR-040/usage-360-dark.png`
+
+### Diagnostics
+
+The opening paragraph turns the numbers into a statement (a command waits for a worker, check the named workers), and the grids below list the facts. At 360 the grids keep their label and value columns without wrapping. No fault found; at 1440 the cards use about 45 percent of the width, which keeps lines short.
+
+- diagnostics 1440 light: `docs/distributed/ux-evidence/UXR-040/diagnostics-1440-light.png`
+- diagnostics 1440 dark: `docs/distributed/ux-evidence/UXR-040/diagnostics-1440-dark.png`
+- diagnostics 360 light: `docs/distributed/ux-evidence/UXR-040/diagnostics-360-light.png`
+- diagnostics 360 dark: `docs/distributed/ux-evidence/UXR-040/diagnostics-360-dark.png`
+
+### Account
+
+The first card shows who is signed in, how long the session lasts and the Sign out button; the password form follows with the server's rules listed as they are met. At 360 the cards stack with 12 px gutters. No fault beyond the shared top-bar quota pill.
+
+- account 1440 light: `docs/distributed/ux-evidence/UXR-040/account-1440-light.png`
+- account 1440 dark: `docs/distributed/ux-evidence/UXR-040/account-1440-dark.png`
+- account 360 light: `docs/distributed/ux-evidence/UXR-040/account-360-light.png`
+- account 360 dark: `docs/distributed/ux-evidence/UXR-040/account-360-dark.png`
+
+### Sign in
+
+A single centred card with the focus in the Username field, a visible focus ring, the password reveal button and the recovery path as a disclosure. At 360 the card fills the width with 12 px margins. No fault found.
+
+- sign-in 1440 light: `docs/distributed/ux-evidence/UXR-040/sign-in-1440-light.png`
+- sign-in 1440 dark: `docs/distributed/ux-evidence/UXR-040/sign-in-1440-dark.png`
+- sign-in 360 light: `docs/distributed/ux-evidence/UXR-040/sign-in-360-light.png`
+- sign-in 360 dark: `docs/distributed/ux-evidence/UXR-040/sign-in-360-dark.png`
+
+### Proposed rows (faults not fixed in this unit)
+
+- Phone top bar (360): the quota pill drops the remaining percentage and the second provider; it reads "Claude resets 12:25" where the desktop reads "Claude 5h 4% left, resets 12:25". Show the percentage first on phones.
+- Usage and Sessions heading (360): the worker filter in `.fleet-filter` has `flex: 1 1 9.5rem`, which clips "All workers". A basis of 11rem wraps the filter under the heading. This changes the Pixel 4 baselines of Usage and Sessions, which are generated only in the Playwright image, so it was not done here.
+- Inbox approval row (1440): the reason line is truncated in the middle of a word and the "Needs approval" pill wraps; shorten the pill label or give the reason line its own row.
+- Missions rows (1440): blank provider cell for failed missions.
+- Mission terminal (360): no cue that the terminal scrolls horizontally.
