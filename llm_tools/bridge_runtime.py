@@ -179,6 +179,7 @@ class BridgeMissionHooks:
         # Task notices (DOG-017): the delivery state of the operation that runs now.
         self._notice_deliveries: dict[str, bridge_task_notice.TaskNoticeDelivery] = {}
         self._notice_next_look = 0.0
+        self._cli_versions: dict[str, str] = {}
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -189,8 +190,18 @@ class BridgeMissionHooks:
 
         return _safe_decision(selection)
 
+    def _cli_version(self, provider: str) -> str:
+        """The provider CLI version recorded with each selection (PROV-011), read once per controller and provider."""
+        if provider not in self._cli_versions:
+            from . import bridge_capabilities
+
+            self._cli_versions[provider] = bridge_capabilities.provider_version_record(provider)["cli_version"]
+        return self._cli_versions[provider]
+
     def on_selection(self, selection: dict[str, Any]) -> None:
         projection = self._selection_projection(selection)
+        if projection.get("provider"):
+            projection["cli_version"] = self._cli_version(str(projection["provider"]))
         station = projection["route"] or projection["provider"]
         if self._last_selected_station and station and station != self._last_selected_station:
             self.store.record_runtime_event(self.mission_id, "station-handoff", {

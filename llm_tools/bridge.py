@@ -2654,6 +2654,11 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "theme":
             _print_theme(args)
             return 0
+        if args.command == "doctor" and getattr(args, "capabilities", False):
+            from . import bridge_capabilities
+
+            print(bridge_capabilities.run_doctor_capabilities(bool(getattr(args, "json", False))))
+            return 0
         if args.command == "doctor":
             with open_store() as store:
                 mission = store.get_mission(args.mission) if args.mission else None  # type: ignore[assignment]  # name reused; None means no mission was given

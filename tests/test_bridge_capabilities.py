@@ -131,3 +131,32 @@ def test_prompt_channel_contract() -> None:
 def test_operations_doc_states_the_prompt_channel() -> None:
     text = (Path(__file__).resolve().parents[1] / "docs" / "llm-bridge" / "operations.md").read_text(encoding="utf-8")
     assert "Prompt visibility" in text and "Kilo" in text and "OpenCode" in text
+
+
+def test_each_provider_selection_records_the_cli_version_read_once_per_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_tools.bridge_runtime import BridgeMissionHooks
+    from llm_tools.bridge_store import BridgeStore
+
+    reads: list[str] = []
+    monkeypatch.setattr(caps, "installed_version", lambda provider, run=None: reads.append(provider) or "2.4.1")
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    for _ in range(2):
+        hook.on_selection({"provider": "codex", "route": "", "rotation_reason": "usable", "all_rate_limited": False,
+                           "decision": {"provider": "codex", "usable": True, "reason": "available"}, "decisions": []})
+    selections = [event for event in store.events(mission["id"]) if event["kind"] == "provider-selection"]
+    assert [event["data"]["cli_version"] for event in selections] == ["2.4.1", "2.4.1"]
+    assert reads == ["codex"]
+
+
+def test_doctor_capabilities_prints_the_matrix_without_a_mission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from llm_tools import bridge
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(caps, "run_doctor_capabilities", lambda as_json: "MATRIX json" if as_json else "MATRIX")
+    assert bridge.main(["doctor", "--capabilities"]) == 0
+    assert capsys.readouterr().out.strip() == "MATRIX"
+    assert bridge.main(["doctor", "--capabilities", "--json"]) == 0
+    assert capsys.readouterr().out.strip() == "MATRIX json"
