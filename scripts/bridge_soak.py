@@ -63,6 +63,19 @@ def effective_warmup(duration: float, fraction: float, seconds: float) -> float:
     return max(duration * fraction, min(seconds, duration * WARMUP_MAX_SHARE))
 
 
+COUNT_METRIC_SUFFIXES = ("_fds", "_threads")
+
+
+def chosen_bounds(args: argparse.Namespace) -> dict[str, h.SlopeBound]:
+    """The slope bounds of this run: the per-hour numbers from the command line, and the floors of the descriptor and thread metrics
+    multiplied by ``--count-floor-multiplier``."""
+    chosen: dict[str, h.SlopeBound] = {}
+    for metric, bound in h.DEFAULT_BOUNDS.items():
+        floor = bound.floor * (args.count_floor_multiplier if metric.endswith(COUNT_METRIC_SUFFIXES) else 1.0)
+        chosen[metric] = h.SlopeBound(getattr(args, f"bound_{metric}"), floor, bound.unit, bound.per_process)
+    return chosen
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--coordinator-bin", help="bridge-coordinator binary (default: $BRIDGE_COORDINATOR_BIN, then coordinator/target/{release,debug})")
@@ -88,6 +101,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for metric, bound in h.DEFAULT_BOUNDS.items():
         parser.add_argument(f"--bound-{metric.replace('_', '-')}", type=float, default=bound.per_hour, metavar="PER_HOUR",
                             help=f"largest slope of {metric} in {bound.unit} per hour{' and per process' if bound.per_process else ''} (default: {bound.per_hour:g})")
+    parser.add_argument("--count-floor-multiplier", type=float, default=1.0, metavar="FACTOR",
+                        help="multiply the floors of the descriptor and thread metrics by this factor (default: 1). A run of a minute or less cannot "
+                             "settle the coordinator's thread pool, which grows while database calls overlap, so a short run needs a floor above that growth")
     parser.add_argument("--report", type=Path, help="write the JSON report here (default: soak-report.json in the run directory)")
     parser.add_argument("--keep", action="store_true", help="keep the run directory (always kept on failure)")
     parser.add_argument("--run-dir", type=Path, help="use this empty directory instead of a new temporary one")
@@ -99,6 +115,8 @@ def validate(args: argparse.Namespace) -> str | None:
         return "--missions must be at least --workers (every worker needs a mission) and --workers at least 1"
     if args.sample_seconds <= 0 or args.duration <= 0:
         return "--duration and --sample-seconds must be positive"
+    if args.count_floor_multiplier < 1.0:
+        return "--count-floor-multiplier must be at least 1"
     usable = (args.duration - effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds)) / args.sample_seconds
     if usable < MIN_SAMPLES_AFTER_WARMUP:
         return (f"{args.duration:g}s with a sample every {args.sample_seconds:g}s leaves {usable:.1f} samples after warm-up; "
@@ -272,8 +290,7 @@ class Soak:
         args = self.args
         verification = h.verify_exactly_once(self.ledger, self.coordinator.api, self.nodes, settle_seconds=args.settle_seconds,
                                              audit=self.coordinator.audit_submissions())
-        chosen = {metric: h.SlopeBound(getattr(args, f"bound_{metric}"), bound.floor, bound.unit, bound.per_process)
-                  for metric, bound in h.DEFAULT_BOUNDS.items()}
+        chosen = chosen_bounds(args)
         bounds = h.scale_bounds(chosen, workers=len(self.nodes), controllers=len(self.mission_nodes))
         warmup = effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds)
         slopes = h.evaluate_resources(self.sampler.samples, bounds, warmup_fraction=args.warmup_fraction, min_samples=MIN_SAMPLES_AFTER_WARMUP,
