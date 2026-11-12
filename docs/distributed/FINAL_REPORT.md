@@ -2,7 +2,7 @@
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
 `feat/distributed-bridge` (pull request #30). Its original 169 specification IDs and operator
-addenda 2 to 7 remain verified. The unified register now has 435 IDs, including tracking
+addenda 2 to 7 remain verified. The unified register now has 497 IDs, including tracking
 requirements, the physical Pi work, the follow-up groups (`API`, `SEC2`, `PK`, `UX`, `REV`, `DOG`, `PAR`)
 the release-readiness group `PRD` and the redesign group `UXR`; current in-progress and blocked rows are listed below.
 CI run 42181869238 on c81ccde is green on every job,
@@ -71,13 +71,15 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 262 |
+| Verified `[x]` | 259 |
+| Waived `[w]` | 11 |
+| Deferred `[d]` | 4 |
 | Incomplete `[~]` | 79 |
-| Blocked `[!]` | 5 |
-| Not started `[ ]` | 89 |
-| **Total** | **435** |
+| Blocked `[!]` | 0 |
+| Not started `[ ]` | 144 |
+| **Total** | **497** |
 
-The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Two of the verified rows (DOG-023, PI-VERIFY-013) are closed by the operator decision of 2026-11-07 rather than by new evidence; each row says so.
+The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete. Rows closed by an operator decision rather than by verification (DOG-023, PI-VERIFY-013, PK-012) and the hardware-limited Pi rows are waived `[w]` by D46. The convergence addendum of 2026-11-12 adds 62 IDs (D40 to D47). `python scripts/spec_open.py --release 1.5.0` and `--release 1.6.0` list the open IDs per release.
 ## 3. Test results and coverage
 
 CI run 42181869238 on c81ccde:

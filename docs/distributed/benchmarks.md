@@ -189,7 +189,7 @@ Measurement harness, 512 MB and 1 CPU:
 | RSS after 10 000 events | 28.4 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.17 / 0.19 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.93 / 1.24 ms |
-| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | pending rerun after the 128 KiB cap |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | not measured on this host after the 128 KiB cap; the pre-cap figure is in the table above, and the rerun is tracked by `FIND-006` |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 1.3 / 2.8 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 | Container peak memory (`memory.peak`, includes page cache) | 21.7 MiB |
@@ -368,7 +368,9 @@ harness peak was 23.3% of that limit and the deployed container sample was below
 The production container used a one-CPU limit, `mem_limit=memswap_limit=96m`,
 `journald` logging, a 60-second health interval and `restart: unless-stopped`. Its
 persistent Docker volume remained on the card. The physical board's 24-hour card-write
-measurement is still pending; do not infer it from the harness, which ran from tmpfs.
+measurement (`PI-WEAR-009`, 2026-11-06 to 2026-11-07) recorded 27.29 GB of host card
+writes over 24 hours without per-process attribution; do not infer card writes from the
+harness, which ran from tmpfs.
 
 ## Web interface: bundle size and initial load (Pixel 4 emulation, x86-64 host)
 
