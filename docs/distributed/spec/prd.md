@@ -1,6 +1,6 @@
 # PRD requirements
 
-Requirement text is taken from distributed-llm-bridge-release-prompt.md; IDs marked (source text not found) have no text in these sources and are summarised from their register row.
+Requirement text is taken from distributed-llm-bridge-release-prompt.md. PRD-037 and PRD-038 were registered directly in the register; their lines summarise the obligation stated in the register row.
 
 - PRD-001: Five-minute first success. A new user with only the README goes from nothing to a coordinator, one enrolled worker and a running mission visible live in the browser in at most 5 minutes on Linux (container), macOS and Windows. Measure it with a scripted walkthrough per platform (the steps a user types, timed) and fix every step that needs knowledge the page does not give. The console's first run guides worker enrolment with copyable, pre-filled commands (worker token shown once).
 - PRD-002: Release artifacts. Each release publishes: the multi-architecture coordinator image (amd64, arm64) to a registry, signed with provenance and an SBOM (SEC2-015); the Python package; and checksums. `release.yml` builds them from a tag; a dry-run job proves it on every PR.
@@ -38,5 +38,5 @@ Requirement text is taken from distributed-llm-bridge-release-prompt.md; IDs mar
 - PRD-034: Review of the inner workings. An independent architecture and correctness review of the controller, store, runtime, worker, protocol, coordinator and web client: state machines and their invariants, concurrency and locking, idempotency and replay, error handling and uncertain outcomes, resource bounds, recovery after every crash point, and code that is duplicated or dead.
 - PRD-035: No open issues. At release: every dog-food finding (DOG-*, including the low ones), every review finding (REV-*, PRD-031 to PRD-034), and every open GitHub issue on the repository labelled for Bridge is fixed and closed; flaky tests are root-caused, not retried (the CI history of the last 50 runs on `main` has no unexplained failure).
 - PRD-036: Password reset over SSH. A locked-out operator resets the web console password from an SSH session on the coordinator host with one documented command, on container, native and Pi installs; interactive prompt, `--temporary` with a forced change at the next sign-in, documentation and login-page help (operator request of 2026-11-07; details in mission task 5).
-- PRD-037: (source text not found) Web console redesign as a release blocker: the live provider session is the primary pane of the mission page, with a sticky steer composer and always-visible Pause and Stop.
-- PRD-038: (source text not found) `llm-bridge mission delete ID` is available from the CLI, the web console and the REST API, and deletes only CREATED, COMPLETED, FAILED, CANCELLED or STOPPED missions.
+- PRD-037: Web console redesign as a release blocker: the live provider session is the primary pane of the mission page, with a sticky steer composer and always-visible Pause and Stop.
+- PRD-038: `llm-bridge mission delete ID` is available from the CLI, the web console and the REST API, and deletes only CREATED, COMPLETED, FAILED, CANCELLED or STOPPED missions.

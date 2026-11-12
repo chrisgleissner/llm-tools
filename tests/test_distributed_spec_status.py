@@ -390,8 +390,6 @@ def test_pointer_check_rejects_bad_pointers(tmp_path: Path) -> None:
 # TRACK-015: requirement text -------------------------------------------------------------------
 
 def test_every_register_id_has_one_requirement_line() -> None:
-    if not SPEC_DIR.is_dir():
-        pytest.skip("docs/distributed/spec/ does not exist yet; the lead removes this skip at integration")
     problems = spec_register.requirement_problems(spec_register.parse_rows(REGISTER), SPEC_DIR)
     assert not problems, "\n".join(problems)
 

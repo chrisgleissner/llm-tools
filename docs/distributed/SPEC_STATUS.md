@@ -494,11 +494,11 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 
 | ID | Status | Evidence |
 |---|---|---|
-| TRACK-013 | [ ] | Not started. |
-| TRACK-014 | [ ] | Not started. |
-| TRACK-015 | [ ] | Not started. |
-| TRACK-016 | [ ] | Not started. |
-| TRACK-017 | [ ] | Not started. |
+| TRACK-013 | [x] | Rows accept `[w]` (cites a decision) and `[d]` (cites a decision and `target x.y.z`); FINAL_REPORT counts all six statuses; `scripts/spec_open.py --release 1.5.0|1.6.0` lists open IDs per release from the parser shared in `scripts/spec_register.py`. Revert: the old `[ ~x!]` row pattern makes the real-register tests fail. Tests: tests/test_distributed_spec_status.py::test_register_w_and_d_rows_parse_and_cite_decisions, tests/test_distributed_spec_status.py::test_final_report_counts_cover_all_six_statuses, tests/test_spec_open.py::test_release_1_5_0_ignores_later_rows_and_closes_earlier_deferrals |
+| TRACK-014 | [x] | `[x]` rows outside the frozen list `tests/spec_legacy_verified.txt` (259 IDs, may only shrink; `LEGACY_VERIFIED_COUNT`) must end with resolvable `Tests:` or `Evidence:` pointers. Revert: removing TRACK-007 from the frozen list fails the real-register check. Tests: tests/test_distributed_spec_status.py::test_pointer_check_rejects_bad_pointers, tests/test_distributed_spec_status.py::test_frozen_list_is_sorted_unique_and_only_shrinks |
+| TRACK-015 | [x] | `docs/distributed/spec/` holds one requirement line per register ID (497), imported from the out-of-tree prompts and addenda and cleaned of private deployment details; the check fails in both directions. Tests: tests/test_distributed_spec_status.py::test_every_register_id_has_one_requirement_line, tests/test_distributed_spec_status.py::test_requirement_check_passes_and_fails_on_fixtures |
+| TRACK-016 | [x] | `ux-review-web.md`, `review-internals.md`, `ux-review-cli.md`, `review-findings.md` and `capacity-plan.md` each end with a `## Dispositions` table; every finding is fixed, no change or a register ID. Revert: the previous `review-internals.md` fails with no Dispositions section. Tests: tests/test_distributed_spec_status.py::test_disposition_check_passes_and_fails_on_fixtures |
+| TRACK-017 | [x] | `DECISIONS.md` headings are unique and every `D<number>` cited in the register exists (numbering gaps are allowed, as decided in D40). Revert: disabling the duplicate check fails the fixture test. Tests: tests/test_distributed_spec_status.py::test_decision_headings_are_unique_and_cited_decisions_exist, tests/test_distributed_spec_status.py::test_decision_check_passes_and_fails_on_fixtures |
 | TRACK-018 | [ ] | Not started. |
 | FIND-001 | [ ] | Not started. |
 | FIND-002 | [ ] | Not started. |
@@ -513,7 +513,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-011 | [ ] | Not started. |
 | FIND-012 | [ ] | Not started. |
 | FIND-013 | [ ] | Not started. |
-| FIND-014 | [ ] | Not started. |
+| FIND-014 | [x] | Corrected: 15 PRD rows that waited for the merged PR #31; TRACK-007 line count; AUTH-001 and DATA-007 self-contradicting sentences; `benchmarks.md` post-cap ingest figure and card-write statement; `install.md` card-write statement; `security-requirements.md` now maps clauses only and holds no statuses. Evidence: docs/distributed/security-requirements.md |
 | FIND-015 | [ ] | Not started. |
 | FIND-016 | [ ] | Not started. |
 | FIND-017 | [ ] | Not started. |
@@ -521,8 +521,8 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-019 | [ ] | Not started. |
 | FIND-020 | [ ] | Not started. |
 | DOG-027 | [ ] | Not started. |
-| DOCS-001 | [ ] | Not started. |
-| DOCS-002 | [ ] | Not started. |
+| DOCS-001 | [x] | `docs/HANDOVER.md`, `PLANS.md` and `docs/features/llm-bridge/HANDOVER.md` moved to `docs/archive/`; `spec-audit.md` and `progress.md` open with the release or review they describe and link the register. Evidence: docs/archive/PLANS.md |
+| DOCS-002 | [x] | `AGENTS.md` names every `llm_tools/bridge*.py` module (13 were missing and are added). Revert: the previous `AGENTS.md` fails listing the missing modules. Tests: tests/test_distributed_spec_status.py::test_agents_md_names_every_bridge_module, tests/test_distributed_spec_status.py::test_unnamed_bridge_module_is_detected |
 | DOCS-003 | [ ] | Not started. |
 | DOCS-004 | [ ] | Not started. |
 | LB-001 | [ ] | Not started. |
