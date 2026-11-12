@@ -62,7 +62,7 @@ The dog-food queue `findings-next.md` held 50 items without statuses. Each item 
 | 19 | Status strip repeats route and model | fixed | `bridge_tui.py` shows the model only when the owner is not contained in it |
 | 20 | Ambiguous capacity wording | fixed | "empty in ~X at this pace" in `bridge_tui.py` |
 | 21 | Wire failure_reason and waiting into strip | fixed | `bridge_tui.py` lines using `lifecycle.failure_reason`; `waiting_message`; 02d33bc9 |
-| 22 | Flaky test_attached_client_input_paste_mouse_resize... | open | DOG-029 |
+| 22 | Flaky test_attached_client_input_paste_mouse_resize... | open: FIND-010 | PR #77 |
 | 23 | Docs for new console features | fixed | `docs/llm-bridge/operations.md`, `troubleshooting.md` and README cover picker, `/missions`, `LLM_BRIDGE_FINISH_<PROVIDER>` |
 | 24 | Native missions start next task without review | fixed | Hold for review by default; `--auto-continue`, `auto_continue_default`; tests/test_bridge_tui_review_hold.py |
 | 25 | Approve confirm replaces the body | no change | Confirm dialog kept; evidence context added with review hold (tests/test_bridge_tui_review_hold.py) |
@@ -72,11 +72,11 @@ The dog-food queue `findings-next.md` held 50 items without statuses. Each item 
 | 29 | Friendly detach message | fixed | `terminal.py` prints "Detached from <label> · it keeps running · llm-bridge attach to return"; 02d33bc9 |
 | 30 | Provider checklist navigation | fixed | `bridge_launcher.py` checklist stops at first and last item (docstring and `_draw_checklist`) |
 | 31 | Folder whitespace and error text | fixed | "Folder does not exist" path in `bridge_launcher.py`; 02d33bc9 |
-| 32 | Rare prefix_key handshake flake | open | DOG-029 |
+| 32 | Rare prefix_key handshake flake | open: FIND-010 | PR #77 |
 | 33 | Picker counts finished missions as live | fixed | `station_idle`, `close_station`, `gc_stations` in `bridge_switcher.py` |
 | 34 | Picker header misaligned | fixed | `_header` pads each column with `pad(..., widths)`, same widths as rows |
 | 35 | Picker shows stale RUNNING as green | fixed | `bridge_switcher.py` uses `warn` role for `entry.stale` |
-| 36 | Bridge pane stuck in copy-mode | open | DOG-030 |
+| 36 | Bridge pane stuck in copy-mode | open: FIND-011 | PR #77 |
 | 37 | Idle redraw/CPU performance | fixed | `bridge_redraw.py` `PRAGMA data_version` probe, `BackgroundReload`, cached glyph tables |
 | 38 | `--native --headless` accepted at create | fixed | `--mode` selects one of native/background/headless; old flags folded in `bridge.py` |
 | 39 | "Autonomous" names two things | fixed | Launcher Mode field uses Native / Background / Headless |
@@ -84,9 +84,9 @@ The dog-food queue `findings-next.md` held 50 items without statuses. Each item 
 | 41 | `minimax_command_argv` stale | fixed | Function no longer exists in `providers/minimax.py` or tests (added in 124fb072, removed in later refactor) |
 | 42 | No awaiting-review mission state | fixed | `state_review` for `in_review` in launcher and picker; "task N awaits your review" |
 | 43 | Picker switch stacks attach sessions | fixed | `TmuxTerminalBackend.switch_client_to` used by `bridge_switcher.py` and `terminal.py`; 41cff550 |
-| 44 | tmux paints transient screens on attach | open | DOG-031 |
+| 44 | tmux paints transient screens on attach | open: DOG-029 | |
 | 45 | Site video aria-label describes old story | fixed | aria-label now describes the 5-hour limit hand-off recording |
-| 46 | Flaky stop --force identity mismatch | open | DOG-032 |
+| 46 | Flaky stop --force identity mismatch | open: FIND-012 | PR #77 |
 | 47 | "(last selected)" for never-run provider | fixed | `bridge_tui.py` labels "last selected" only with a recorded operation for that owner |
 | 48 | Internal "current-usable" wording | fixed | `bridge_format.py` maps `current-usable` to "has capacity" |
 | 49 | Station status clips at 60 columns | fixed | `terminal.py` compact context "T1 ●" for narrow clients |
