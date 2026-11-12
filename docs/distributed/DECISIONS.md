@@ -622,3 +622,8 @@ A mission created through the coordinator may name only a verifier that the work
 ## D49 Rich is the only runtime dependency (FIND-017)
 
 `AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.
+
+## D52 Lost frames and lost audit writes in the coordinator (FIND-003, FIND-004)
+
+- A lost command or result frame is repaired by re-sending, not by a protocol change. The coordinator re-sends a mutating command that has been idle for 10 s, checked every 5 s. The worker is responsible for running each mutating request id at most once: it records every mutating result in a private outcome ledger before it answers, and answers a duplicate from the ledger. A crash after the effect and before the record can still run a command once more after a restart; `protocol.md` states this window.
+- A failed audit write fails the action where the action and its audit row can share one transaction (`command.submit`). Where they cannot, because the action has already taken effect, the failure is reported as a health fault (`/healthz` 503 `audit-write-failed`) until an audit write succeeds again.
