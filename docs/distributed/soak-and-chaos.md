@@ -73,7 +73,7 @@ Each is a line in the report. Any failure gives exit status 1.
 | Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1800, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 30 minutes on a hosted runner (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers and the workers are judged one process at a time (see the table below). |
 | Memory ceilings | The largest sample of any single controller or worker, and of the coordinator, stays under the absolute ceilings in the table below. A process that settles at a size it should never reach fails even when its slope is flat. The warm-up is included. |
 | Database explained by rows | At every sample the coordinator database (main file plus WAL) is at most 8 MiB + 4096 bytes times the row count of `events`, `commands` and `audit`. The database slope floor also grows with the new rows, so the slope check fails only for growth that rows do not explain. |
-| Worker command backlog | At no sample does one worker have more than 100 unfinished commands (any state but `done`, from `command_queue_depths` in `GET /api/v1/diagnostics`, sampled with the resources). The measured peak over a 4.5-hour run was 2 commands in total. A growing backlog fails during the run, not only as the final `unfinished` count. |
+| Worker command backlog | At no sample does one worker have more than 100 unfinished commands (any state but `done`, from `command_queue_depths` in `GET /api/v1/diagnostics`, sampled with the resources). The measured peak over a 4.5-hour run was 2 commands in total. The check is evaluated at report time over all samples: any single sample above the limit fails it, so a backlog that grew and drained is caught as well as the final `unfinished` count. When no sample carries `queue_depths` (every diagnostics request failed) the result is `inconclusive`, which fails. |
 | Events within retention | The stored event count never exceeds workers x `max_events_per_worker` (50 000). |
 | p99 API latency | Per request class from the client's point of view, loopback. |
 | Coordinator survived | The process is alive at the end and its log has no panic. |
@@ -91,7 +91,7 @@ units per hour, for example `--bound-coordinator-rss-kib 4096`):
 | `coordinator_db_bytes` | 32 MiB | 8 MiB + 4096 bytes per new row | `coordinator.sqlite3` plus its WAL. Until the event retention cap is reached the database grows with the stored events by design; the floor allows exactly that. At the cap the slope has to flatten. |
 | `workers_rss_kib` | 512 KiB per worker | 1024 KiB per worker | **Per process, not a sum**, like the controllers: each worker is fitted on its own after `--warmup-seconds`, and the median over the workers is compared with the bound (and the median rise with the floor). Measured after minute 20 of a 3-hour single-worker run: -0.06 to +0.22 MiB per hour depending on where the window starts (see Worker memory below). The bound is 2.3 times the largest of these, 12 MiB per day. It replaces 3 MiB per hour (72 MiB per day) summed over the fleet, which a worker growing by 2 MiB per hour passed. |
 | `workers_fds`, `workers_threads` | 1 per worker | 1 per worker | Same. |
-| `controllers_rss_kib` | 1536 KiB per controller | 512 KiB per controller | **Per process, not a sum.** Each controller is fitted on its own from `--warmup-seconds` after its first sample, and the median over the controllers is compared with the bound (and the median rise with the floor). A sum jumps when a controller exits or is restarted, and a restarted controller starts a new warm-up. Measured median per-controller slope after warm-up: 0.88 MiB per hour (45-minute run, 25-minute window) and 1.12 MiB per hour (30-minute run, 10-minute window). |
+| `controllers_rss_kib` | 1536 KiB per controller | 512 KiB per controller | **Per process, not a sum.** Each controller is fitted on its own from `--warmup-seconds` after its first sample, and the median over the controllers is compared with the bound (and the median rise with the floor). A sum jumps when a controller exits or is restarted, and a restarted controller starts a new warm-up. Measured median per-controller slope after warm-up: 0.88 MiB per hour (45-minute run, 25-minute window on an 8-core host) and 1.12 MiB per hour (30-minute run, 10-minute window; that window is too short on a hosted runner, see Nightly controller memory failure). The nightly run is 45 minutes with a 1800 s warm-up and a 15-minute window. |
 | `controllers_fds` | 1 per controller | 1 per controller | Same. |
 
 `--bound-<metric>` replaces the per-hour number (per process for the rows that say so). The floors are fixed, except that
@@ -156,7 +156,7 @@ Reading of the results:
 - Coordinator memory, descriptors, threads, API latency and exactly-once delivery are well inside the
   bounds with a wide margin. The latency budgets are about 24 times the worst measured p99 for reads and
   100 times for submissions, which leaves room for a loaded shared runner.
-- Memory of the mission controllers, workers and coordinator rises for about 20 minutes and then flattens.
+- Memory of the mission controllers, workers and coordinator rises for about 20 minutes on an 8-core host and for about 30 minutes on a hosted 2-core runner, and then flattens (see Nightly controller memory failure).
   The earlier reading, 20 to 56 KB per completed task, was warm-up. One real leak was found and removed along
   the way (five immortal interned strings per provider run in the controller). The measurements, the fix and
   the gate are under Memory over time below.
@@ -312,11 +312,12 @@ against 34 to 40 MiB in the hosted runs; its ceiling is 96 MiB. That was not inv
 
 **Second nightly failure: exactly once at 4.5 hours.** The long run also failed `commands exactly once` on all four
 nights with about 30 000 violations of the form `accepted but missing from the journal` and `0 submit audit entries`.
-The coordinator keeps at most 5000 finished commands (`MAX_DONE_COMMANDS`, oldest deleted first) and 100 000 audit rows,
-and the run issues about 37 000 commands (2 per second). The older commands are gone by design. `verify_exactly_once`
-now exempts the accepted commands older than the newest 5000 (plus a margin of 200, because the coordinator deletes by
-completion time) from the journal and audit checks and still checks their effect on the worker (more than once is a
-violation). The report carries `pruned_by_retention`.
+The coordinator keeps at most 5000 finished commands (`MAX_DONE_COMMANDS` in `coordinator/src/db.rs`, read commands included, deleted
+oldest first by the hourly maintenance pass) and 100 000 audit rows, and the run issues about 37 000 commands (2 per second), so the
+older rows are gone by design. The harness does not guess which commands those are. `verify_exactly_once` asks the coordinator
+for every accepted command. A 404 (or a missing audit row) is accepted only when the worker database, which is not pruned, proves the
+effect: the marker exactly once and exactly one worker command row. Otherwise the command is lost. A command that is found but not
+`done` is `unfinished`. The report carries `pruned_by_retention`.
 
 ### Worker memory
 

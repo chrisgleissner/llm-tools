@@ -12,13 +12,13 @@ Pass criteria (each is a line of the report, and any failure gives exit status 1
   that did not apply (``dist_harness.verify_exactly_once``);
 * no unbounded growth of coordinator memory, file descriptors, threads or database size, and of the
   workers' memory, descriptors and threads: the least-squares slope after warm-up (``--warmup-seconds``,
-  20 minutes by default) is compared with ``dist_harness.DEFAULT_BOUNDS``, the controllers one process at a
+  30 minutes by default) is compared with ``dist_harness.DEFAULT_BOUNDS``, the controllers one process at a
   time; the database must also be explained by its row count; no single controller, worker or coordinator
   may pass the memory ceilings of ``dist_harness.DEFAULT_CEILINGS``;
 * p99 API latency inside the budgets of ``dist_harness.DEFAULT_LATENCY_BUDGET_MS``;
 * the coordinator process survived without a panic, and every worker is online at the end.
 
-Defaults give the PRD's scaled-down run (30 minutes, 10 workers, 50 missions). The full 24-hour run
+Defaults give the PRD's scaled-down run (45 minutes, 10 workers, 50 missions). The full 24-hour run
 is ``--duration 86400``. Nothing real is touched: see the safety rules in ``dist_harness``.
 
     python scripts/bridge_soak.py --duration 300 --workers 3 --missions 10 --sample-seconds 15
@@ -78,7 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--coordinator-bin", help="bridge-coordinator binary (default: $BRIDGE_COORDINATOR_BIN, then coordinator/target/{release,debug})")
     parser.add_argument("--build", action="store_true", help="run cargo build --release when no binary is found")
-    parser.add_argument("--duration", type=float, default=1800.0, help="seconds of load (default: 1800, the scaled-down run; 86400 for the full 24 hours)")
+    parser.add_argument("--duration", type=float, default=2700.0, help="seconds of load (default: 2700, the scaled-down run: 30 minutes of warm-up and a 15-minute fit; 86400 for the full 24 hours)")
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--missions", type=int, default=50, help="missions in total, spread over the workers")
     parser.add_argument("--sample-seconds", type=float, default=60.0, help="seconds between resource samples (default: 60)")
@@ -316,8 +316,8 @@ class Soak:
                        f"{len(verification.violations)} violations, {len(verification.unfinished)} unfinished, {len(verification.uncertain)} uncertain"},
             *[{"check": item.metric if item.metric.endswith(" ceiling") else f"slope {item.metric}", "verdict": item.verdict, "detail": item.detail} for item in slopes],
             {"check": "database explained by rows", "verdict": "fail" if explained else "pass", "detail": "; ".join(explained[:3]) or "ok"},
-            {"check": "worker command backlog", "verdict": "fail" if backlog else "pass",
-             "detail": "; ".join(backlog[:3]) or f"no worker above {h.MAX_WORKER_BACKLOG} unfinished commands"},
+            {"check": "worker command backlog", "verdict": "inconclusive" if backlog is None else "fail" if backlog else "pass",
+             "detail": "no sample carries queue_depths" if backlog is None else "; ".join(backlog[:3]) or f"no worker above {h.MAX_WORKER_BACKLOG} unfinished commands"},
             {"check": "events within retention cap", "verdict": "fail" if max_events > events_cap else "pass", "detail": f"max {max_events}, cap {events_cap}"},
             *[{"check": f"p99 latency {item['class']}", "verdict": item["verdict"],
                "detail": f"p99 {item['p99_ms']} ms (budget {item['budget_p99_ms']}), n={item['count']}, errors={item['errors']}"} for item in latency],

@@ -55,9 +55,8 @@ LLM_BRIDGE = ROOT / "llm-bridge"
 HOST = "127.0.0.1"
 DB_NAME = "coordinator.sqlite3"
 WORKER_DB_NAME = "bridge.sqlite3"
-MAX_DONE_COMMANDS = 5_000  # coordinator db.rs: finished commands kept in the journal, oldest deleted first
-RETENTION_ORDER_MARGIN = 200  # the coordinator deletes by completion time, the ledger is in issue order: exempt a few more of the oldest
 MAX_EVENTS_PER_WORKER = 50_000  # coordinator default `max_events_per_worker`
+MAX_WORKER_BACKLOG = 100  # unfinished commands of one worker: at the soak's 2 commands per second over 10 workers, 8 minutes behind
 
 
 # --------------------------------------------------------------------------------------------
@@ -233,11 +232,12 @@ def check_ceiling(metric: str, points: Sequence[tuple[float, float]], ceiling: f
                        "fail" if peak > ceiling else "pass", f"peak {peak:.0f} {unit} at {peak_time:.0f}s (ceiling {ceiling:.0f})")
 
 
-MAX_WORKER_BACKLOG = 100  # unfinished commands of one worker: at the soak's 2 commands per second over 10 workers, 8 minutes behind
+def check_command_backlog(samples: Sequence[dict[str, Any]], limit: int = MAX_WORKER_BACKLOG) -> list[str] | None:
+    """Samples where one worker has more unfinished commands (any state except ``done``, from ``command_queue_depths``) than ``limit``.
 
-
-def check_command_backlog(samples: Sequence[dict[str, Any]], limit: int = MAX_WORKER_BACKLOG) -> list[str]:
-    """Samples where one worker has more unfinished commands (any state except ``done``, from ``command_queue_depths``) than ``limit``."""
+    ``None`` (inconclusive) when no sample carries ``queue_depths`` at all, for example because every diagnostics request failed."""
+    if not any(sample.get("queue_depths") is not None for sample in samples):
+        return None
     problems = []
     for sample in samples:
         for worker, states in (sample.get("queue_depths") or {}).items():
@@ -959,7 +959,7 @@ class Verification:
     unfinished: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     uncertain: list[str] = field(default_factory=list)
-    pruned_by_retention: int = 0  # accepted commands older than the journal row cap: only their worker-side effect is checked
+    pruned_by_retention: int = 0  # accepted commands the coordinator answered 404 for (retention) that the worker database proves applied once
 
     @property
     def ok(self) -> bool:
@@ -1042,20 +1042,19 @@ def verify_exactly_once(ledger: Ledger, api: ApiClient, nodes: dict[str, WorkerN
     report = Verification()
     items = list(ledger.mutating())
     report.issued = len(items)
-    # The coordinator deletes the oldest finished commands above MAX_DONE_COMMANDS rows (and old audit rows), so in a long run the
-    # journal and the audit no longer hold them. They are still checked on the worker: an effect more than once is a violation.
     accepted_items = [item for item in items if item.accepted]
-    pruned = {item.request_id for item in accepted_items[:max(0, len(accepted_items) - MAX_DONE_COMMANDS + RETENTION_ORDER_MARGIN)]}
-    report.pruned_by_retention = len(pruned)
     deadline = time.monotonic() + settle_seconds
     entries: dict[str, dict[str, Any]] = {}
-    pending = [item for item in accepted_items if item.request_id not in pruned]
+    gone: set[str] = set()  # 404: the coordinator no longer has the row (retention) or never had it
+    pending = list(accepted_items)
     while pending:  # at least one pass, so a zero settle time still looks at every command once
         still = []
         for item in pending:
             status, entry = api.get_command(item.request_id)
             if status == 200 and entry.get("state") == "done":
                 entries[item.request_id] = entry
+            elif status == 404:
+                gone.add(item.request_id)
             else:
                 still.append(item)
         pending = still
@@ -1064,14 +1063,20 @@ def verify_exactly_once(ledger: Ledger, api: ApiClient, nodes: dict[str, WorkerN
         time.sleep(1.0)
     for item in items:
         report.accepted += int(item.accepted)
-        if item.request_id in pruned:
-            if (count := nodes[item.worker].marker_count(item.marker or "")) > 1:
-                report.violations.append(f"{item.request_id}: applied {count} times (duplicate)")
-            continue
-        if audit is not None and item.accepted and audit.get(item.request_id, 0) != 1:
-            report.violations.append(f"{item.request_id}: {audit.get(item.request_id, 0)} submit audit entries, expected 1")
         node = nodes[item.worker]
         count = node.marker_count(item.marker or "")
+        if item.request_id in gone:
+            # The coordinator deletes old finished commands (row cap, read commands included) and old audit rows. The worker database is not
+            # pruned, so the effect there is the proof: exactly one marker and exactly one command row. Anything else is a lost command.
+            rows = node.command_status(item.request_id)
+            if count == 1 and len(rows) == 1:
+                report.pruned_by_retention += 1
+            else:
+                report.violations.append(f"{item.request_id}: accepted but missing from the journal (lost): effect present {count} times, {len(rows)} command rows on the worker")
+            continue
+        submits = audit.get(item.request_id, 0) if audit is not None else 1
+        if audit is not None and item.accepted and submits != 1 and not (submits == 0 and count == 1 and len(node.command_status(item.request_id)) == 1):
+            report.violations.append(f"{item.request_id}: {submits} submit audit entries, expected 1")
         journal = entries.get(item.request_id)
         if journal is None:
             # Not done: either never accepted (a transport failure before any journal entry) or still in flight.

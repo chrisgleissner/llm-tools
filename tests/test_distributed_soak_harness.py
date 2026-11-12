@@ -160,7 +160,8 @@ def test_proc_stats_reads_this_process_and_none_for_a_dead_one():
 
 def test_soak_defaults_are_the_prd_scaled_run():
     args = bridge_soak.parse_args([])
-    assert (args.workers, args.missions, args.duration, args.sample_seconds) == (10, 50, 1800.0, 60.0)
+    assert (args.workers, args.missions, args.duration, args.sample_seconds) == (10, 50, 2700.0, 60.0)
+    assert bridge_soak.effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds) == 1800.0  # a default run keeps a 15-minute fit
     assert bridge_soak.validate(args) is None
 
 
@@ -278,31 +279,43 @@ def test_verify_checks_the_coordinator_audit_when_given_one():
     api = FakeApi({issued.request_id: _done("applied")})
     ok = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter({issued.request_id: 1}))  # type: ignore[arg-type]
     twice = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter({issued.request_id: 2}))  # type: ignore[arg-type]
-    missing = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    unproven = FakeNode({issued.marker: 1}, {issued.request_id: ["APPLIED", "APPLIED"]})  # a pruned audit row is accepted only with a clean worker proof
+    missing = h.verify_exactly_once(ledger, api, {"w": unproven}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    pruned = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    assert pruned.ok
     assert ok.ok and "2 submit audit entries" in twice.violations[0] and "0 submit audit entries" in missing.violations[0]
 
 
-def test_verify_does_not_expect_commands_the_coordinator_pruned_above_its_row_cap(monkeypatch):
-    # The coordinator keeps 5000 finished commands; a 4.5-hour soak issues 37000, so the oldest are legitimately gone from journal and audit.
-    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 2)
-    monkeypatch.setattr(h, "RETENTION_ORDER_MARGIN", 0)
+def _pruned_scenario(*, effects: int, rows: int, audit: int | None = None, state: str | None = None) -> h.Verification:
+    """One accepted command that the coordinator no longer has (404), or still has in ``state``."""
     ledger = h.Ledger("t")
-    issued = []
-    for _ in range(4):
-        item, _ = ledger.add_task_request("w", "m1")
-        item.accepted = True
-        issued.append(item)
-    markers = {item.marker: 1 for item in issued}
-    entries = {item.request_id: _done("applied") for item in issued[2:]}
-    node = FakeNode(markers, {item.request_id: ["APPLIED"] for item in issued})
-    report = h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0, audit=h.Counter({i.request_id: 1 for i in issued[2:]}))  # type: ignore[arg-type]
-    assert report.ok and report.pruned_by_retention == 2
-    # Without the cap the same journal is a loss, and a pruned command whose effect was applied twice is still a duplicate.
-    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 10)
-    assert not h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0).ok  # type: ignore[arg-type]
-    monkeypatch.setattr(h, "MAX_DONE_COMMANDS", 2)
-    node.markers[issued[0].marker] = 2
-    assert "duplicate" in h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0).violations[0]  # type: ignore[arg-type]
+    issued, _ = ledger.add_task_request("w", "m1")
+    issued.accepted = True
+    node = FakeNode({issued.marker: effects} if effects else {}, {issued.request_id: ["APPLIED"] * rows} if rows else {})
+    entries = {issued.request_id: {"state": state, "result": None}} if state else {}
+    return h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0,  # type: ignore[arg-type]
+                                 audit=None if audit is None else h.Counter({issued.request_id: audit} if audit else {}))
+
+
+def test_verify_accepts_a_command_the_coordinator_pruned_when_the_worker_proves_one_effect():
+    # The coordinator deletes old finished commands and audit rows; the worker database is the proof.
+    report = _pruned_scenario(effects=1, rows=1, audit=0)
+    assert report.ok and report.pruned_by_retention == 1
+
+
+def test_verify_reports_a_pruned_command_without_an_effect_as_lost():
+    report = _pruned_scenario(effects=0, rows=0)
+    assert "lost" in report.violations[0] and report.pruned_by_retention == 0
+
+
+def test_verify_reports_a_pruned_command_with_two_worker_rows_as_a_violation():
+    assert "lost" in _pruned_scenario(effects=1, rows=2).violations[0]
+    assert "lost" in _pruned_scenario(effects=2, rows=1).violations[0]
+
+
+def test_verify_reports_an_old_command_that_is_stuck_as_unfinished_not_pruned():
+    report = _pruned_scenario(effects=0, rows=0, state="sent")
+    assert report.unfinished and not report.violations and report.pruned_by_retention == 0
 
 
 def test_verify_requires_exactly_one_command_row_on_the_worker():
@@ -891,4 +904,5 @@ def test_a_growing_worker_command_backlog_is_reported():
     ok = [{"t": 1.0, "queue_depths": {"w1": {"pending": 3, "sent": 1}}}, {"t": 2.0, "queue_depths": {}}, {"t": 3.0, "queue_depths": None}]
     bad = [{"t": 61.0, "queue_depths": {"w1": {"pending": 90, "sent": 20}, "w2": {"pending": 1}}}]
     assert h.check_command_backlog(ok) == []
+    assert h.check_command_backlog([{"t": 1.0}, {"t": 2.0, "queue_depths": None}]) is None  # no sample carries the field: inconclusive
     assert h.check_command_backlog(bad) == ["t=61s: w1 has 110 unfinished commands (limit 100)"]
