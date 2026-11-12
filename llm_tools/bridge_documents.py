@@ -493,8 +493,14 @@ def render_markdown_segments(source: str, width: int, wrap: bool = True) -> tupl
 
 
 def render_ansi_segments(source: str) -> tuple[tuple[tuple[str, str], ...], ...]:
-    """Use Rich's ANSI reader to turn trusted renderer output into Bridge roles."""
-    from rich.text import Text
+    """Use Rich's ANSI reader to turn trusted renderer output into Bridge roles.
+
+    Without Rich the escape sequences are removed and every line keeps the plain ``info`` role (D49)."""
+    try:
+        from rich.text import Text
+    except ImportError:
+        plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", source)
+        return tuple(((line, "info"),) if line else () for line in plain.split("\n"))
 
     parsed = Text.from_ansi(source)
     lines = parsed.split("\n")

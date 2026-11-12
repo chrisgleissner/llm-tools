@@ -5,7 +5,7 @@
 [![Build](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/llm-tools/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/llm-tools)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)](https://github.com/chrisgleissner/llm-tools/releases)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)](https://github.com/chrisgleissner/llm-tools/releases)
 
 **Never lose an agent session to a rate limit again.**
 
@@ -35,8 +35,8 @@ Project site: <https://chrisgleissner.github.io/llm-tools/>
 
 You need:
 
-- Linux or macOS, and Python 3.11 or newer.
-- For Bridge: Linux, `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
+- Python 3.11 or newer on Linux or macOS. Windows runs only the coordinator, web interface and remote client (see [Platforms](#distributed-use-optional)).
+- For the Bridge console and missions: Linux, `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
 
 ```bash
 pipx install git+https://github.com/chrisgleissner/llm-tools.git
@@ -251,7 +251,7 @@ root must be an existing directory; enrolment stores its resolved real path,
 and the worker checks requested paths after resolving symlinks. All four opt-ins
 default off, and the worker enforces them even for coordinator administrators.
 
-Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
+Platforms (CI runs the coordinator and the Python suite on each of them on GitHub-hosted runners; the Windows job runs only the Windows component tests; suspend and wake are never exercised in CI and need Linux with systemd): Linux x86-64 and ARM64
 support every role. macOS ARM64 and Intel support the coordinator, the web interface,
 the remote client and the usage tools (`llm-usage`, `llm-scheduler`, `ralph-robin`),
 but not the Bridge console, tmux station, mission controller or `worker run`; the
@@ -344,6 +344,6 @@ No telemetry and no network listener. Quota reads use your existing provider cre
 ## More
 
 - Docs: [Bridge user guide](./docs/llm-bridge/guide.md) · [Bridge troubleshooting](./docs/llm-bridge/troubleshooting.md) · [Bridge operations](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
-- Needs Python 3.11+ and your provider CLIs; Bridge needs Linux and `tmux` (macOS runs the usage tools and the remote client).
+- Needs Python 3.11+ and your provider CLIs; the Bridge console and missions need Linux and `tmux` (macOS runs the usage tools and the remote client; Windows runs the remote client). Suspend and wake (`ralph-robin`, `llm-sleep-soak`, Bridge sleep) are supported on Linux with systemd only. Changes are listed in the [changelog](./CHANGELOG.md), which follows semantic versioning; the version is in `pyproject.toml`.
 - Contributing: [small, focused PRs](./docs/reference.md#contributing).
 - License: Apache 2.0.
