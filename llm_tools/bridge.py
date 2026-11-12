@@ -1356,8 +1356,8 @@ def require_launchable_rotation(config: dict[str, Any], providers: Any, routes: 
         raise ValueError(problem)
 
 
-def _read_prompt_args(parser: argparse.ArgumentParser, noun: str = "task") -> None:
-    group = parser.add_mutually_exclusive_group(required=True)
+def _read_prompt_args(parser: argparse.ArgumentParser, noun: str = "task", *, required: bool = True) -> None:
+    group = parser.add_mutually_exclusive_group(required=required)
     group.add_argument("--file", "--prompt-file", dest="prompt_file", metavar="PATH", help=f"read the {noun} prompt from PATH; '-' reads standard input")
     group.add_argument("--prompt", help=f"the {noun} prompt as literal text; use --file for long prompts")
 
@@ -1556,8 +1556,10 @@ def _build_parser(
     mission = sub.add_parser("mission", help="create or list missions")
     mission_sub = mission.add_subparsers(dest="mission_action", required=True)
     create = mission_sub.add_parser("create", help="create a mission and its first task")
-    _read_prompt_args(create, "mission objective and first task")
+    # --template supplies the objective, so the prompt is checked after parsing (see _parse_arguments).
+    _read_prompt_args(create, "mission objective and first task", required=False)
     _add_mission_create_args(create)
+    create.add_argument("--template", metavar="NAME|PATH", default=None, help="create the mission from a template: a TOML file with objective, tasks, dependencies, verifier, rotation and policy. NAME is NAME.toml in the templates folder next to the llm-tools config; a value with '/' or ending .toml is a file path. Options on the command line override the template; --prompt/--file replaces its objective. See help templates")
     _add_json_arg(create)
     listing = mission_sub.add_parser("list", help="list every mission (the same listing as llm-bridge missions)")
     listing.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
@@ -1573,6 +1575,14 @@ def _build_parser(
     mission_delete.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
     mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
     _add_json_arg(mission_delete)
+    mission_export = mission_sub.add_parser(
+        "export", help="write a mission's objective, tasks, verifier, rotation and policy as a template file",
+        description="Write the mission as a template that mission create --template can read back. The file holds no secrets and no folder "
+                    "path; an existing file is never overwritten without --force. Without a PATH the template goes to standard output.")
+    _add_mission_arg(mission_export, default_mission)
+    mission_export.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
+    mission_export.add_argument("--template", metavar="PATH|NAME", nargs="?", const="-", required=True, help="where to write: a file path (with '/' or ending .toml), a bare NAME for the templates folder, or nothing for standard output")
+    mission_export.add_argument("--force", action="store_true", help="overwrite an existing file")
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
     mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
@@ -1871,8 +1881,16 @@ def _parse_arguments(arguments: list[str]) -> argparse.Namespace:
         cut = arguments.index("--")
         parsed = _parse_arguments_core(arguments[:cut])
         parsed.verifier_after_dashes = arguments[cut + 1:]
-        return parsed
-    return _parse_arguments_core(arguments)
+    else:
+        parsed = _parse_arguments_core(arguments)
+    if arguments[:2] == ["mission", "create"]:
+        from .bridge_templates import explicit_options
+
+        if parsed.template is not None:
+            parsed.explicit_options = explicit_options(arguments)  # only a template needs to know what was typed
+        if parsed.template is None and parsed.prompt is None and parsed.prompt_file is None:
+            _build_parser().error("one of the arguments --file/--prompt-file --prompt is required")
+    return parsed
 
 
 def _parse_arguments_core(arguments: list[str]) -> argparse.Namespace:
@@ -2039,6 +2057,21 @@ def _mission_delete_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mission_export_command(args: argparse.Namespace) -> int:
+    """`mission export --template [PATH]`: write the mission as a template, standard output without a path."""
+    from . import bridge_templates
+
+    target = bridge_templates.export_target(args.template)
+    with open_store(readonly=True) as store:
+        text = bridge_templates.export_mission(store, args.mission)
+    if target is None:
+        sys.stdout.write(text)
+        return 0
+    bridge_templates.write_export(text, target, force=args.force)
+    print(f"Wrote template {target} from mission {fmt.short_id(args.mission)} · create from it with: llm-bridge mission create --template {target}")
+    return 0
+
+
 def _warn_not_signed_in(providers: Any, routes: Any, conf: dict[str, Any] | None = None) -> None:
     """Warn on stderr about rotation entries that are installed but not signed in; never fails."""
     from . import bridge_rotation
@@ -2076,6 +2109,11 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     Raises ``ValueError`` for conflicting modes or an unusable folder before any
     store is opened, so a rejected command leaves no database behind.
     """
+    if getattr(args, "template", None):
+        from . import bridge_templates
+
+        bridge_templates.apply_to_args(args, bridge_templates.load_template(args.template), getattr(args, "explicit_options", frozenset()))
+        auto_continue = auto_continue or bool(getattr(args, "auto_continue", False))
     prompt = prompt_from(args)
     _resolve_mode_args(args)
     args.cwd = _validated_cwd(args.cwd)
@@ -2104,6 +2142,10 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
 
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and its first task; returns ``{"mission": ..., "task": ...}``."""
+    if getattr(args, "template_tasks", None):
+        from .bridge_templates import create_template_tasks
+
+        return create_template_tasks(store, args, prompt, config)
     mission = store.create_mission(
         args.name or derive_mission_name(prompt, "LLM Bridge mission"),
         prompt,
@@ -3276,6 +3318,8 @@ def _main(argv: list[str] | None = None) -> int:
                 return _print_missions(args)
             if args.mission_action == "delete":
                 return _mission_delete_command(args)
+            if args.mission_action == "export":
+                return _mission_export_command(args)
             with open_store(readonly=args.mission_action == "list") as store:
                 if args.mission_action == "create":
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))

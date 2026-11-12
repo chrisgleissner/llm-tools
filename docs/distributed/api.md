@@ -260,6 +260,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
+| `mission export` | Exclusion: writes a local template file (prompts and verifier); `mission export --target` is refused, and `mission create --target --template` is refused because the template is read on the client. No REST operation. |
 | `mission colour` | Typed `mission.settings.patch` field `colour`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission color` | Alias of `mission colour`; same typed settings field. |
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
@@ -344,6 +345,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
 | `--providers` | `mission.start` params/body or `mission.create` body `providers`. |
 | `--routes` | `mission.start` params/body or `mission.create` body `routes`. |
+| `--template` | Exclusion: local template file for `mission create` (and the output path of `mission export`); refused with `--target`. No REST operation. |
 | `--teams` | `mission.create` body `teams`; mission edit maps to `mission.settings.patch`. |
 | `--token-spend` | `mission.create` body `token_spend`; mission edit maps to `mission.settings.patch`. |
 | `--trust-folder` | `mission.create` body `trust_folder`; worker only accepts a cwd inside its enrolled real-path roots. |

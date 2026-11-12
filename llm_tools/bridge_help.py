@@ -361,6 +361,17 @@ with a dash). Default verifier timeout is 300 seconds. A verifier may use {conte
 {mission_id}, {task_id}, {revision}. No verifier is added implicitly. Verification
 may execute the configured local command; task verify itself does not start a
 paid provider. Inspect failed evidence and correct the task before retrying.""",
+    "templates": """Mission templates
+
+A template is a TOML file with a mission's objective, tasks, dependencies, verifier,
+rotation and policy:
+  llm-bridge mission create --template release         NAME.toml in <config dir>/llm-tools/templates
+  llm-bridge mission create --template ./rel.toml      a path (contains / or ends in .toml)
+  llm-bridge mission export ID --template ./rel.toml   write a mission as a template
+Options typed on the command line override the template. An unknown key, an unknown
+dependency id or a dependency cycle is refused before anything is saved. A verifier from
+a template is hashed at creation like any other, so a changed verifier file needs your
+approval. Export never overwrites a file without --force. Keys: docs/llm-bridge/templates.md.""",
     "recovery": """Recover without losing source or replaying mutations
 
 Rejected edit: retain/open the private draft path shown, export it, correct the
@@ -495,6 +506,7 @@ TOPIC_SUMMARIES: dict[str, str] = {
     "providers": "providers, routes and native stations",
     "states": "what paused, running, blocked and active mean",
     "verification": "check finished work, set a verifier, approve or reject",
+    "templates": "create a mission from a TOML template, or export one",
     "recovery": "what to do after an error, a lost terminal or an unknown result",
     "remote": "use Bridge over SSH and share a window",
     "distributed": "run missions on other computers through a coordinator",
@@ -716,6 +728,7 @@ def console_help() -> str:
 COMMANDS: dict[str, tuple[str, str]] = {
     "mission": ("Save and inspect durable missions", "mission list"),
     "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --mode native --file prompt.md --cwd ."),
+    "mission export": ("Write a mission's objective, tasks, verifier, rotation and policy as a TOML template; an existing file is never overwritten without --force", "mission export ID --template rel.toml"),
     "mission list": ("List every mission, live ones first (the same listing as missions); no state changes or provider work", "mission list --json"),
     "mission settings": ("Show a mission's saved execution settings; no state changes or provider work", "mission settings --mission ID"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
@@ -802,6 +815,7 @@ _PAID = "starts provider work (uses paid capacity)"
 # therefore no "Effects:" line on their page.
 EFFECTS: dict[str, str] = {
     "mission create": "saves a new mission in Bridge's database; starts no provider.",
+    "mission export": "writes the template file you name (nothing without a path); an existing file is refused unless --force.",
     "mission set": "changes a saved setting of the mission.",
     "mission colour": "changes the mission's saved colour.",
     "mission delete": "permanently removes the mission from this computer, and from a coordinator the worker is connected to. This cannot be undone.",

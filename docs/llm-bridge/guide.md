@@ -52,6 +52,10 @@ Three facts explain most of Bridge's behaviour:
 4. Check what it is doing with `llm-bridge status`. `llm-bridge missions` lists
    every mission, live ones first.
 
+To reuse a mission's shape, `llm-bridge mission export ID --template rel.toml` saves it
+and `llm-bridge mission create --template rel.toml` creates a new one from it; see
+[Mission templates](./templates.md).
+
 Without a terminal on hand, `--mode background` (the command-line default) runs
 the provider under a controller, and `--mode headless` needs no tmux at all.
 On a terminal, `llm-bridge` with no command opens the home screen, where `N`
