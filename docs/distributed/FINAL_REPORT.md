@@ -71,10 +71,10 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 271 |
+| Verified `[x]` | 272 |
 | Waived `[w]` | 12 |
 | Deferred `[d]` | 4 |
-| Incomplete `[~]` | 80 |
+| Incomplete `[~]` | 79 |
 | Blocked `[!]` | 0 |
 | Not started `[ ]` | 130 |
 | **Total** | **497** |
