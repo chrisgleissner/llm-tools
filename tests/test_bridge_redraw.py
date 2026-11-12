@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_input, bridge_redraw, bridge_tui
+from llm_tools import bridge_console_rows, bridge_input, bridge_redraw, bridge_tui
 from tests.conftest import wait_for
 
 
@@ -384,8 +384,8 @@ def test_task_list_rows_are_built_once_per_frame_and_selection_needs_no_rows() -
     state.snapshot = {"tasks": tasks}
     state.choose_view(bridge_tui.VIEWS.index("Tasks"))
     built = []
-    original = bridge_tui._order_list_segments
-    bridge_tui._order_list_segments = lambda items: built.append(1) or original(items)  # type: ignore[assignment]
+    original = bridge_console_rows._order_list_segments
+    bridge_console_rows._order_list_segments = lambda items: built.append(1) or original(items)  # type: ignore[assignment]
     try:
         assert state.selection_rows() == list(range(59)) and built == []
         state._draw_cache = {}
@@ -396,7 +396,7 @@ def test_task_list_rows_are_built_once_per_frame_and_selection_needs_no_rows() -
         state.rows()
         assert built == [1, 1, 1]
     finally:
-        bridge_tui._order_list_segments = original  # type: ignore[assignment]
+        bridge_console_rows._order_list_segments = original  # type: ignore[assignment]
     state.snapshot = {"tasks": []}
     assert state.selection_rows() == [0] and state.rows() == ["No tasks recorded."]
 
