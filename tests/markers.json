@@ -3287,5 +3287,66 @@
    "subprocess",
    "slow"
   ]
+ },
+ "tests/test_bridge_finish_submit.py": {
+  "test_finish_submits_exit_command_to_provider_that_treats_quick_enter_as_paste": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_console_copy_mode.py": {
+  "test_command_pane_leaves_copy_mode_and_provider_pane_keeps_it": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_identity_read_race.py": {
+  "test_a_different_identity_is_refused_at_once_without_rereading": [
+   "subprocess"
+  ],
+  "test_identity_that_stays_unreadable_is_still_refused_and_nothing_is_signalled": [
+   "subprocess"
+  ],
+  "test_managed_process_stop_rereads_a_transiently_unreadable_identity": [
+   "subprocess"
+  ],
+  "test_owned_tree_of_an_alive_root_with_unreadable_identity_raises_instead_of_returning_nothing": [
+   "subprocess"
+  ],
+  "test_transient_unreadable_identity_is_read_again_and_the_process_is_stopped": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_int011_int016.py": {
+  "test_int011_event_payload_over_the_cap_shortens_values_and_keeps_every_field": [
+   "subprocess"
+  ],
+  "test_int011_multibyte_payload_over_the_cap_in_bytes_is_capped_although_its_character_count_is_not": [
+   "subprocess"
+  ],
+  "test_int016_a_verifier_of_a_running_mission_is_not_interrupted": [
+   "subprocess"
+  ],
+  "test_int016_cancelled_mission_interrupts_a_running_verifier": [
+   "subprocess"
+  ],
+  "test_int016_graceful_stop_lets_the_verifier_finish_and_the_task_completes": [
+   "subprocess"
+  ],
+  "test_int016_heartbeat_carries_the_main_loop_progress_counter": [
+   "subprocess"
+  ],
+  "test_int016_hooks_tick_the_counter_in_the_main_loop": [
+   "subprocess"
+  ],
+  "test_int016_interrupted_verifier_is_never_a_pass_even_when_it_exits_zero": [
+   "subprocess"
+  ],
+  "test_int016_no_verifier_is_started_for_a_cancelled_mission": [
+   "subprocess"
+  ],
+  "test_int016_verify_request_stays_in_config_when_its_verifier_was_interrupted": [
+   "subprocess"
+  ]
  }
 }

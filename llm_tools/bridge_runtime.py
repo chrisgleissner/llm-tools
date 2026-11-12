@@ -38,7 +38,7 @@ from .bridge_states import (
 )
 from . import bridge_task_notice
 from .bridge_limit_notice import UsageLimitNotice, detect_usage_limit
-from .bridge_refresh import CapacityRefreshWorker
+from .bridge_refresh import CapacityRefreshWorker, ProgressCounter
 from .bridge_progress import repository_checkpoint
 from .bridge_review import recorded_change
 from .bridge_sessions import (
@@ -152,6 +152,7 @@ class BridgeMissionHooks:
         self.max_provider_failures = max(1, int(max_provider_failures))
         self.controller_logs = controller_logs
         self._store: BridgeStore | None = None
+        self.progress = ProgressCounter()  # ticked by the main loop; the heartbeat reports it (INT-016)
         self._iteration = 0
         self._last_selected_station = ""
         self._session_restore_expectations: dict[str, NativeSessionIdentity] = {}
@@ -307,6 +308,7 @@ class BridgeMissionHooks:
         idle_delay = IDLE_POLL_SECONDS
         idle_state: tuple[Any, ...] | None = None
         while True:
+            self.progress.tick()
             self._apply_pending_boundary_requests()
             mission = self.store.get_mission(self.mission_id)
             status = mission["status"]
@@ -462,7 +464,10 @@ class BridgeMissionHooks:
         for task_id in requests:
             task = self.store.get_task(task_id)
             if task["status"] == "VERIFYING":
-                run_configured_verifier(self.store, self.mission_id, task_id, runtime=self.controller_logs.parent)
+                outcome = run_configured_verifier(self.store, self.mission_id, task_id, runtime=self.controller_logs.parent, progress=self.progress)
+                if outcome.get("reason") in {"interrupted", "mission-cancelled"}:
+                    remaining.append(task_id)  # not run to the end: the request stays for the operator's next start
+                    continue
                 self.store.record_runtime_event(self.mission_id, "steering-verify-applied", {"task_id": task_id})
             else:
                 remaining.append(task_id)
@@ -1286,7 +1291,7 @@ class BridgeMissionHooks:
                     })
             verify_requests = self.store.get_mission(self.mission_id)["config"].get("verification_requests", [])
             if status == 0 and task["status"] == "VERIFYING" and int(task["id"]) not in verify_requests:
-                run_configured_verifier(self.store, self.mission_id, int(task["id"]), runtime=self.controller_logs.parent)
+                run_configured_verifier(self.store, self.mission_id, int(task["id"]), runtime=self.controller_logs.parent, progress=self.progress)
             self._apply_pending_boundary_requests()
             mission_config = self.store.get_mission(self.mission_id)["config"]
             log_root = getattr(scheduler_config, "log_dir", None)
@@ -1421,6 +1426,11 @@ def _kill_process_group(proc: subprocess.Popen[bytes], grace: float = 0.5) -> No
         proc.wait()
 
 
+VERIFIER_STOP_CHECK_SECONDS = 0.5
+# A graceful stop lets a running verifier finish (the provider already did); only a cancel ends it.
+VERIFIER_STOP_STATUSES = frozenset({"CANCELLED"})
+
+
 def _run_bounded_verifier(
     argv: list[str],
     cwd: str,
@@ -1429,8 +1439,16 @@ def _run_bounded_verifier(
     *,
     on_started: Callable[[int, str], None] | None = None,
     on_finished: Callable[[int], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    stop_check_seconds: float = VERIFIER_STOP_CHECK_SECONDS,
+    on_tick: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Drain verifier output to a capped private log without unbounded RAM/disk."""
+    """Drain verifier output to a capped private log without unbounded RAM/disk.
+
+    ``should_stop`` is asked every ``stop_check_seconds``; when it returns true the verifier's process group is
+    terminated and the result says ``interrupted`` (INT-016). ``on_tick`` runs at the same interval so the caller
+    can show that its loop is still running.
+    """
     log_limit = 10 * 1024 * 1024
     result_limit = 1024 * 1024
     started = time.monotonic()
@@ -1441,6 +1459,8 @@ def _run_bounded_verifier(
     output_size = 0
     written = 0
     timed_out = False
+    interrupted = False
+    next_check = started + stop_check_seconds
     try:
         if on_started is not None:
             process_start = _process_start_token(proc.pid)
@@ -1459,6 +1479,13 @@ def _run_bounded_verifier(
                 if remaining <= 0:
                     timed_out = True
                     _kill_process_group(proc)
+                if not interrupted and time.monotonic() >= next_check:
+                    next_check = time.monotonic() + stop_check_seconds
+                    if on_tick is not None:
+                        on_tick()
+                    if should_stop is not None and should_stop():
+                        interrupted = True
+                        _kill_process_group(proc)
                 readable, _, _ = select.select([proc.stdout], [], [], min(0.05, max(0, remaining)))
                 if readable:
                     chunk = os.read(proc.stdout.fileno(), 65536)
@@ -1485,6 +1512,7 @@ def _run_bounded_verifier(
         return {
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "interrupted": interrupted,
             "output": bytes(captured),
             "output_size": output_size,
             "output_sha256": digest.hexdigest(),
@@ -1505,14 +1533,21 @@ def run_configured_verifier(
     *,
     runtime: Path,
     timeout_override: float | None = None,
+    progress: ProgressCounter | None = None,
 ) -> dict[str, Any]:
-    """Run the mission's explicit argv verifier and bind evidence to a revision."""
+    """Run the mission's explicit argv verifier and bind evidence to a revision.
+
+    A mission that becomes CANCELLED while the verifier runs ends it (INT-016), and none is started for a
+    cancelled mission; a graceful stop (STOPPING) lets it finish. An interrupted verifier is never a pass; ``progress`` is ticked while the verifier runs.
+    """
     mission = store.get_mission(mission_id)
     task = store.get_task(task_id)
     if task["mission_id"] != mission_id:
         raise TransitionError("configured verification task belongs to another mission")
     if task["status"] != "VERIFYING":
         return {"status": task["status"], "reason": "task-no-longer-verifying", "revision": int(task["revision"])}
+    if mission["status"] == "CANCELLED":
+        return {"status": task["status"], "reason": "mission-cancelled", "revision": int(task["revision"])}
     verifier = mission["config"].get("verifier")
     if not isinstance(verifier, dict) or not isinstance(verifier.get("argv"), list) or not verifier["argv"]:
         return {"status": "VERIFYING", "reason": "no-configured-verifier"}
@@ -1595,10 +1630,13 @@ def run_configured_verifier(
             log_path,
             on_started=mark_started,
             on_finished=mark_finished,
+            should_stop=lambda: str(store.get_mission(mission_id)["status"]) in VERIFIER_STOP_STATUSES,
+            on_tick=progress.tick if progress is not None else None,
+            stop_check_seconds=VERIFIER_STOP_CHECK_SECONDS,
         )
         output = run_result["output"].decode("utf-8", errors="replace")
         exit_code = int(run_result["exit_code"])
-        reason = "timeout" if run_result["timed_out"] else "output-too-large" if run_result["output_truncated"] else "nonzero-exit" if exit_code else "invalid-result"
+        reason = "interrupted" if run_result.get("interrupted") else "timeout" if run_result["timed_out"] else "output-too-large" if run_result["output_truncated"] else "nonzero-exit" if exit_code else "invalid-result"
     except OSError as exc:
         log_path.touch(mode=0o600, exist_ok=True)
         os.chmod(log_path, 0o600)
@@ -1630,7 +1668,7 @@ def run_configured_verifier(
         "output_sha256": run_result["output_sha256"],
         "output_size": run_result["output_size"],
     }
-    if exit_code == 0 and not run_result["output_truncated"]:
+    if exit_code == 0 and not run_result["output_truncated"] and not run_result.get("interrupted"):
         try:
             try:
                 payload = json.loads(output) if output.strip() else {}
@@ -1744,8 +1782,12 @@ def _process_group_absent(process_group: int) -> bool:
     return False
 
 
-def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, Any]]:
-    """Snapshot a process and its current descendants with /proc start tokens."""
+def _owned_process_tree(root_pid: int, root_start: str, *, _rescanned: bool = False) -> dict[int, dict[str, Any]]:
+    """Snapshot a process and its current descendants with /proc start tokens.
+
+    A root that is missing from the scan while the process is alive had an unreadable identity: it is read
+    again (bounded), and one that stays unreadable raises ``PermissionError`` instead of yielding an empty tree.
+    """
     try:
         entries = os.scandir("/proc")
     except OSError as exc:
@@ -1761,6 +1803,10 @@ def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, A
     if root and root["start"] != root_start:
         raise PermissionError("provider PID no longer matches its persisted process identity")
     if root is None:
+        if not _settled_process_start_token(root_pid) and _process_alive_but_unverifiable(root_pid):
+            raise PermissionError("provider PID is alive but its persisted process identity cannot be read")
+        if not _rescanned and _process_start_token(root_pid):
+            return _owned_process_tree(root_pid, root_start, _rescanned=True)  # readable now: scan again
         return {}
     children: dict[int, list[int]] = {}
     for pid, info in processes.items():
@@ -1817,7 +1863,7 @@ def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
                 f"managed {process['kind']} process {process['id']} has no verified identity; refusing stop/recovery"
             )
         process_pid = int(pid)
-        current = _process_start_token(process_pid)
+        current = _settled_process_start_token(process_pid)
         status = "UNCERTAIN"
         if current == expected:
             try:
@@ -1826,8 +1872,8 @@ def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
             except PermissionError:
                 # It may have exited between the preflight and signal check.
                 # A live process with changed identity remains a hard refusal.
-                after = _process_start_token(process_pid)
-                if after:
+                after = _settled_process_start_token(process_pid)
+                if after or _process_alive_but_unverifiable(process_pid):
                     raise
         elif not current and _process_alive_but_unverifiable(process_pid):
             raise PermissionError(f"managed process pid {process_pid} is alive but its identity cannot be verified")
@@ -1922,10 +1968,31 @@ def provider_operations_to_check(store: BridgeStore, mission_id: str) -> list[di
     ]
 
 
+IDENTITY_READ_ATTEMPTS = 5
+IDENTITY_READ_DELAY_SECONDS = 0.02
+
+
+def _settled_process_start_token(process_pid: int) -> str:
+    """The process start token, read again while the process is alive but its identity could not be read.
+
+    An empty token has two causes: the process is gone (or a zombie), or ``/proc`` could not be read for a
+    moment (a descriptor limit, a process that is being torn down). Refusing at the first unreadable result
+    turned the second cause into a refusal to stop a process that is ours. Only an identity that stays
+    unreadable for the whole bounded wait is treated as unverifiable.
+    """
+    token = _process_start_token(process_pid)
+    for _attempt in range(IDENTITY_READ_ATTEMPTS - 1):
+        if token or not _process_alive_but_unverifiable(process_pid):
+            break
+        time.sleep(IDENTITY_READ_DELAY_SECONDS)
+        token = _process_start_token(process_pid)
+    return token
+
+
 def _terminate_owned_process_group(process_pid: int, process_start: str, *, timeout: float = 2.0) -> None:
     if process_pid < 2 or not process_start:
         raise PermissionError("refusing to signal a process whose persisted identity does not match")
-    current = _process_start_token(process_pid)
+    current = _settled_process_start_token(process_pid)
     if current != process_start:
         if not current and not _process_alive_but_unverifiable(process_pid):
             return  # already exited (no /proc entry, or an unreaped zombie): nothing to signal
@@ -2418,6 +2485,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 store_path(),
                 interval_seconds=int(mission["config"].get("capacity_refresh_seconds", 60)),
                 initial_refresh_delay_seconds=0,
+                progress=hooks.progress,
             )
             refresh_worker.start()
             argv = ralph_argv(mission, runtime, providers=providers, routes=routes)
