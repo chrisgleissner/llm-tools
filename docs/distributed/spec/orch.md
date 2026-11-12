@@ -1,0 +1,18 @@
+# ORCH requirements
+
+Requirement text is taken from spec-addendum-2026-11-12.md.
+
+- ORCH-001: Worktree isolation. `mission create --isolate worktree` creates a git worktree under the Bridge state directory on a branch `bridge/<mission-slug>` from the current commit and runs the mission there. The default stays "run in place" (`LOCAL` compatibility). `mission delete` removes the worktree and refuses when it holds uncommitted or unpushed work unless forced.
+- ORCH-002: Several active missions per repository. The uniqueness rule applies to the effective working directory, so isolated missions on one repository run at the same time. Store schema 11 with migration and downgrade refusal tests. Two missions never share a working directory.
+- ORCH-003: Commit and push policy. Mission settings `commit = none | per-task` and `push = never | per-task | per-mission`. Bridge itself commits after the verifier passes and pushes per policy; it does not rely on the provider or its sandbox. It never force-pushes and never pushes to the repository's default branch unless the mission was created with an explicit flag. Each commit and push is an event. The task prompt states the policy.
+- ORCH-004: Handoff package. When the provider changes, the next prompt contains, each bounded in size: the diff summary and a bounded diff since the task started, the previous provider's last message, the tail of the last verifier result, and unanswered questions. The limits are mission settings. Nothing that the log redaction removes may appear. Test: two fake providers; the second prompt contains the four parts. Depends on `DOG-025`.
+- ORCH-005: Mission budgets. Optional limits on provider runs, wall-clock time, provider changes and spend (only where the provider reports a currency). Reaching a limit holds the mission with reason `budget-exhausted` until the operator raises the limit. Shown in the CLI, the console and the web console.
+- ORCH-006: Mission templates. `mission create --template NAME|PATH` reads a TOML file with objective, tasks, dependencies, verifier, rotation and policies. `mission export --template` writes one. The verifier guard applies to a verifier that comes from a template.
+- ORCH-007: Parallel tasks inside one mission. `[d]`, D42.
+- ORCH-008: Remote mission creation parity. The options that the coordinator rejects today (`unsupported_options`) are accepted, except a verifier command or file: a remote request names a verifier declared in the worker's configuration (D47). The threat model gains this entry. `PAR-003` cites this row.
+- ORCH-009: Worker placement. A remote `mission create` without a worker is placed on an online worker that allows control, has a requested provider ready according to its latest usage snapshot, and has the fewest active missions. The response says which worker was chosen and why. A named worker always wins.
+- ORCH-010: Mission migration between workers. `[d]`, D42.
+- ORCH-011: Multi-user access. Rejected, D43.
+- ORCH-012: Backoff after provider failures. A provider failure that is not a rate limit is retried with bounded exponential delay in addition to the existing count budget. A test counts launches over a simulated period.
+- ORCH-013: Orchestration acceptance test. One test with fake providers: two isolated missions on one repository; a rotation of three providers; a limit notice mid-run; a handoff; a verifier pass; a Bridge commit; a budget hold. It runs in CI.
+- ORCH-014: Dog-food proof. One real mission that uses at least three providers and a route, with isolation, commit policy and a budget, recorded in `docs/llm-bridge/dogfood.md` with its findings as `DOG` rows.

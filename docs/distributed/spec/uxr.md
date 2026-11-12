@@ -1,0 +1,50 @@
+# UXR requirements
+
+Source: redesign-builder-brief.md; the listed sources hold no requirement text for these IDs.
+
+- UXR-001: (source text not found) Design tokens (type scale, spacing, colour roles for light and dark, radii, elevation) are the only source of styles, and components contain no hard-coded colours.
+- UXR-002: (source text not found) Each item shows one state pill, and a stale state is replaced by a derived Offline or last-seen label.
+- UXR-003: (source text not found) Text is truncated by one rule only: titles wrap to at most two lines and identifiers are middle-truncated with the full value available.
+- UXR-004: (source text not found) Mission detail shows the live session pane on arrival, above the fold, at 60 percent or more of desktop viewport height and at 14 or more rows on Pixel 4.
+- UXR-005: (source text not found) Sessions are read-only by default, and typing requires an explicit Take control action without changing the terminal write permission.
+- UXR-006: (source text not found) The sticky steer composer stays in view and works with the virtual keyboard open on phones.
+- UXR-007: (source text not found) Pause and Stop are always visible on mission detail, Pause takes one interaction, Stop takes two with confirmation, and optimistic state appears within 500 ms.
+- UXR-008: (source text not found) Task row actions sit in an overflow menu, not in per-row button stacks.
+- UXR-009: (source text not found) Activity shows humanised milestones by default, with plumbing events counted and hidden and raw JSON only behind a per-row disclosure.
+- UXR-010: (source text not found) A 10-minute soak produces no toasts and no default-visible rows from plumbing events.
+- UXR-011: (source text not found) Toasts appear only for user-initiated results and actionable events, are announced politely, are dismissible and never cover primary controls.
+- UXR-012: (source text not found) The inbox lists the Needs you queue first, with inline approve, reject, answer and open actions, visible at every viewport.
+- UXR-013: (source text not found) Running missions show each provider's current activity and time in state in the inbox without a click.
+- UXR-014: (source text not found) Capacity chips (provider, scope, percent, reset) appear in the header, and the Usage page follows the brief.
+- UXR-015: (source text not found) The missions list shows active and needs-you missions first, collapses or filters finished ones and does not wrap short fields.
+- UXR-016: (source text not found) The sessions list shows active sessions first, collapses history and does not wrap identifiers.
+- UXR-017: (source text not found) The workers page shows health, connection state, host, address and last seen.
+- UXR-018: (source text not found) Approval with evidence takes at most two interactions from the inbox, with summary, verifier result and changed files on one screen.
+- UXR-019: (source text not found) Rejection requires a reason and takes at most three interactions.
+- UXR-020: (source text not found) Adding a task takes at most three interactions plus typing, and steering takes at most three.
+- UXR-021: (source text not found) The Ctrl or Cmd-K command palette finds missions, sessions and actions, and keyboard shortcuts are documented and discoverable.
+- UXR-022: (source text not found) Healthy running items stay visually quiet, attention colour is reserved for needs-you and failure, and reduced motion is respected.
+- UXR-023: (source text not found) A progressive disclosure map (levels 0, 1 and 2) is documented and implemented per page, and no primary control is hidden behind a disclosure.
+- UXR-024: (source text not found) Level-0 elements of each page are in the initial viewport at every matrix viewport, asserted by Playwright.
+- UXR-025: (source text not found) The layout is fluid from 320 to 2560 CSS px with no horizontal page scroll.
+- UXR-026: (source text not found) Content reflows at 320 CSS px and 400 percent zoom, supports text spacing changes, and works in both orientations.
+- UXR-027: (source text not found) Touch targets are at least 44 px on coarse pointers and at least 24 px everywhere, and no affordance requires hover.
+- UXR-028: (source text not found) The terminal on small screens has a font-size floor, a full-screen mode and on-screen modifier keys, and does not lose input.
+- UXR-029: (source text not found) Mobile layouts are designed per page, tables are not collapsed into label and value cards, and bottom navigation never overlaps content.
+- UXR-030: (source text not found) Dark and light themes both meet WCAG AA contrast and the full visual baseline set.
+- UXR-031: (source text not found) axe-core reports no serious or critical violations on any page, viewport or theme.
+- UXR-032: (source text not found) Lighthouse reports performance of at least 90 and accessibility of 100 on the main console pages at mobile settings.
+- UXR-033: (source text not found) INP is at most 200 ms and CLS at most 0.1 at Pixel 4 with 4x CPU throttling on mission detail with a live terminal.
+- UXR-034: (source text not found) Skeletons and optimistic updates are used, live refresh causes no layout shift, and keyboard focus is kept across refreshes.
+- UXR-035: (source text not found) Empty states teach and first-run guidance is shown on every page.
+- UXR-036: (source text not found) Every page answers what is happening, whether it needs the operator, and what comes next.
+- UXR-037: (source text not found) The device test matrix from the addendum runs in CI, covering the listed viewports, touch, reduced motion, zoom levels and both themes.
+- UXR-038: (source text not found) Visual baselines are regenerated in the same commit as the visible change and reviewed as screenshot diffs.
+- UXR-039: (source text not found) The bundle budget is kept, or raised only with a measured and recorded reason.
+- UXR-040: (source text not found) A fresh-eyes UX critique of every page at 1440 and 360 widths in both themes is filed as UXR rows and each finding is closed with proof.
+- UXR-041: (source text not found) Viewing on a small screen does not resize the shared provider PTY, and phones fit the width or scroll with a plain-text transcript toggle.
+- UXR-042: (source text not found) The addendum's interaction and layout rules are adopted, including the interrupt ladder, one-animation motion budget, last-known state with age when disconnected and the viewport meta settings.
+- UXR-043: (source text not found) Each operator task's click path is inventoried in docs/distributed/ux-audit.md with its interaction count.
+- UXR-044: (source text not found) Playwright measures each inventoried path's interaction count at 1440x900 and 320x568 and fails when it exceeds the target.
+- UXR-045: (source text not found) Every operator task completes at 320x568 and 360x640 with a simulated on-screen keyboard covering half the viewport, keeping the focused field, its submit control and validation messages visible.
+- UXR-046: (source text not found) The primary action of each state is reachable with one thumb on phones, and every action has a keyboard path on desktop, listed in the inventory.
