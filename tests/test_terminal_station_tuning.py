@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import re
 import shutil
 import subprocess
@@ -132,10 +133,16 @@ def test_status_formats_keep_explicit_hint_wording_and_separators() -> None:
     assert "@llm_bridge_context" in STATUS_CONTEXT_FORMAT and "client_width" in STATUS_CONTEXT_FORMAT
 
 
+_OUTER_SOCKETS = itertools.count()
+
+
 def _attached_status_row(backend, handle, tmp_path: Path, width: int, context: str | None = None, *, wait_for: str = "Provider") -> str:
     if context is not None:
         backend.set_status_context(handle, context)
-    outer = tmp_path / f"outer{width}.sock"
+    # A fresh socket per call: ``kill-server`` returns before the old server process has exited,
+    # and a ``new-session`` on the same path in that window connects to the dying server and
+    # fails with "server exited unexpectedly".
+    outer = tmp_path / f"outer{width}-{next(_OUTER_SOCKETS)}.sock"
     base = ["tmux", "-S", str(outer), "-f", "/dev/null"]
     subprocess.run([*base, "new-session", "-d", "-s", "o", "-x", str(width), "-y", "24",
                     f"env TERM=xterm-256color tmux -S {handle.socket_path} attach -t {handle.session_name}"],
