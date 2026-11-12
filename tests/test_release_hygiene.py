@@ -179,3 +179,18 @@ def test_suspend_and_wake_are_documented_as_linux_with_systemd_only() -> None:
     assert re.search(r"[Ss]uspend and wake[^.]*Linux with systemd only", readme)
     first_run = (ROOT / "docs/llm-bridge/first-run.md").read_text(encoding="utf-8")
     assert "Platform: Linux only" in first_run and "suspend and wake need Linux with systemd" in first_run
+
+
+def test_usage_ansi_renderer_falls_back_to_plain_text_without_rich(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in [name for name in sys.modules if name == "rich" or name.startswith("rich.")]:
+        monkeypatch.delitem(sys.modules, name)
+    real_import = builtins.__import__
+
+    def refuse_rich(name: str, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if name == "rich" or name.startswith("rich."):
+            raise ImportError("No module named 'rich'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_rich)
+    rows = bridge_documents.render_ansi_segments("\x1b[32mclaude\x1b[0m   ready\n\nend")
+    assert rows == ((("claude   ready", "info"),), (), (("end", "info"),))
