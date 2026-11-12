@@ -109,7 +109,21 @@ def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, s
         return {"name": name, "launch_cli": cli, "installed": False, "path": None, "logged_in": None, "detail": f"{binary} is not on PATH"}
     check = _LOGIN_CHECKS.get(cli)
     logged_in, detail = check(environment) if check else (None, "")
-    return {"name": name, "launch_cli": cli, "installed": True, "path": path, "logged_in": logged_in, "detail": detail}
+    result = {"name": name, "launch_cli": cli, "installed": True, "path": path, "logged_in": logged_in, "detail": detail}
+    drift = _version_drift(cli)
+    if drift:
+        result["version_drift"] = drift
+    return result
+
+
+def _version_drift(cli: str) -> str | None:
+    """PROV-011: a warning when the installed CLI's minor version is newer than its evidence file (none without evidence)."""
+    from . import bridge_capabilities
+
+    evidence = bridge_capabilities.load_evidence(cli)
+    if evidence is None:
+        return None
+    return bridge_capabilities.version_drift(bridge_capabilities.installed_version(cli), evidence)
 
 
 def provider_checks(entries: Sequence[tuple[str, str | None]], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
