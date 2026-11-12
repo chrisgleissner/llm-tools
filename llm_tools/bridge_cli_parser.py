@@ -9,7 +9,6 @@ from typing import Any, Callable, NoReturn, Sequence
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
 from .bridge_missions import MIN_MISSION_PREFIX
 import argparse
-import difflib
 from .bridge import (
     EXIT_USAGE,
     MISSION_LIST_PAGE,

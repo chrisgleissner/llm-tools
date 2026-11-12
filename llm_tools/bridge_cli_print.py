@@ -6,10 +6,9 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from . import bridge_commands as commands
 from . import bridge_format as fmt
-import argparse
 import shutil
 from .bridge import (
     EXIT_NOT_FOUND,
@@ -19,6 +18,9 @@ from .bridge import (
     _json_print,
     open_store,
 )
+
+if TYPE_CHECKING:
+    import argparse
 
 
 def _proposal_page(args: argparse.Namespace, result: dict[str, Any]) -> dict[str, Any]:

@@ -2207,7 +2207,6 @@ def _interactive_terminal() -> bool:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    from .bridge_cli_parser import _build_parser, _parse_arguments
     from .bridge_cli_print import _events_command, _print_missions, _print_result, _print_task_evidence, _proposal_page, _proposal_text, _task_text
     from .bridge_cli_worker import _refuse_on_windows, _remote_command, _split_target, _worker_command
 
@@ -2229,6 +2228,8 @@ def _main(argv: list[str] | None = None) -> int:
         # Say why before the help, so that a missing terminal is not mistaken for a broken home screen.
         reason, status = blocker
         print(f"llm-bridge: the home screen needs {reason}; showing help instead", file=sys.stderr)
+        from .bridge_cli_parser import _build_parser
+
         _build_parser().print_help()
         return status
     if arguments[0] == "help" and not any(arg in {"--help", "-h"} for arg in arguments[1:]):
@@ -2264,6 +2265,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _legacy_prompt_mode(arguments)
         except (ValueError, KeyError, OSError, TransitionError) as exc:
             return _fail(str(exc), "usage", EXIT_USAGE, False)
+    from .bridge_cli_parser import _parse_arguments
+
     args = _parse_arguments(arguments)
     if args.command == "mission" and args.mission_action == "delete" and not args.mission:
         return _fail("name the mission to delete: llm-bridge mission delete ID (the current folder is never used for a deletion)", "usage", EXIT_USAGE, bool(getattr(args, "json", False)))
@@ -2713,6 +2716,8 @@ def _main(argv: list[str] | None = None) -> int:
                 return _fail_rejected(result, "steering rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))
             return 0
+        from .bridge_cli_parser import _build_parser
+
         _build_parser().error(f"unsupported command {args.command}")
     except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:  # WorkerConfigError is a ValueError
         return _fail_with(exc, bool(getattr(args, "json", False)))

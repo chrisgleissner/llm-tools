@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from . import bridge_commands as commands
-import argparse
 from .bridge_cli_print import _print_result
 from .bridge import (
     EXIT_USAGE,
@@ -15,6 +14,9 @@ from .bridge import (
     package_version,
     read_verbatim,
 )
+
+if TYPE_CHECKING:
+    import argparse
 
 
 def _worker_command(args: argparse.Namespace) -> int:
