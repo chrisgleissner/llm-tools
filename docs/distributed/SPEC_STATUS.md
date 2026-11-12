@@ -507,7 +507,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-005 | [ ] | Not started. |
 | FIND-006 | [ ] | Not started. |
 | FIND-007 | [ ] | Not started. |
-| FIND-008 | [ ] | Not started. |
+| FIND-008 | [w] | `ZAP-001` (console CSP allows inline styles because xterm.js injects styles at run time) is waived by D14. `scripts/check_zap_reports.py` accepts only that alert, only on console paths and only with the expected policy; `review-findings.md` records the disposition. Tests: tests/test_zap_reports.py::test_zap_alert_gate_accepts_only_reviewed_xterm_style_csp_alert, tests/test_zap_reports.py::test_zap_alert_gate_does_not_accept_inline_script_csp |
 | FIND-009 | [ ] | Not started. |
 | FIND-010 | [ ] | Not started. |
 | FIND-011 | [ ] | Not started. |
