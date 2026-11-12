@@ -3,7 +3,7 @@
 // the segmented views; the pieces are in header.ts, tasks.ts, evidence.ts, activity.ts, about.ts and session.ts.
 import * as api from "../../api";
 import type { BridgeEvent } from "../../api";
-import { debounce, emptyState, button, h } from "../../dom";
+import { debounce, emptyState, button, h, patch } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
 import { hasDigest, listedNeeds, missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import { announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
@@ -280,7 +280,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     const active = document.activeElement as HTMLElement | null;
     const focused = active && head.contains(active) ? (active.getAttribute("data-action") ?? (active.getAttribute("aria-haspopup") === "menu" ? "menu" : "")) : null;
     head.setAttribute("data-entity", `mission:${workerName}/${missionId}`);
-    head.replaceChildren(...buildHeader(m, handlers));
+    patch(head, buildHeader(m, handlers)); // in place: an open "More mission actions" menu stays
     document.title = `${/^\(\d+\)\s/.exec(document.title)?.[0] ?? ""}${m.name} - LLM Bridge`;
     if (focused !== null) {
       const find = (selector: string) => head.querySelector<HTMLElement>(selector);

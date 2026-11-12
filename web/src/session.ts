@@ -4,7 +4,7 @@
 import { Terminal } from "@xterm/xterm";
 
 import { composer } from "./composer";
-import { button, h } from "./dom";
+import { button, h, liveOf } from "./dom";
 import { menu, type MenuItem } from "./menu";
 import { publishStreamMessage } from "./store";
 import { TERMINAL_THEME } from "./terminal-theme";
@@ -125,6 +125,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   let pausedAt = 0;
   let activityOpened = false;
   let menuKey = "";
+  let menuEl: HTMLElement | null = null;
 
   // ---- state shown to the operator
   function setState(next: TermState, why = ""): void {
@@ -179,7 +180,20 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     const key = `${writer}${available}${state === "idle" || state === "ended"}`;
     if (key === menuKey) return;
     menuKey = key;
-    menuSlot.replaceChildren(menu({ label: "Session options", id: "session-menu" }, items));
+    // One menu for the life of the pane (DOG-028). A closed menu reads the new items when it opens; the buttons of an open menu change
+    // in place, so a refresh never detaches the menu or the item that the pointer or the focus is on. (The click handlers of the three
+    // items do not depend on the state, so the ones built earlier stay correct.)
+    if (!menuEl) {
+      menuSlot.append((menuEl = menu({ label: "Session options", id: "session-menu" }, items)));
+      return;
+    }
+    liveOf(menuEl)["items"] = items;
+    menuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]').forEach((b, i) => {
+      const item = items[i]!;
+      b.disabled = !!item.disabled;
+      b.title = item.disabled && item.reason ? item.reason : "";
+      b.replaceChildren(h("span", {}, item.label), ...(item.disabled && item.reason ? [h("span", { class: "why" }, item.reason)] : []));
+    });
   }
 
   function restart(m: "view" | "write"): void {
