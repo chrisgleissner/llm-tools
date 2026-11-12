@@ -579,3 +579,42 @@ copy stop at 60 of 98 MiB on the macOS ARM64 runner (no progress for 80 s).
 Remaining limit: a commit that holds the writer connection for longer than the wait still makes
 requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.
+
+## D40 Release split (TRACK-013)
+
+Release 1.5.0 ships the distributed Bridge, the web redesign (PRD-037) and the release gates. Release 1.6.0 ships provider parity (`PROV`) and orchestration (`ORCH`), together with `LB-004`. Reason: about 560 commits are unreleased since 1.4.0, and the 1.6.0 work changes the store schema and the controller loop. `scripts/spec_open.py` encodes this membership.
+
+Numbering: D30 to D39 are left for the decisions that pull requests #57 and #64 add on their branches; they are renumbered when those pull requests merge (`TRACK-017`). D18 and D28 do not exist.
+
+## D41 Status vocabulary (TRACK-013)
+
+The register gains `[w]` (waived by a recorded decision; counts as closed) and `[d]` (deferred to a named target release by a recorded decision; closed for earlier releases and open for the target). A `[w]` row cites its decision; a `[d]` row cites its decision and `target <version>`. `[x]` is used only for verified work.
+
+## D42 Deferred beyond 1.6.0 (ORCH-007, ORCH-010)
+
+Parallel tasks inside one mission (`ORCH-007`) and mission migration between workers (`ORCH-010`) are deferred to 1.7.0. Parallel work is provided by several isolated missions in one repository (`ORCH-001`, `ORCH-002`), which needs no change to the one-task-at-a-time controller.
+
+## D43 Multi-user access rejected for now (ORCH-011)
+
+Multi-user role-based access and OIDC are not planned. Bridge is a single-operator product; `AUTH-009` stays as it is.
+
+## D44 Last provider line on a fast exit (DOG-025)
+
+`DOG-025` stays deferred for 1.5.0 and is listed as a known limitation (as D27 decided), but it is a 1.6.0 requirement because the handoff package of `ORCH-004` depends on the previous provider's last message.
+
+## D45 Independent review (PRD-023, REV-004)
+
+`PRD-023` and `REV-004` require a reviewer that is not the implementing model. One Codex review session per release, together with the existing ZAP scan, satisfies this. Findings and their dispositions are recorded in `docs/distributed/review-findings.md`.
+
+## D46 Waivers and deferrals of existing rows
+
+- `PRD-022` (internationalisation readiness of the web console) is deferred to 1.7.0. No translation is planned for 1.5.0 or 1.6.0.
+- `PI-UPD-004`, `PI-UPD-009`, `PI-DEPLOY-007`, `PI-VERIFY-007`, `PI-VERIFY-008` and `PI-FLASH-007` are waived. Each row states the hardware reason: no newer kernel package to trigger a real automatic reboot, no phone with both browsers, a Wi-Fi interruption test that removes the only management link, an unplug test that needs a person at the device, and an optional USB gadget fallback that was not needed.
+- `PK-012`, `PI-VERIFY-013` and `DOG-023` change from `[x]` to `[w]`, because they were closed by the operator decisions of 2026-11-07, not by verification.
+- Mouse clicks inside native provider panes (`LB-003`) are waived; the mouse wheel is supported.
+
+Acceptance: on 2026-11-12 the operator delegated all remaining decisions to the lead ("Make all decisions like a principal engineer and product owner would"). D40 to D47 are accepted under that delegation, without a veto.
+
+## D47 Remote verifiers (ORCH-008)
+
+A mission created through the coordinator may name only a verifier that the worker's own configuration declares. A verifier command or verifier file is never accepted over the network, because it would let any holder of a control token run arbitrary commands on the worker.

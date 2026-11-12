@@ -24,3 +24,8 @@ independent security/distributed-consistency second opinion are still pending.
 - **Regression evidence:** `tests/test_zap_reports.py::test_zap_alert_gate_accepts_only_reviewed_xterm_style_csp_alert`
   and `::test_zap_alert_gate_does_not_accept_inline_script_csp`.
 
+## Dispositions
+
+| Finding | Disposition |
+| --- | --- |
+| ZAP-001 | no change (accepted: xterm.js needs inline styles; gate test `tests/test_zap_reports.py::test_zap_alert_gate_accepts_only_reviewed_xterm_style_csp_alert`; register FIND-008) |

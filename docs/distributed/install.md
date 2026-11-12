@@ -704,8 +704,8 @@ Recommended settings:
   limit the firewall rule to the local subnet and trust the coordinator CA in clients.
 - The database uses `synchronous=FULL`; do not disable it or put authoritative state
   on tmpfs. The physical benchmark database grew by 558 bytes per event. The
-  24-hour physical card-write measurement is still pending and is not inferred from
-  benchmark data.
+  physical 24-hour card-write sample (`PI-WEAR-009`) recorded 27.29 GB of host writes
+  without per-process attribution; card writes are not inferred from benchmark data.
 - Follow Low-write host above: use the low-write compose file, volatile journal,
   noatime and zram; keep at least 25% of the card free.
 - The Pi has no battery-backed clock. Keep time synchronization enabled and verify it

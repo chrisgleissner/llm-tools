@@ -1602,3 +1602,88 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-078 | low | no change | Already behaves as the finding asks on this branch; regression test added in `tests/test_bridge_cliux_lifecycle.py`. |
 | CLIUX-079 | low | fixed | `attach` to a stopped mission offers `control` first and `start` second. `tests/test_bridge_cliux_lifecycle.py` |
 | CLIUX-080 | low | fixed | Task numbers work positionally (`task show 1`, `proposal accept 2`); `-m`, `-t`, `-j` short options. `tests/test_bridge_cli_conventions.py` |
+
+## Dispositions
+
+| Finding | Disposition |
+| --- | --- |
+| CLIUX-001 | fixed (82a36cf; tests/test_bridge_cli_start_create_ux.py) |
+| CLIUX-002 | fixed (82a36cf; tests/test_bridge_cli_start_create_ux.py) |
+| CLIUX-003 | fixed (075d38c; tests/test_bridge_task_review.py) |
+| CLIUX-004 | fixed (0bde2f6) |
+| CLIUX-005 | fixed (fc9c5fa) |
+| CLIUX-006 | fixed (bae8ed0; tests/test_bridge_review_vocabulary.py) |
+| CLIUX-007 | fixed (0bde2f6) |
+| CLIUX-008 | fixed (b137f3e) |
+| CLIUX-009 | fixed (b137f3e) |
+| CLIUX-010 | fixed (82a36cf; tests/test_bridge_cli_start_create_ux.py) |
+| CLIUX-011 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-012 | fixed (4cf1bf0) |
+| CLIUX-013 | fixed (4cf1bf0) |
+| CLIUX-014 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-015 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-016 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-017 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-018 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-019 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-020 | fixed (1f05142; tests/test_bridge_events_cli.py) |
+| CLIUX-021 | fixed (80f2676; tests/test_bridge_error_messages.py) |
+| CLIUX-022 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-023 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-024 | fixed (tests/test_bridge_cliux_batch3.py) |
+| CLIUX-025 | fixed (tests/test_bridge_cliux_batch3.py) |
+| CLIUX-026 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-027 | fixed (4cf1bf0) |
+| CLIUX-028 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-029 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-030 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-031 | fixed (9b3dd51; tests/test_bridge_form_capacity.py) |
+| CLIUX-032 | fixed (tests/test_bridge_cliux_output.py) |
+| CLIUX-033 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-034 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-035 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-036 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-037 | fixed (tests/test_bridge_cliux_output.py) |
+| CLIUX-038 | fixed (tests/test_bridge_cliux_batch3.py) |
+| CLIUX-039 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-040 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-041 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-042 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-043 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-044 | fixed (1f05142; tests/test_bridge_events_cli.py) |
+| CLIUX-045 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-046 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-047 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-048 | fixed (0bde2f6) |
+| CLIUX-049 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-050 | fixed (4cf1bf0) |
+| CLIUX-051 | fixed (1668bcb) |
+| CLIUX-052 | fixed (82a36cf; tests/test_bridge_cli_start_create_ux.py) |
+| CLIUX-053 | fixed (1668bcb) |
+| CLIUX-054 | fixed (1668bcb) |
+| CLIUX-055 | fixed (9b3dd51; tests/test_bridge_form_capacity.py) |
+| CLIUX-056 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-057 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-058 | fixed (1f05142; tests/test_bridge_events_cli.py) |
+| CLIUX-059 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-060 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-061 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-062 | fixed (1668bcb) |
+| CLIUX-063 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-064 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-065 | fixed (tests/test_bridge_cliux_output.py) |
+| CLIUX-066 | fixed (9b3dd51; tests/test_bridge_form_capacity.py) |
+| CLIUX-067 | fixed (9b3dd51; tests/test_bridge_form_capacity.py) |
+| CLIUX-068 | fixed (9b3dd51; tests/test_bridge_form_capacity.py) |
+| CLIUX-069 | fixed (tests/test_bridge_cliux_output.py) |
+| CLIUX-070 | no change (see Fix status) |
+| CLIUX-071 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-072 | fixed (tests/test_bridge_cli_conventions.py) |
+| CLIUX-073 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-074 | fixed (tests/test_bridge_help_ux.py) |
+| CLIUX-075 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-076 | fixed (tests/test_bridge_cliux_console.py) |
+| CLIUX-077 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-078 | no change (see Fix status) |
+| CLIUX-079 | fixed (tests/test_bridge_cliux_lifecycle.py) |
+| CLIUX-080 | fixed (tests/test_bridge_cli_conventions.py) |
