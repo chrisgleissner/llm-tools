@@ -363,9 +363,9 @@ outcome below. All of them require, as PRD-008 does:
 | `disk-full` | The coordinator runs with `SIGXFSZ` ignored; the harness lowers its `RLIMIT_FSIZE` to 64 KiB at run time with `prlimit`, so every write past that offset fails like a full volume, and lifts the limit later. | The process survives and keeps answering `/healthz`. Writes that cannot be stored are refused with HTTP 500 (or fail at the transport), and an answer of 2xx means the command is durable. When space returns, with no restart, refused commands are repeated under their ID and run once, workers are online and events replicate exactly. | `[disk-full]` |
 | `clock-jump` | The coordinator runs with `LD_PRELOAD=chaos_clock_shim.so`; the wall clock is moved forward one hour, back two hours, then to real time while traffic continues. A reconnect after each step shows the shifted `last_seen`. | The coordinator stays up and keeps its worker connections (liveness uses monotonic time). Nothing lost or applied twice, event order by id intact, and the stamps the coordinator writes follow its shifted clock. | `[clock-jump]` |
 | `ws-slow-frames` | `scripts/dist_ws_proxy.py` terminates TLS on both sides and holds every data frame for 250 ms in each direction. | Commands finish with a round trip of at least the injected delay, nothing lost or duplicated, events replicate exactly, and the worker does not reconnect. | `[ws-slow-frames]` |
-| `ws-dropped-frames` | The same proxy swallows one `command` frame (coordinator to worker), one `command.result` frame (worker to coordinator) and one `events` batch. | A lost command or result leaves the command unfinished (`sent` or `acked`), never `done`, and the effect is absent (lost command) or present once (lost result). After the connection is renewed the command finishes and has its effect exactly once. A lost event batch is detected by the next batch (`events.nack`) and resent without a reconnect. | `[ws-dropped-frames]` |
+| `ws-dropped-frames` | The same proxy swallows one `command` frame (coordinator to worker), one `command.result` frame (worker to coordinator) and one `events` batch. | A lost command or result leaves the command unfinished (`sent` or `acked`), never `done`, and the effect is absent (lost command) or present once (lost result). Without a reconnect the coordinator sends the command again after 10 s, and it finishes within 45 s with its effect exactly once. A lost event batch is detected by the next batch (`events.nack`) and resent without a reconnect. | `[ws-dropped-frames]` |
 | `slow-link` | A worker connects through `scripts/dist_ws_proxy.py` shaped to a 300 ms round trip (150 ms each way, plus or minus 50 ms of jitter) and 1 Mbit/s in each direction. A background mission with a tmux station keeps producing output; the harness reads a 450 KB command result every 12 s, opens a remote terminal every 30 s and sends a `task.add` every 10 s for the whole run (see Slow link below). | The worker keeps its single connection for the whole run: zero reconnects according to the proxy, the coordinator's generation counter and the worker's own log and audit. Every terminal shows its first screen in under 3 s. Every 450 KB result arrives. The measured round trip matches the profile (median within 25% of 300 ms) and the link carries no more than 1.15 times its rate. No command is lost or applied twice and events replicate exactly. | `[slow-link]`, `test_a_*` and `test_slow_link_*` |
-| `db-corrupt-page` | The coordinator is stopped after a backup, the b-tree header of every page that holds one command is overwritten (the file then fails `PRAGMA integrity_check`), and the coordinator is started again. | The coordinator never serves a row from a corrupt page as intact: it refuses to start with a non-zero exit, or it answers the affected request with an error. Restoring the backup (the procedure in `install.md`) brings it back, the workers reconnect, and no command or event is lost. | `[db-corrupt-page]` |
+| `db-corrupt-page` | The coordinator is stopped after a backup, the b-tree header of every page that holds one command is overwritten (the file then fails `PRAGMA integrity_check`), and the coordinator is started again. | The coordinator refuses to start with a non-zero exit and a message that names the integrity failure and the `restore` command (FIND-002); it never keeps running on the damaged file. Restoring the backup (the procedure in `install.md`) brings it back, the workers reconnect, and no command or event is lost. | `[db-corrupt-page]` |
 
 The tests are in `tests/test_distributed_chaos.py`: one `test_fault_meets_its_declared_outcome` case per
 fault (real binary, real worker processes, 5 to 45 s each), plus fast tests for the registry, this
@@ -516,16 +516,14 @@ recovery.
 
 These are results of the first runs, recorded because they decide what the expected outcomes can say.
 
-- `db-corrupt-page`: the coordinator has no integrity check at start. It starts, answers `/healthz` with
-  `200`, and returns `500` for the request that reads a damaged page. A damaged page therefore shows up as
-  errors on some requests, not as a refusal to start. The fault accepts either behaviour and fails only if a
-  damaged row is served as intact. A start-up `PRAGMA quick_check` (or an equivalent failing health check)
-  would make the first case the rule.
-- `ws-dropped-frames`: the journal redelivers a command only after a reconnect (`protocol.md`). When a
-  `command` frame is lost on a live connection the command stays `sent` until the connection is renewed,
-  and a lost `command.result` leaves it `acked`. The state is honest (never `done`), but nothing renews the
-  connection while pings keep arriving, so such a command waits for the next reconnect. The fault renews the
-  connection itself after six seconds to show the recovery.
+- `db-corrupt-page`: before FIND-002 the coordinator started on the damaged file, answered `/healthz` with
+  `200` and returned `500` for the request that read a damaged page. The coordinator now runs `PRAGMA quick_check`
+  before it binds a listener and exits with status 1 and the `restore` command in the message; the fault requires
+  that refusal and fails if the coordinator keeps running.
+- `ws-dropped-frames`: before FIND-003 a command whose `command` frame was lost stayed `sent`, and one whose
+  `command.result` was lost stayed `acked`, until the connection was renewed. The coordinator now sends an
+  unfinished mutating command again after 10 s without progress, on the same connection. The fault requires both
+  commands to finish within 45 s without a reconnect and to have their effect once.
 - `disk-full`: with every write failing, all twelve submissions were answered with HTTP 500 and none was
   accepted, the process survived, and the same request IDs were accepted and applied once after the limit
   was lifted.

@@ -1007,3 +1007,75 @@ async fn browser_stream_gets_change_notices_not_event_bodies_or_command_results(
     assert!(link["worker_out"]["welcome"]["messages"].as_u64().unwrap() >= 1);
     env.stop().await;
 }
+
+/// Wait up to `secs` for the next `command` frame, answering the coordinator's application pings.
+async fn next_command(fw: &mut Fw, secs: u64) -> Option<Value> {
+    use futures_util::StreamExt;
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let frame = tokio::time::timeout_at(end, fw.ws.next()).await.ok()??.ok()?;
+        if let tokio_tungstenite::tungstenite::Message::Text(t) = frame {
+            let m: Value = serde_json::from_str(t.as_str()).unwrap();
+            match m["type"].as_str() {
+                Some("command") => return Some(m),
+                Some("ping") => fw.send("pong", json!({})).await,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// FIND-003: a `command` frame that is lost on a live connection is sent again on the same connection, without
+/// a reconnect, and a `command.result` that is lost makes the coordinator send the command again as well.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_command_is_sent_again_on_the_same_connection() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
+    assert_eq!(api.post("/api/v1/commands", submit("lost-command")).await.0, 202);
+    let first = next_command(&mut fw, 5).await.expect("the first delivery");
+    assert_eq!(first["payload"]["request_id"], "lost-command");
+    // The worker never saw it (as if the frame was dropped): no ack, no result.
+    let again = next_command(&mut fw, 25).await.expect("the command was not sent again within 25 s");
+    assert_eq!(again["payload"]["request_id"], "lost-command");
+    assert_eq!(api.get("/api/v1/commands/lost-command").await.1["state"], "sent");
+
+    // This time the ack arrives and the result is lost.
+    fw.send("command.ack", json!({"request_id": "lost-command", "status": "received"})).await;
+    fw.barrier().await;
+    assert_eq!(api.get("/api/v1/commands/lost-command").await.1["state"], "acked");
+    let third = next_command(&mut fw, 25)
+        .await
+        .expect("an acked command without a result was not sent again within 25 s");
+    assert_eq!(third["payload"]["request_id"], "lost-command");
+    fw.send("command.ack", json!({"request_id": "lost-command", "status": "duplicate"})).await;
+    let result =
+        json!({"schema_version": 1, "request_id": "lost-command", "operation": "task.add", "outcome": "applied", "result": {"task": 1}, "error": null});
+    fw.send("command.result", result.clone()).await;
+    fw.barrier().await;
+    let (_, done) = api.get("/api/v1/commands/lost-command").await;
+    assert_eq!(done["state"], "done");
+    assert_eq!(done["result"], result);
+    // A finished command is not sent again.
+    assert!(next_command(&mut fw, 12).await.is_none(), "a finished command was sent again");
+    env.stop().await;
+}
+
+#[test]
+fn commands_stale_offers_a_command_again_only_after_the_idle_time() {
+    let dir = tmp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = bridge_coordinator::db::Db::open(&dir.join("c.db")).unwrap();
+    db.worker_add("w1", "hash").unwrap();
+    let r = request("c1", "task.add");
+    db.command_insert("w1", "task.add", true, &r).unwrap();
+    assert!(db.commands_stale("w1", 3600, 10).unwrap().is_empty(), "a fresh command is not stale");
+    let rows = db.commands_stale("w1", 0, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].request_id, "c1");
+    assert!(db.commands_stale("w1", 3600, 10).unwrap().is_empty(), "the offer moved the idle clock");
+    db.command_done("w1", "c1", &json!({})).unwrap();
+    assert!(db.commands_stale("w1", 0, 10).unwrap().is_empty(), "a finished command is not offered");
+    let _ = std::fs::remove_dir_all(&dir);
+}

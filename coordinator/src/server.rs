@@ -56,6 +56,26 @@ pub async fn start(data_dir: &Path) -> Result<RunningServer, String> {
 }
 
 /// Like [`start`], with an explicit web directory that overrides `web_dir` in `config.toml`.
+/// The refusal printed when the database fails its integrity check at start.
+fn corruption_message(data_dir: &Path, db_file: &Path, detail: &str) -> String {
+    format!(
+        "database integrity check failed for {}: {detail}. The coordinator will not serve from it. \
+         Stop the service and restore the newest good backup: `bridge-coordinator restore --data-dir {} --input BACKUP.sqlite3` \
+         (see docs/distributed/install.md, Backup and restore), then start it again; workers replay what the backup lacks",
+        db_file.display(),
+        data_dir.display()
+    )
+}
+
+fn open_failure(data_dir: &Path, db_file: &Path, e: &rusqlite::Error) -> String {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    if matches!(e.sqlite_error_code(), Some(DatabaseCorrupt | NotADatabase)) {
+        corruption_message(data_dir, db_file, &e.to_string())
+    } else {
+        format!("cannot open database: {e}")
+    }
+}
+
 pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<RunningServer, String> {
     let cfg = Config::load_checked(data_dir, web_dir.is_some())?;
     let binds = cfg.listener_binds()?;
@@ -77,7 +97,21 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     } else {
         None
     };
-    let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    let db_file = crate::db_path(data_dir);
+    let db = Arc::new(Db::open(&db_file).map_err(|e| open_failure(data_dir, &db_file, &e))?);
+    // FIND-002: refuse to serve from a damaged file. quick_check reads every page once; the time is
+    // printed so that an operator sees what a large database costs at start.
+    let started = Instant::now();
+    match db.quick_check(5) {
+        Ok(problems) if problems.is_empty() => {
+            let took = started.elapsed();
+            if took >= Duration::from_secs(2) {
+                eprintln!("bridge-coordinator: database quick_check passed in {:.1} s", took.as_secs_f64());
+            }
+        }
+        Ok(problems) => return Err(corruption_message(data_dir, &db_file, &problems.join("; "))),
+        Err(e) => return Err(corruption_message(data_dir, &db_file, &e.to_string())),
+    }
     if let Ok((free, total, incremental)) = db.free_space() {
         if !incremental && free >= 32 * 1024 * 1024 && free * 4 >= total {
             eprintln!(

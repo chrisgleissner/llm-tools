@@ -259,6 +259,26 @@ def test_commands_ack_then_result_and_duplicates_do_not_repeat(state):
         assert store.db.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 1
 
 
+def test_repeated_redelivery_on_one_connection_applies_a_task_add_once(state):
+    """FIND-003: the coordinator re-sends an unanswered command every few seconds on the same connection.
+
+    Every delivery must be acknowledged, must return the first outcome and must not add a second task."""
+    directory, mission_id = state
+    session, _ = _session(directory)
+    _welcome(session)
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        before = store.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0]
+    request = CommandRequest("task.add", mission_id=mission_id, params={"title": "once", "prompt": "do it once"}, request_id="remote-add-1")
+    ack, first = _command(session, request)
+    assert (ack.payload["status"], first.payload["outcome"]) == ("received", "applied")
+    for _ in range(3):
+        ack, again = _command(session, request)
+        assert ack.payload["status"] == "duplicate"
+        assert again.payload == first.payload
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        assert store.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0] == before + 1
+
+
 def test_read_only_worker_refuses_mutations(state):
     directory, mission_id = state
     session, _ = _session(directory, allow_control=False)

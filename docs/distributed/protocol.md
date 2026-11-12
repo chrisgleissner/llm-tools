@@ -102,6 +102,12 @@ replication.
 4. The worker sends `command.result`. The coordinator stores it and marks the
    journal entry `done`. A result for an unknown or already completed request
    is ignored.
+5. A mutating command that stays `pending`, `sent` or `acked` for 10 seconds
+   without a result is sent again on the same connection (checked every 5
+   seconds), because a `command` or `command.result` frame can be lost on a
+   live connection. The worker treats it like any redelivery (step 3), so the
+   effect happens once and the first result is returned again. This adds no
+   message type and no field (FIND-003).
 
 ### Read-only commands and offline workers (DOG-021)
 
