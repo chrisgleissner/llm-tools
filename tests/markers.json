@@ -3287,5 +3287,28 @@
    "subprocess",
    "slow"
   ]
+ },
+ "tests/test_standalone_compatibility.py": {
+  "test_llm_bridge_help_and_empty_mission_list": [
+   "subprocess"
+  ],
+  "test_llm_bridge_mission_create_and_list": [
+   "subprocess"
+  ],
+  "test_llm_bridge_worker_status_without_enrolment_creates_nothing": [
+   "subprocess"
+  ],
+  "test_llm_usage_json_without_service": [
+   "subprocess"
+  ],
+  "test_llm_scheduler_dry_run": [
+   "subprocess"
+  ],
+  "test_ralph_robin_dry_run": [
+   "subprocess"
+  ],
+  "test_llm_sleep_soak_simulated": [
+   "subprocess"
+  ]
  }
 }
