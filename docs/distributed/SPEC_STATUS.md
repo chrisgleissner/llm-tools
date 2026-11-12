@@ -282,7 +282,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-026 | [~] | `docs/distributed/safe-defaults.md` and `tests/test_safe_defaults.py` for the Python side. Four unsafe defaults fixed: the state directory was created 0755 by worker enroll and remote login; a plaintext coordinator URL was accepted on load; the suspend ledger and usage history were 0644; the Claude statusline copy was 0644. Coordinator defaults remain for phase B. |
 | PRD-027 | [ ] | Not started (PR #31 is merged). Abuse resistance at scale. |
 | PRD-028 | [ ] | Not started (PR #31 is merged). Release candidate checklist. |
-| PRD-029 | [ ] | Not started (PR #31 is merged). Changelog and versioning. |
+| PRD-029 | [~] | `CHANGELOG.md` holds 1.0.0 to 1.4.0 from the GitHub releases, an Unreleased section and the semantic-versioning statement; README links it. Remainder: the versioning rules of the coordinator, worker protocol and REST API (additive within `v1`) in `docs/distributed/api.md`, and deprecation notices in the console. Tests: tests/test_release_hygiene.py::test_changelog_has_every_release_and_an_unreleased_section |
 | PRD-030 | [ ] | Not started (PR #31 is merged). Release candidate dry run. |
 | PRD-031 | [x] | Expert UX review of the CLI and terminal console in `ux-review-cli.md`: the overseer's pre-review (CLIUX-001 to CLIUX-050) and an independent second reviewer pass (CLIUX-051 to CLIUX-080, 4 high, 12 medium, 14 low). Fixes are tracked under PRD-033 in that file's fix-status table. Second reviewer pass complete; fixes tracked under PRD-033. |
 | PRD-032 | [~] | Expert UX review of the web console and site. The review of the PR #31 head (5a4d018) is `docs/distributed/ux-review-web.md`: 33 findings (WUX-001 to WUX-033: 5 high, 14 medium, 14 low) at 1440x900 and Pixel 4, light and dark, keyboard only, with axe and accessibility-tree checks, plus a re-check of UX-001 to UX-011 and the Pages site. Remaining: a run with a real screen reader, Firefox and WebKit, and a repeat on the merged product in phase B; the fixes are PRD-033. |
@@ -516,9 +516,9 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-014 | [x] | Corrected: 15 PRD rows that waited for the merged PR #31; TRACK-007 line count; AUTH-001 and DATA-007 self-contradicting sentences; `benchmarks.md` post-cap ingest figure and card-write statement; `install.md` card-write statement; `security-requirements.md` now maps clauses only and holds no statuses. Evidence: docs/distributed/security-requirements.md |
 | FIND-015 | [ ] | Not started. |
 | FIND-016 | [ ] | Not started. |
-| FIND-017 | [ ] | Not started. |
+| FIND-017 | [x] | Rich is the only runtime dependency; it is imported lazily for Markdown and ANSI rendering, and both renderers degrade to plain text without it (D49, AGENTS.md Hard invariants). Breaks shown: an extra dependency, a top-level `import rich`, and a narrowed fallback each fail their test. Tests: tests/test_release_hygiene.py::test_rich_is_the_only_runtime_dependency, tests/test_release_hygiene.py::test_rich_is_never_imported_at_module_top_level, tests/test_release_hygiene.py::test_markdown_viewer_falls_back_to_plain_source_without_rich, tests/test_release_hygiene.py::test_usage_ansi_renderer_falls_back_to_plain_text_without_rich |
 | FIND-018 | [ ] | Not started. |
-| FIND-019 | [ ] | Not started. |
+| FIND-019 | [x] | The site's install commands pin the version in `pyproject.toml` (1.4.0, previously 1.3.0); `release.yml` fails when the tag differs from that version and runs the pin checks. Break shown: one site pin set back to 1.3.0 fails. Tests: tests/test_release_hygiene.py::test_pinned_install_versions_equal_pyproject, tests/test_release_hygiene.py::test_release_workflow_checks_pins |
 | FIND-020 | [ ] | Not started. |
 | DOG-027 | [ ] | Not started. |
 | DOCS-001 | [x] | `docs/HANDOVER.md`, `PLANS.md` and `docs/features/llm-bridge/HANDOVER.md` moved to `docs/archive/`; `spec-audit.md` and `progress.md` open with the release or review they describe and link the register. Evidence: docs/archive/PLANS.md |
@@ -526,7 +526,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | DOCS-003 | [ ] | Not started. |
 | DOCS-004 | [ ] | Not started. |
 | LB-001 | [ ] | Not started. |
-| LB-002 | [ ] | Not started. |
+| LB-002 | [x] | README badge and Install section call macOS and Windows partial; suspend and wake are documented as Linux with systemd only and not exercised in CI; `first-run.md` states its walk-through ran on Linux. Break shown: a FreeBSD badge fails. Tests: tests/test_release_hygiene.py::test_readme_platform_badge_names_only_platforms_ci_runs, tests/test_release_hygiene.py::test_suspend_and_wake_are_documented_as_linux_with_systemd_only |
 | LB-003 | [w] | Mouse clicks inside native provider panes are not supported; the mouse wheel is. Waived by D46; the documentation statement is checked under LB-002. |
 | LB-004 | [ ] | Not started. |
 | PROV-001 | [ ] | Not started. |
