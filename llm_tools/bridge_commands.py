@@ -369,7 +369,7 @@ def _mission_delete(store: BridgeStore | None, request: CommandRequest, params: 
         )
     from .bridge_delete import delete_mission
 
-    return delete_mission(request.mission_id)
+    return delete_mission(request.mission_id, force=params["force"])
 
 
 def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -782,7 +782,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.delete", "Delete a finished or never-started mission and its local state", True, True,
-                      {"confirm": Param(bool, default=False)}, _mission_delete),
+                      {"confirm": Param(bool, default=False), "force": Param(bool, default=False)}, _mission_delete),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(
             "task.list",

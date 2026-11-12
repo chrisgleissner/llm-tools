@@ -51,8 +51,10 @@ Three facts explain most of Bridge's behaviour:
    repository with a clean working tree. `llm-bridge status` shows the branch;
    bring the work back from the repository with `git merge bridge/<name>-<id>`.
    `llm-bridge mission delete` removes the worktree and branch when they hold no
-   unmerged or uncommitted work; otherwise it keeps them and prints where they
-   are. Without `--isolate` the providers work in the folder itself, and two
+   uncommitted work and the branch is merged into the branch the mission was
+   created from. Otherwise it refuses (exit 4) and names the worktree, the branch
+   and the merge and discard commands; `--force` deletes the mission and keeps the
+   worktree and branch. Without `--isolate` the providers work in the folder itself, and two
    such missions cannot be active in one folder.
 3. Start work. This uses paid capacity.
 

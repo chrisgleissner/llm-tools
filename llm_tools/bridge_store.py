@@ -256,7 +256,8 @@ _BASE_SCHEMA: tuple[str, ...] = (
     origin_cwd TEXT,
     branch TEXT,
     base_commit TEXT,
-    worktree_path TEXT
+    worktree_path TEXT,
+    origin_branch TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -521,7 +522,7 @@ class BridgeStore:
         # Schema 11 (ORCH-001): a mission may run in its own git worktree. ``cwd`` and ``repo_identity``
         # then name that worktree, so the one-active-mission index below is per effective directory.
         self._ensure_column("missions", "isolation", "TEXT NOT NULL DEFAULT 'none'")
-        for column in ("origin_cwd", "branch", "base_commit", "worktree_path"):
+        for column in ("origin_cwd", "branch", "base_commit", "worktree_path", "origin_branch"):
             self._ensure_column("missions", column, "TEXT")
         self._ensure_column("tasks", "original_prompt", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("tasks", "ordinal", "INTEGER NOT NULL DEFAULT 0")
@@ -835,10 +836,10 @@ class BridgeStore:
                     raise TransitionError(f"an active mission already owns worktree: {canonical_cwd}")
                 self.db.execute(
                     "INSERT INTO missions(id,name,objective,cwd,repo_identity,config_json,status,created_at,updated_at,"
-                    "isolation,origin_cwd,branch,base_commit,worktree_path) VALUES(?,?,?,?,?,?,'CREATED',?,?,?,?,?,?,?)",
+                    "isolation,origin_cwd,branch,base_commit,worktree_path,origin_branch) VALUES(?,?,?,?,?,?,'CREATED',?,?,?,?,?,?,?,?)",
                     (mid, name.strip(), objective, canonical_cwd, repo_root, self._json(config or {}), now, now,
                      (isolation or {}).get("isolation", "none"), (isolation or {}).get("origin_cwd"), (isolation or {}).get("branch"),
-                     (isolation or {}).get("base_commit"), (isolation or {}).get("worktree_path")),
+                     (isolation or {}).get("base_commit"), (isolation or {}).get("worktree_path"), (isolation or {}).get("origin_branch")),
                 )
                 self._event(mid, "mission-created", {"name": name.strip(), "cwd": canonical_cwd})
                 task_id: int | None = None

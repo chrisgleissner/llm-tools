@@ -313,6 +313,7 @@ def _build_parser(
     mission_delete.add_argument("--mission", "-m", metavar="ID", default=None, help=f"mission ID or a unique prefix of {MIN_MISSION_PREFIX}+ characters (required; never inferred from the folder)")
     mission_delete.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
     mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
+    mission_delete.add_argument("--force", action="store_true", help="delete a mission whose isolated worktree holds uncommitted or unmerged work; the mission is removed, the worktree and branch are kept")
     _add_json_arg(mission_delete)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)

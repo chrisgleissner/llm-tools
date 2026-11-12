@@ -73,6 +73,8 @@ def prepare(origin_cwd: str | Path, *, mission_id: str, name: str, state_dir: Pa
     if dirty.stdout.strip():
         raise IsolationError(f"cannot isolate {root}: the working tree has uncommitted changes, which the worktree would not contain; commit or stash them, or omit --isolate")
     base = head.stdout.strip()
+    current = _git(root, "symbolic-ref", "--short", "-q", "HEAD")
+    origin_branch = current.stdout.strip() if current.returncode == 0 else ""
     branch = branch_name(name, mission_id)
     path = worktrees_root(state_dir) / mission_id
     if path.exists():
@@ -86,7 +88,7 @@ def prepare(origin_cwd: str | Path, *, mission_id: str, name: str, state_dir: Pa
     except ValueError:
         relative = Path(".")
     effective = (path / relative).resolve()
-    return {"isolation": ISOLATION_WORKTREE, "origin_cwd": str(origin), "branch": branch, "base_commit": base,
+    return {"isolation": ISOLATION_WORKTREE, "origin_cwd": str(origin), "branch": branch, "base_commit": base, "origin_branch": origin_branch or None,
             "worktree_path": str(path), "cwd": str(effective)}
 
 
@@ -100,44 +102,59 @@ def discard(origin_cwd: str | Path, worktree: str | Path, branch: str) -> None:
     shutil.rmtree(worktree, ignore_errors=True)
 
 
-def release(mission: dict[str, Any]) -> dict[str, Any]:
-    """Remove a deleted mission's worktree and branch when no work would be lost.
+def unmerged_reason(mission: dict[str, Any]) -> str | None:
+    """Why deleting the mission's worktree would lose work or cannot be shown safe; ``None`` when it is clean and merged.
 
-    Work is lost when the worktree has uncommitted or untracked changes, or when the branch holds commits
-    that the repository's checked-out commit does not contain (not merged). In either case, and when
-    that cannot be established, the worktree and branch stay. The result has ``removed`` (bool), ``path``,
-    ``branch`` and a ``reason`` when kept.
+    The worktree must have no uncommitted changes (``git status --porcelain``: untracked files that are not
+    git-ignored count, ignored ones do not), and the branch must be an ancestor of the branch the mission was created
+    from (``origin_branch``; the repository's checked-out commit when that was a detached HEAD).
+    """
+    path = Path(str(mission.get("worktree_path") or ""))
+    branch = str(mission.get("branch") or "")
+    origin = str(mission.get("origin_cwd") or "")
+    if not origin or not Path(origin).is_dir():
+        return f"the source repository {origin or '(unknown)'} is not available to check for unmerged work"
+    target = str(mission.get("origin_branch") or "")
+    try:
+        if path.is_dir():
+            state = _git(path, "status", "--porcelain")
+            if state.returncode != 0:
+                return f"git status failed in the worktree: {state.stderr.strip()}"
+            if state.stdout.strip():
+                return "the worktree has uncommitted changes"
+        if _git(origin, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
+            return None  # the branch is already gone; nothing is left to lose
+        into = f"refs/heads/{target}" if target else "HEAD"
+        if target and _git(origin, "rev-parse", "--verify", "--quiet", into).returncode != 0:
+            return f"branch {target}, which the mission was created from, no longer exists, so merging cannot be checked"
+        if _git(origin, "merge-base", "--is-ancestor", f"refs/heads/{branch}", into).returncode != 0:
+            return f"branch {branch} has commits that are not merged into {target or 'the checked-out commit'}"
+    except IsolationError as exc:
+        return str(exc)
+    return None
+
+
+def release(mission: dict[str, Any]) -> dict[str, Any]:
+    """Remove a deleted mission's worktree and branch when ``unmerged_reason`` finds nothing to lose; otherwise keep them.
+
+    The result has ``removed`` (bool), ``path``, ``branch`` and a ``reason`` when kept.
     """
     path = Path(str(mission.get("worktree_path") or ""))
     branch = str(mission.get("branch") or "")
     origin = str(mission.get("origin_cwd") or "")
     result: dict[str, Any] = {"removed": False, "path": str(path), "branch": branch}
-    if not origin or not Path(origin).is_dir():
-        result["reason"] = f"the source repository {origin or '(unknown)'} is not available to check for unmerged work"
+    reason = unmerged_reason(mission)
+    if reason:
+        result["reason"] = reason
         return result
     try:
-        if path.is_dir():
-            state = _git(path, "status", "--porcelain")
-            if state.returncode != 0:
-                result["reason"] = f"git status failed in the worktree: {state.stderr.strip()}"
-                return result
-            if state.stdout.strip():
-                result["reason"] = "the worktree has uncommitted changes"
-                return result
-        exists = _git(origin, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
-        if exists.returncode == 0:
-            merged = _git(origin, "merge-base", "--is-ancestor", f"refs/heads/{branch}", "HEAD")
-            if merged.returncode != 0:
-                result["reason"] = f"branch {branch} has commits that are not merged into the repository's checked-out commit"
-                return result
         if path.is_dir():
             gone = _git(origin, "worktree", "remove", str(path))
             if gone.returncode != 0:
                 result["reason"] = f"git could not remove the worktree: {gone.stderr.strip()}"
                 return result
         _git(origin, "worktree", "prune")
-        if exists.returncode == 0:
-            _git(origin, "branch", "-d", branch)
+        _git(origin, "branch", "-D", branch)  # unmerged_reason showed the branch holds nothing the origin branch lacks
     except IsolationError as exc:
         result["reason"] = str(exc)
         return result

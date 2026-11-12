@@ -172,29 +172,81 @@ def test_delete_removes_a_worktree_without_unmerged_work(repo, state, capsys) ->
     assert "removed worktree" in result["detail"]
 
 
-def test_delete_keeps_a_worktree_with_a_commit_that_is_not_merged_and_says_where(repo, state, capsys) -> None:
-    mission = _create(capsys, repo, "--isolate", "worktree")
-    worktree = Path(mission["worktree_path"])
+def _commit_in(worktree: Path) -> None:
     (worktree / "new.txt").write_text("work\n", encoding="utf-8")
     _git(worktree, "add", "new.txt")
     _git(worktree, "commit", "-q", "-m", "work")
-    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--json"]) == 0
+
+
+def _still_exists(mission_id: str) -> bool:
+    with BridgeStore(_path(), readonly=True) as store:
+        return any(m["id"] == mission_id for m in store.list_missions())
+
+
+def test_delete_refuses_unmerged_commits_naming_worktree_branch_and_commands(repo, state, capsys) -> None:
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    worktree = Path(mission["worktree_path"])
+    _commit_in(worktree)
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes"]) == 4
+    error = capsys.readouterr().err
+    assert str(worktree) in error and mission["branch"] in error
+    assert f"git merge {mission['branch']}" in error and "git worktree remove --force" in error and "--force" in error
+    assert _still_exists(mission["id"]) and (worktree / "new.txt").exists()
+
+
+def test_delete_refuses_uncommitted_changes(repo, state, capsys) -> None:
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    (Path(mission["worktree_path"]) / "scratch.txt").write_text("wip\n", encoding="utf-8")
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes"]) == 4
+    assert "uncommitted" in capsys.readouterr().err
+    assert _still_exists(mission["id"])
+
+
+def test_delete_force_removes_the_mission_and_keeps_the_worktree_and_branch(repo, state, capsys) -> None:
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    worktree = Path(mission["worktree_path"])
+    _commit_in(worktree)
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--force", "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["worktree"]["removed"] is False and result["worktree"]["path"] == str(worktree)
     assert str(worktree) in result["detail"] and mission["branch"] in result["detail"]
-    assert (worktree / "new.txt").exists()
-    assert mission["branch"] in _git(repo, "branch", "--list")
-    with BridgeStore(_path(), readonly=True) as store:
-        assert store.list_missions() == []  # the mission itself is gone
+    assert (worktree / "new.txt").exists() and mission["branch"] in _git(repo, "branch", "--list")
+    assert not _still_exists(mission["id"])
 
 
-def test_delete_keeps_a_worktree_with_uncommitted_changes(repo, state, capsys) -> None:
+def test_force_keeps_uncommitted_work_too(repo, state, capsys) -> None:
     mission = _create(capsys, repo, "--isolate", "worktree")
     (Path(mission["worktree_path"]) / "scratch.txt").write_text("wip\n", encoding="utf-8")
-    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--json"]) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result["worktree"]["removed"] is False and "uncommitted" in result["worktree"]["reason"]
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--force", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["worktree"]["removed"] is False
     assert (Path(mission["worktree_path"]) / "scratch.txt").exists()
+
+
+def test_merged_means_merged_into_the_branch_the_mission_was_created_from(repo, state, capsys) -> None:
+    _git(repo, "checkout", "-q", "-b", "dev")
+    mission = _create(capsys, repo, "--isolate", "worktree")
+    assert mission["origin_branch"] == "dev"
+    worktree = Path(mission["worktree_path"])
+    _commit_in(worktree)
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--ff-only", mission["branch"])  # merged into main, which is checked out now, but not into dev
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes"]) == 4
+    assert "not merged into dev" in capsys.readouterr().err
+    _git(repo, "checkout", "-q", "dev")
+    _git(repo, "merge", "-q", "--ff-only", mission["branch"])
+    _git(repo, "checkout", "-q", "main")
+    assert main(["mission", "delete", "--mission", mission["id"], "--yes", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["worktree"]["removed"] is True and not worktree.exists()
+
+
+def test_git_ignored_untracked_files_do_not_block_isolation(repo, state, capsys) -> None:
+    (repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore")
+    (repo / "build.log").write_text("x\n", encoding="utf-8")
+    assert _create(capsys, repo, "--isolate", "worktree")["isolation"] == "worktree"
+    (repo / "stray.txt").write_text("x\n", encoding="utf-8")  # untracked and not ignored: refused
+    assert main(["mission", "create", "--prompt", "Do it", "--cwd", str(repo), "--isolate", "worktree"]) != 0
 
 
 def test_delete_removes_a_worktree_whose_branch_was_merged(repo, state, capsys) -> None:

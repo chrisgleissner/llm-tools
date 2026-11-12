@@ -66,7 +66,7 @@ def _remove_station_files(mission_id: str) -> bool:
         return False
 
 
-def delete_mission(mission_id: str) -> dict[str, Any]:
+def delete_mission(mission_id: str, *, force: bool = False) -> dict[str, Any]:
     """Delete one mission by its full ID; raises ``TransitionError`` when it is not in a deletable state.
 
     The caller has resolved the reference, so a mission that is already gone is reported by the
@@ -81,6 +81,15 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
     if status not in DELETABLE_MISSION_STATUSES:
         raise TransitionError(mission_delete_refusal(mission_id, status))
     short = mission_id[:8]
+    if before.get("isolation") == "worktree" and not force:
+        from . import bridge_isolation
+
+        reason = bridge_isolation.unmerged_reason(before)
+        if reason:
+            raise TransitionError(
+                f"mission {short} has work in its worktree {before['worktree_path']} on branch {before['branch']}: {reason}. "
+                f"Merge it from the repository with: git merge {before['branch']}; discard it with: git worktree remove --force {before['worktree_path']}; "
+                f"or delete the mission and keep the worktree and branch with: llm-bridge mission delete {short} --force")
     lock = MissionLock(state / "locks", mission_id)
     try:
         lock.acquire(timeout=LOCK_WAIT_SECONDS)

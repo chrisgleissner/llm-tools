@@ -1523,7 +1523,7 @@ def _mission_delete_command(args: argparse.Namespace) -> int:
         raise TransitionError(mission_delete_refusal(args.mission, status))
     if not _confirm_delete(args, fmt.short_id(args.mission), fmt.clipped_name(saved.get("name", ""))):
         return EXIT_USAGE
-    result = commands.dispatch(commands.CommandRequest("mission.delete", {"confirm": True}, mission_id=args.mission))
+    result = commands.dispatch(commands.CommandRequest("mission.delete", {"confirm": True, "force": bool(getattr(args, "force", False))}, mission_id=args.mission))
     _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
     return 0
 
