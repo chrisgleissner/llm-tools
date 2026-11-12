@@ -613,7 +613,7 @@ Multi-user role-based access and OIDC are not planned. Bridge is a single-operat
 - `PK-012`, `PI-VERIFY-013` and `DOG-023` change from `[x]` to `[w]`, because they were closed by the operator decisions of 2026-11-07, not by verification.
 - Mouse clicks inside native provider panes (`LB-003`) are waived; the mouse wheel is supported.
 
-The operator may veto any of these. If no veto has arrived when the register change of 2026-11-12 is ready to merge, the decisions D40 to D47 are recorded as accepted on that assumption.
+Acceptance: on 2026-11-12 the operator delegated all remaining decisions to the lead ("Make all decisions like a principal engineer and product owner would"). D40 to D47 are accepted under that delegation, without a veto.
 
 ## D47 Remote verifiers (ORCH-008)
 
