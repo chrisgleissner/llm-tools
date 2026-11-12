@@ -51,6 +51,8 @@ THINNED_EVENT_KINDS = ("capacity-refresh", "provider-wait", "provider-selection"
 COMMAND_RETENTION_SECONDS = 30 * 86400
 # Largest command result copied into a command-applied/-rejected event (the commands table keeps the whole result).
 COMMAND_EVENT_RESULT_BYTES = 4096
+# Upper bound for one event payload; a larger payload is stored as its short fields and its size.
+EVENT_PAYLOAD_BYTES = 65_536
 
 
 def rotation_label(providers: Any, routes: Any) -> str:
@@ -679,9 +681,13 @@ class BridgeStore:
         task_id: int | None = None,
         operation_id: str | None = None,
     ) -> None:
+        encoded = self._json(data)
+        if len(encoded.encode("utf-8")) > EVENT_PAYLOAD_BYTES:
+            short = {key: value for key, value in data.items() if isinstance(value, (bool, int, float)) or (isinstance(value, str) and len(value) <= 200)}
+            encoded = self._json({**short, "truncated": True, "payload_bytes": len(encoded.encode("utf-8"))})
         self.db.execute(
             "INSERT INTO events(mission_id,task_id,operation_id,schema_version,kind,data_json,created_at) VALUES(?,?,?,?,?,?,?)",
-            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, self._json(data), utc_now()),
+            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, encoded, utc_now()),
         )
 
     def mission_id_if_exists(self, mission_id: str) -> str | None:
