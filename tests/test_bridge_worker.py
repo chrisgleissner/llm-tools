@@ -819,3 +819,77 @@ def test_hello_offers_every_supported_version_and_a_welcome_must_pick_one_of_the
     with pytest.raises(bridge_protocol.ProtocolError, match="protocol version 3 is not supported") as caught:
         decode(Message("welcome", "c", 1, {"generation": 1, "protocol_version": 3, "event_cursor": 0}).encode())
     assert caught.value.code == "unsupported-version"
+
+
+def _create_session(directory, root):
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(root)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(session, generation=2)
+    return session
+
+
+def _mission_count(directory):
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        return store.db.execute("SELECT COUNT(*) FROM missions").fetchone()[0]
+
+
+def test_duplicate_mission_create_returns_the_first_result_and_creates_one_mission(state, tmp_path):
+    """FIND-003: the coordinator re-sends a command whose result was lost; mission.create has no id of its own to deduplicate on."""
+    directory, _ = state
+    session = _create_session(directory, tmp_path)
+    before = _mission_count(directory)
+    request = CommandRequest("mission.create", {"prompt": "new work", "cwd": str(tmp_path), "providers": "codex"}, request_id="create-1")
+    _, first = _command(session, request)
+    ack, again = _command(session, request)
+    assert first.payload["outcome"] == "applied"
+    assert ack.payload["status"] == "duplicate" and again.payload == first.payload
+    assert _mission_count(directory) == before + 1
+
+
+def test_duplicate_mission_delete_returns_the_first_result_not_not_found(state, tmp_path):
+    directory, mission_id = state
+    session = _create_session(directory, tmp_path)
+    request = CommandRequest("mission.delete", {"confirm": True}, mission_id=mission_id, request_id="delete-1")
+    _, first = _command(session, request)
+    _, again = _command(session, request)
+    assert first.payload["outcome"] == "applied", first.payload
+    assert again.payload == first.payload
+    other = CommandRequest("mission.delete", {"confirm": True}, mission_id=mission_id, request_id="delete-2")
+    assert _command(session, other)[1].payload["outcome"] != "applied"  # a different request id really is a new attempt
+
+
+@pytest.mark.parametrize("operation", ["proposal.create", "proposal.accept", "mission.finish", "worker.restore", "mission.settings.patch",
+                                       "mission.rotation.put", "worker.gc", "mission.start", "mission.suspend_until_credits"])
+def test_every_mutating_operation_runs_once_per_request_id(state, tmp_path, monkeypatch, operation):
+    directory, mission_id = state
+    session = _create_session(directory, tmp_path)
+    runs = []
+
+    def slow_execute(request):
+        runs.append(request.request_id)  # stands for an operation that takes longer than the coordinator's re-send interval
+        return worker.commands.CommandResult(request.request_id, request.operation, "applied", result={"run": len(runs)})
+
+    monkeypatch.setattr(worker.commands, "execute", slow_execute)
+    monkeypatch.setattr(session, "_policy_error", lambda request, spec: None)
+    spec = worker.commands.OPERATIONS.get(operation)
+    assert spec is not None and spec.mutating, operation
+    request = CommandRequest(operation, mission_id=mission_id, request_id=f"once-{operation}")
+    first = _command(session, request)[1]
+    for _ in range(2):  # re-sent frames queued behind the running copy are handled after it, one at a time
+        assert _command(session, request)[1].payload == first.payload
+    assert runs == [f"once-{operation}"]
+
+
+def test_outcome_ledger_is_private_bounded_and_pruned(tmp_path, monkeypatch):
+    now = [1_000_000.0]
+    ledger = worker.OutcomeLedger(tmp_path / "worker" / "outcomes.sqlite3", clock=lambda: now[0])
+    monkeypatch.setattr(worker, "OUTCOMES_KEEP", 5)
+    for index in range(8):
+        now[0] += 1
+        ledger.record(f"r{index}", {"outcome": "applied", "n": index})
+    assert ledger.get("r0") is None and ledger.get("r2") is None and ledger.get("r7") == {"outcome": "applied", "n": 7}
+    assert (ledger.path.stat().st_mode & 0o777) == 0o600
+    now[0] += worker.OUTCOMES_KEEP_SECONDS + 1
+    ledger.record("late", {"outcome": "applied"})
+    assert ledger.get("r7") is None and ledger.get("late") is not None

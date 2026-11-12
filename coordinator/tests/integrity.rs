@@ -31,7 +31,13 @@ fn damage(dir: &std::path::Path) {
 #[tokio::test]
 async fn a_damaged_database_is_refused_at_start_with_the_restore_step() {
     let dir = populated_data_dir();
+    // An older schema version makes Db::open run migrations, which write to the file.
+    rusqlite::Connection::open(db_path(&dir))
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 3; PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     damage(&dir);
+    let before = std::fs::read(db_path(&dir)).unwrap();
     let error = match server::start(&dir).await {
         Ok(_) => panic!("the coordinator started on a database that fails quick_check"),
         Err(e) => e,
@@ -39,6 +45,11 @@ async fn a_damaged_database_is_refused_at_start_with_the_restore_step() {
     assert!(error.contains("integrity check failed"), "{error}");
     assert!(error.contains("bridge-coordinator restore --data-dir"), "{error}");
     assert!(error.contains("will not serve"), "{error}");
+    // The refusal happens before Db::open sets the journal mode or migrates: the damaged file is not written to.
+    assert!(
+        std::fs::read(db_path(&dir)).unwrap() == before,
+        "the damaged database file was modified before the refusal"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

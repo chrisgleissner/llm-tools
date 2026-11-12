@@ -105,9 +105,19 @@ replication.
 5. A mutating command that stays `pending`, `sent` or `acked` for 10 seconds
    without a result is sent again on the same connection (checked every 5
    seconds), because a `command` or `command.result` frame can be lost on a
-   live connection. The worker treats it like any redelivery (step 3), so the
-   effect happens once and the first result is returned again. This adds no
-   message type and no field (FIND-003).
+   live connection. A replay after a reconnect restarts the same 10 second
+   clock. This adds no message type and no field (FIND-003).
+6. The worker deduplicates every mutating request by `request_id`, whatever the
+   operation does internally. It records the final `command.result` in a small
+   private SQLite file, `<state dir>/worker/outcomes.sqlite3` (mode 0600, newest
+   10,000 results and at most 7 days, pruned on every write), before it sends the
+   result. A request id with a recorded result is answered with
+   `command.ack` status `duplicate` and the stored result, and is not executed
+   again. The worker handles messages of one connection one at a time, so a copy
+   that arrives while the first is still running is handled after it finishes and
+   finds its result. Remaining window: a crash after the effect and before the
+   result is recorded can run the command once more after the restart. Reads are
+   not recorded and run again.
 
 ### Read-only commands and offline workers (DOG-021)
 

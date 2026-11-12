@@ -2080,7 +2080,9 @@ impl Db {
     }
     pub fn command_sent(&self, id: &str) -> R<Option<CommandRow>> {
         self.transition(
-            "UPDATE commands SET state='sent', updated_at=?1 WHERE request_id=?2 AND state='pending'",
+            // A replayed or re-sent row keeps its state but gets a new idle clock, so the stale check does not
+            // offer it again until the idle time has passed.
+            "UPDATE commands SET state=CASE WHEN state='pending' THEN 'sent' ELSE state END, updated_at=?1 WHERE request_id=?2 AND state IN ('pending','sent','acked')",
             &[&crate::now(), &id],
             id,
         )
@@ -2288,6 +2290,19 @@ impl Db {
         let total: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let mode: i64 = c.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
         Ok((free * size, total * size, mode == 2))
+    }
+
+    /// `PRAGMA quick_check` of a database file through a read-only connection, before [`Db::open`] has set the
+    /// journal mode or migrated anything: a damaged file is not written to. A missing file has no problems.
+    pub fn quick_check_file(path: &Path, limit: usize) -> R<Vec<String>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut st = c.prepare(&format!("PRAGMA quick_check({})", limit.max(1)))?;
+        let rows: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.collect::<R<_>>()?;
+        Ok(if rows.len() == 1 && rows[0] == "ok" { Vec::new() } else { rows })
     }
 
     /// `PRAGMA quick_check` on the live database: the problems found (at most `limit`), empty when the

@@ -98,11 +98,11 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         None
     };
     let db_file = crate::db_path(data_dir);
-    let db = Arc::new(Db::open(&db_file).map_err(|e| open_failure(data_dir, &db_file, &e))?);
-    // FIND-002: refuse to serve from a damaged file. quick_check reads every page once; the time is
-    // printed so that an operator sees what a large database costs at start.
+    // FIND-002: refuse to serve from a damaged file, and check it on a read-only connection before `Db::open`
+    // sets the journal mode or migrates, so that a damaged file is not written to. quick_check reads every
+    // page once; a slow check is logged so that an operator sees what a large database costs at start.
     let started = Instant::now();
-    match db.quick_check(5) {
+    match Db::quick_check_file(&db_file, 5) {
         Ok(problems) if problems.is_empty() => {
             let took = started.elapsed();
             if took >= Duration::from_secs(2) {
@@ -110,8 +110,9 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
             }
         }
         Ok(problems) => return Err(corruption_message(data_dir, &db_file, &problems.join("; "))),
-        Err(e) => return Err(corruption_message(data_dir, &db_file, &e.to_string())),
+        Err(e) => return Err(open_failure(data_dir, &db_file, &e)),
     }
+    let db = Arc::new(Db::open(&db_file).map_err(|e| open_failure(data_dir, &db_file, &e))?);
     if let Ok((free, total, incremental)) = db.free_space() {
         if !incremental && free >= 32 * 1024 * 1024 && free * 4 >= total {
             eprintln!(

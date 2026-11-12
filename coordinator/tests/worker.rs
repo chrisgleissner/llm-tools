@@ -1079,3 +1079,42 @@ fn commands_stale_offers_a_command_again_only_after_the_idle_time() {
     assert!(db.commands_stale("w1", 0, 10).unwrap().is_empty(), "a finished command is not offered");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A reconnect replays `sent` and `acked` commands. The replay restarts their idle clock, so the periodic check
+/// does not send them a second time until the idle time has passed again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_after_reconnect_restarts_the_idle_clock_of_sent_and_acked_commands() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
+    assert_eq!(api.post("/api/v1/commands", submit("replay-sent")).await.0, 202);
+    assert_eq!(api.post("/api/v1/commands", submit("replay-acked")).await.0, 202);
+    for _ in 0..2 {
+        next_command(&mut fw, 5).await.expect("first delivery");
+    }
+    fw.send("command.ack", json!({"request_id": "replay-acked", "status": "received"})).await;
+    fw.barrier().await;
+    assert_eq!(api.get("/api/v1/commands/replay-acked").await.1["state"], "acked");
+    assert_eq!(api.get("/api/v1/commands/replay-sent").await.1["state"], "sent");
+    // Both rows idle for 8 s, then the worker reconnects and the coordinator replays them.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let (mut fw2, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let mut replayed = vec![];
+    for _ in 0..2 {
+        replayed.push(
+            next_command(&mut fw2, 5).await.expect("replay")["payload"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    replayed.sort();
+    assert_eq!(replayed, ["replay-acked", "replay-sent"]);
+    // Without the fix the stale check sends them again 2 to 7 s later (their old idle clock ran out); with it, 10 s or more.
+    assert!(
+        next_command(&mut fw2, 8).await.is_none(),
+        "a replayed command was sent a second time within the idle time"
+    );
+    env.stop().await;
+}
