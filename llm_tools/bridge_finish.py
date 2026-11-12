@@ -10,6 +10,8 @@ Exit commands (each verified in the installed CLI without starting a session):
 * Claude Code 2.1: built-in command ``exit`` with alias ``quit``.
 * Codex CLI 0.165: built-in commands ``quit`` and ``exit``.
 * GitHub Copilot CLI 1.0: built-in commands ``/exit`` and ``/quit``.
+* Kilo 7.3.45 and OpenCode 1.18.3: ``/exit`` (alias ``/quit``) from the upstream TUI command list;
+  neither CLI's ``--help`` lists slash commands, so this is not verified in the installed CLI.
 
 Each provider's composer shows a slash-command popup, so the first Enter can
 only accept the popup selection. The plan therefore sends the command, a short
@@ -88,13 +90,26 @@ def _tail(screen: str) -> list[str]:
     return lines[-SCREEN_TAIL_LINES:]
 
 
-def composer_is_idle(screen: str) -> bool:
-    """Whether the provider screen shows a prompt and no approval or trust dialog."""
+def composer_is_idle(screen: str, provider: str | None = None) -> bool:
+    """Whether the provider screen shows its input prompt and no approval or trust dialog.
+
+    With ``provider``, the screen must match that provider's finish prompt in the registry or, for a
+    provider with a glyph composer, show a composer line (a provider without a prompt is never idle). Without it, any composer-like line counts.
+    """
     tail = _tail(screen)
     if not tail:
         return False
     if any(pattern.search(line) for line in tail for pattern in APPROVAL_PATTERNS):
         return False
+    if provider is not None:
+        spec = bridge_providers.get(provider)
+        prompt = spec.finish_prompt if spec is not None else None
+        if prompt is None:
+            return False
+        if prompt.matches("\n".join(tail)):
+            return True
+        if not prompt.glyph_composer:
+            return False
     return any(COMPOSER_LINE.match(line) for line in tail)
 
 
@@ -248,11 +263,17 @@ def finish_mission(
 
         source = os.environ if env is None else env
         if source.get(SKIP_CHECK_ENV, "") != "1":
+            spec = bridge_providers.get(provider)
+            if spec is None or spec.finish_prompt is None:
+                raise FinishError(
+                    f"No input prompt is known for {provider} · finish will not type into its pane · "
+                    "switch to it with Ctrl-] then P and exit it there"
+                )
             try:
                 screen = backend.capture(handle, pane="provider")
             except (OSError, RuntimeError, PermissionError):
                 screen = ""
-            if not composer_is_idle(screen):
+            if not composer_is_idle(screen, provider):
                 raise FinishError(ASKING_MESSAGE)
 
         operation_id = str(operation["id"])

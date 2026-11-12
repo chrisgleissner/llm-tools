@@ -1213,6 +1213,42 @@ count.
 With no other ready provider the mission waits, and `status` shows `Waiting for
 capacity` with the reset time.
 
+### Kilo and OpenCode: session capture, resume and finish
+
+Facts read from the installed CLIs on 2026-11-12 (`--help` and the database schema only; no prompt
+was run and no session content was read): Kilo 7.3.45 and OpenCode 1.18.3 are one code lineage.
+
+- Both take `-s, --session <id>` ("session id to continue") and `-c, --continue` ("continue the
+  last session"), on the interactive command and on `run`. Bridge uses only `--session <id>`,
+  never `--continue`.
+- Neither prints the id of a session it creates, and neither accepts a caller-chosen id.
+- Each keeps sessions in a SQLite database: `${XDG_DATA_HOME:-~/.local/share}/kilo/kilo.db` and
+  `.../opencode/opencode.db`. The `session` table has `id` (text, like `ses_...`), `directory`,
+  `parent_id`, `title`, `time_created`, `time_updated` (milliseconds) and `time_archived`.
+  Bridge opens the database read-only and reads only these identity columns.
+
+Capture. Bridge records the launch time of each native Kilo or OpenCode run. The session is the
+only parentless, unarchived row whose `directory` is the mission folder and whose `time_created` is
+at or after the launch. It is looked for every two seconds while the run is live and once more
+when the run ends. No row, or more than one row (another run in the same folder), records nothing;
+the next run then starts a fresh session. Bridge never picks the newest session. Because the
+database has no per-run marker, two Bridge-independent runs in one folder at the same moment are
+ambiguous by design.
+
+Resume. The next native run starts `kilo --session <id> ...` (or `opencode`) only when the id was
+recorded by Bridge, the folder is unchanged, the installed CLI help still lists `--session`, and
+the id still exists in the database for that folder. Otherwise the run starts fresh. The help
+probe has a 3 second limit and Kilo's `--help` takes about 2.4 seconds on this host, so on a slow
+host resume may be unavailable (fresh start) rather than wrong.
+
+Finish. The exit command is `/exit` for both (the upstream TUI command, alias `/quit`; not
+verifiable from `--help`, so unverified in the installed CLI). Finish reads the pane first and types
+only when the footer shows `ctrl+p commands` and no `esc interrupt` (a turn is running) or
+permission prompt. These screen markers are likewise unverified against a live TUI; a mismatch makes
+finish refuse, it never types blind. Copilot's prompt is `> Type @ to mention files`. A provider
+with no known input prompt is refused with the reason; `LLM_BRIDGE_FINISH_SKIP_CHECK=1` overrides.
+`LLM_BRIDGE_FINISH_<PROVIDER>` replaces the exit command.
+
 ### Disabled providers
 
 `[usage].providers` in the llm-tools config (or `LLM_USAGE_PROVIDERS`) lists the
