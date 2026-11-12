@@ -525,7 +525,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | DOCS-002 | [x] | `AGENTS.md` names every `llm_tools/bridge*.py` module (13 were missing and are added). Revert: the previous `AGENTS.md` fails listing the missing modules. Tests: tests/test_distributed_spec_status.py::test_agents_md_names_every_bridge_module, tests/test_distributed_spec_status.py::test_unnamed_bridge_module_is_detected |
 | DOCS-003 | [ ] | Not started. |
 | DOCS-004 | [ ] | Not started. |
-| LB-001 | [ ] | Not started. |
+| LB-001 | [x] | The original directive's definition-of-done items 1 to 27 and scenarios A to S are frozen at 1.1.1: the final integrated disposition of 2026-10-27 and the 1.1.1 source approval in `spec-audit.md` close A1 to A27 with no open critical, high or medium finding; native provider capabilities stay bounded as that audit states. They are not re-registered; regressions are caught by the test suite and the golden screens. Evidence: docs/llm-bridge/spec-audit.md |
 | LB-002 | [x] | README badge and Install section call macOS and Windows partial; suspend and wake are documented as Linux with systemd only and not exercised in CI; `first-run.md` states its walk-through ran on Linux. Break shown: a FreeBSD badge fails. Tests: tests/test_release_hygiene.py::test_readme_platform_badge_names_only_platforms_ci_runs, tests/test_release_hygiene.py::test_suspend_and_wake_are_documented_as_linux_with_systemd_only |
 | LB-003 | [w] | Mouse clicks inside native provider panes are not supported; the mouse wheel is. Waived by D46; the documentation statement is checked under LB-002. |
 | LB-004 | [ ] | Not started. |
