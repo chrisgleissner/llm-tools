@@ -73,6 +73,7 @@ Each is a line in the report. Any failure gives exit status 1.
 | Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1200, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 20 minutes (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers and the workers are judged one process at a time (see the table below). |
 | Memory ceilings | The largest sample of any single controller or worker, and of the coordinator, stays under the absolute ceilings in the table below. A process that settles at a size it should never reach fails even when its slope is flat. The warm-up is included. |
 | Database explained by rows | At every sample the coordinator database (main file plus WAL) is at most 8 MiB + 4096 bytes times the row count of `events`, `commands` and `audit`. The database slope floor also grows with the new rows, so the slope check fails only for growth that rows do not explain. |
+| Worker command backlog | At no sample does one worker have more than 100 unfinished commands (any state but `done`, from `command_queue_depths` in `GET /api/v1/diagnostics`, sampled with the resources). The measured peak over a 4.5-hour run was 2 commands in total. A growing backlog fails during the run, not only as the final `unfinished` count. |
 | Events within retention | The stored event count never exceeds workers x `max_events_per_worker` (50 000). |
 | p99 API latency | Per request class from the client's point of view, loopback. |
 | Coordinator survived | The process is alive at the end and its log has no panic. |
@@ -538,9 +539,6 @@ the reports.
 - `coordinator-task-count`: `TODO(phase B)`: sample the coordinator's own task count. Until then the thread
   count of the process is the task metric (`coordinator_threads`). Expected: a `tasks` integer in
   `GET /api/v1/diagnostics`; add it to `Sampler.take` and `DEFAULT_BOUNDS`.
-- `worker-command-backlog`: `TODO(phase B)`: sample per-worker unfinished command counts from
-  `GET /api/v1/workers` (expected field `queue_depth`) so a growing backlog is a metric, not only the final
-  `unfinished` check.
 - `clock-jump-native`: `TODO(phase B)`: run `clock-jump` without the `LD_PRELOAD` shim once the coordinator
   reads its wall clock through a test override (expected: environment variable
   `BRIDGE_COORDINATOR_CLOCK_OFFSET_SECS`, read on every call), so the musl container build is covered too.

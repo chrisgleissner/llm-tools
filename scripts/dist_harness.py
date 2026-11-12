@@ -231,6 +231,20 @@ def check_ceiling(metric: str, points: Sequence[tuple[float, float]], ceiling: f
                        "fail" if peak > ceiling else "pass", f"peak {peak:.0f} {unit} at {peak_time:.0f}s (ceiling {ceiling:.0f})")
 
 
+MAX_WORKER_BACKLOG = 100  # unfinished commands of one worker: at the soak's 2 commands per second over 10 workers, 8 minutes behind
+
+
+def check_command_backlog(samples: Sequence[dict[str, Any]], limit: int = MAX_WORKER_BACKLOG) -> list[str]:
+    """Samples where one worker has more unfinished commands (any state except ``done``, from ``command_queue_depths``) than ``limit``."""
+    problems = []
+    for sample in samples:
+        for worker, states in (sample.get("queue_depths") or {}).items():
+            backlog = sum(int(count) for count in states.values())
+            if backlog > limit:
+                problems.append(f"t={sample['t']:.0f}s: {worker} has {backlog} unfinished commands (limit {limit})")
+    return problems
+
+
 def check_database_explained_by_rows(samples: Sequence[dict[str, Any]], *, base: int = DB_BASE_BYTES, per_row: int = DB_BYTES_PER_ROW) -> list[str]:
     """Samples where the coordinator database is larger than its row count can explain."""
     problems = []

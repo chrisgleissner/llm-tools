@@ -53,8 +53,6 @@ WARMUP_MAX_SHARE = 2 / 3  # a short run cannot ignore more than two thirds of it
 PHASE_B: list[dict[str, str]] = [
     {"id": "coordinator-task-count", "todo": "TODO(phase B): sample the coordinator's own task count. Until then the thread count of the process is the "
      "task metric (coordinator_threads). Expected: a `tasks` integer in GET /api/v1/diagnostics; add it to Sampler.take and DEFAULT_BOUNDS."},
-    {"id": "worker-command-backlog", "todo": "TODO(phase B): sample per-worker unfinished command counts from GET /api/v1/workers (expected field "
-     "`queue_depth`) so a growing backlog is a metric, not only the final `unfinished` check."},
 ]
 
 
@@ -298,6 +296,7 @@ class Soak:
         explained = h.check_database_explained_by_rows(self.sampler.samples)
         events_cap = len(self.nodes) * h.MAX_EVENTS_PER_WORKER
         max_events = max((int((s.get("rows") or {}).get("events", 0)) for s in self.sampler.samples), default=0)
+        backlog = h.check_command_backlog(self.sampler.samples)
         budgets = {"read": args.p99_read_ms, "submit": args.p99_submit_ms, "roundtrip": args.p99_roundtrip_ms}
         latency = h.check_latency(self.coordinator.recorder, budgets)
         workers_online = sum(1 for item in self.coordinator.api.workers() if item.get("state") == "online")
@@ -317,6 +316,8 @@ class Soak:
                        f"{len(verification.violations)} violations, {len(verification.unfinished)} unfinished, {len(verification.uncertain)} uncertain"},
             *[{"check": item.metric if item.metric.endswith(" ceiling") else f"slope {item.metric}", "verdict": item.verdict, "detail": item.detail} for item in slopes],
             {"check": "database explained by rows", "verdict": "fail" if explained else "pass", "detail": "; ".join(explained[:3]) or "ok"},
+            {"check": "worker command backlog", "verdict": "fail" if backlog else "pass",
+             "detail": "; ".join(backlog[:3]) or f"no worker above {h.MAX_WORKER_BACKLOG} unfinished commands"},
             {"check": "events within retention cap", "verdict": "fail" if max_events > events_cap else "pass", "detail": f"max {max_events}, cap {events_cap}"},
             *[{"check": f"p99 latency {item['class']}", "verdict": item["verdict"],
                "detail": f"p99 {item['p99_ms']} ms (budget {item['budget_p99_ms']}), n={item['count']}, errors={item['errors']}"} for item in latency],

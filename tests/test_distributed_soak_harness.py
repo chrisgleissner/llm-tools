@@ -833,3 +833,10 @@ def test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per
     summed = h.check_slope("workers_rss_kib", [(s["t"], s["workers"]["rss_kib"]) for s in _worker_fleet(2048.0)],
                            h.SlopeBound(3 * 1024 * 4, 1024 * 4, "KiB"), warmup_seconds=1200.0)
     assert summed.verdict == "pass"
+
+
+def test_a_growing_worker_command_backlog_is_reported():
+    ok = [{"t": 1.0, "queue_depths": {"w1": {"pending": 3, "sent": 1}}}, {"t": 2.0, "queue_depths": {}}, {"t": 3.0, "queue_depths": None}]
+    bad = [{"t": 61.0, "queue_depths": {"w1": {"pending": 90, "sent": 20}, "w2": {"pending": 1}}}]
+    assert h.check_command_backlog(ok) == []
+    assert h.check_command_backlog(bad) == ["t=61s: w1 has 110 unfinished commands (limit 100)"]
