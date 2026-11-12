@@ -279,6 +279,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_TOOLS_NO_WATCHDOG` (set to `1` to make `--watchdog` a no-op even when a device exists)
 * `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE` (seconds a wake may land from target and still count as reliable; default 90, floored at 5)
 * `LLM_TOOLS_WAIT_POLL_SECONDS` (wall-clock poll chunk for `common.wall_clock_wait_until`; default 30)
+* `LLM_TOOLS_FAILURE_BACKOFF_BASE` / `LLM_TOOLS_FAILURE_BACKOFF_MAX` (seconds; the n-th consecutive non-rate-limit failure (non-zero exit, crash, status 75) of the same provider or route delays its next launch by `min(max, base * 2**(n-1))`; defaults 30 and 900; base 0 disables; env wins over `[ralph] failure_backoff_base`/`failure_backoff_max`; a success resets the count; other ready providers are not delayed and known rate-limit resets keep their own wait; `HARD_FAIL_ABORT_STREAK` still bounds the count)
 * `LLM_RALPH_MIN_AWAKE_SECONDS` (minimum awake time between machine suspends; default 60)
 * `LLM_RALPH_MAX_SUSPENDS` (max machine suspends per run; default 0 = unlimited)
 * `LLM_SCHEDULER_SUSPEND_MIN_LEAD` (minimum lead before arming a wake / suspending; default 120)
