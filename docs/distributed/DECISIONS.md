@@ -627,3 +627,7 @@ A mission created through the coordinator may name only a verifier that the work
 
 - A lost command or result frame is repaired by re-sending, not by a protocol change. The coordinator re-sends a mutating command that has been idle for 10 s, checked every 5 s. The worker is responsible for running each mutating request id at most once: it records every mutating result in a private outcome ledger before it answers, and answers a duplicate from the ledger. A crash after the effect and before the record can still run a command once more after a restart; `protocol.md` states this window.
 - A failed audit write fails the action where the action and its audit row can share one transaction (`command.submit`). Where they cannot, because the action has already taken effect, the failure is reported as a health fault (`/healthz` 503 `audit-write-failed`) until an audit write succeeds again.
+
+## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
+
+Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.

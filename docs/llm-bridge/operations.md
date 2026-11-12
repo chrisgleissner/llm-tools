@@ -1377,6 +1377,28 @@ tmux copy mode (Ctrl-] [).
 **Distributed use.** `--target`, workers and coordinators are covered in
 [distributed operations](../distributed/operations.md).
 
+## Standalone use
+
+`llm-bridge`, `llm-usage`, `llm-scheduler`, `ralph-robin` and `llm-sleep-soak` need no
+coordinator, worker enrolment or remote configuration. Without an enrolled worker and
+without `llm-bridge remote login`:
+
+- No network connection is attempted and no host name is looked up. Bridge itself uses only
+  a local SQLite database and a Unix-socket tmux server.
+- No `worker/` directory or remote configuration file is created in the state directory.
+  Only `llm-bridge worker enroll` and `llm-bridge remote login` create them.
+- The worker, remote-client, WebSocket and protocol modules (`bridge_worker`, `bridge_remote`,
+  `bridge_ws`, `bridge_protocol`) are imported lazily inside `llm-bridge worker`,
+  `llm-bridge remote`, `llm-bridge worker list` and `llm-bridge --target NAME ...`. A
+  local command does not import them, so it starts no slower than before.
+- `llm-usage`, `llm-scheduler`, `ralph-robin` and `llm-sleep-soak` contain no reference to
+  the coordinator at all.
+- No configuration key is required, and exit codes and output of local commands are unchanged.
+
+`tests/test_standalone_compatibility.py` runs a representative command of each tool with an
+empty home, private state and runtime directories, and checks the points above by recording
+non-Unix socket connections, name lookups and imports of the modules listed.
+
 ## Running Bridge inside your own tmux
 
 You can run `llm-bridge`, `llm-bridge control` or the console command `/attach`
