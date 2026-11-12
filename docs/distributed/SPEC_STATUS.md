@@ -500,11 +500,11 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | TRACK-016 | [x] | `ux-review-web.md`, `review-internals.md`, `ux-review-cli.md`, `review-findings.md` and `capacity-plan.md` each end with a `## Dispositions` table; every finding is fixed, no change or a register ID. Revert: the previous `review-internals.md` fails with no Dispositions section. Tests: tests/test_distributed_spec_status.py::test_disposition_check_passes_and_fails_on_fixtures |
 | TRACK-017 | [x] | `DECISIONS.md` headings are unique and every `D<number>` cited in the register exists (numbering gaps are allowed, as decided in D40). Revert: disabling the duplicate check fails the fixture test. Tests: tests/test_distributed_spec_status.py::test_decision_headings_are_unique_and_cited_decisions_exist, tests/test_distributed_spec_status.py::test_decision_check_passes_and_fails_on_fixtures |
 | TRACK-018 | [ ] | Not started. |
-| FIND-001 | [ ] | Not started. |
+| FIND-001 | [~] | Root cause: the 1200 s to 1800 s fit window ended on the 900 s retention-pass peak while controllers were still settling; no leak (soak-and-chaos.md, Memory over time). Warm-up is 1800 s and the nightly job runs 2700 s; a synthetic 2.5 MiB/h leak still fails the gate. The exactly-once check now exempts commands pruned by journal retention and still checks their worker-side effect. Closes after three consecutive green nightly runs. |
 | FIND-002 | [ ] | Not started. |
 | FIND-003 | [ ] | Not started. |
 | FIND-004 | [ ] | Not started. |
-| FIND-005 | [ ] | Not started. |
+| FIND-005 | [d] | `worker-command-backlog` is implemented (`tests/test_distributed_soak_harness.py::test_a_growing_worker_command_backlog_is_reported`). D51 defers `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore`, which need coordinator changes; target 1.6.0. |
 | FIND-006 | [ ] | Not started. |
 | FIND-007 | [ ] | Not started. |
 | FIND-008 | [ ] | Not started. |
