@@ -880,3 +880,7 @@ Acceptance: on 2026-11-12 the operator delegated all remaining decisions to the 
 ## D47 Remote verifiers (ORCH-008)
 
 A mission created through the coordinator may name only a verifier that the worker's own configuration declares. A verifier command or verifier file is never accepted over the network, because it would let any holder of a control token run arbitrary commands on the worker.
+
+## D48 Faults of the UXR-040 critique are registered as UXR-053 to UXR-057 (UXR-040)
+
+The fresh-eyes critique of every console page at 1440 and 360 pixels, in both themes, found five faults: an incomplete quota pill at 360, a clipped worker filter at 360, an approval reason cut mid-word and a wrapping pill in the Inbox at 1440, a blank provider cell on failed mission rows, and no sideways-scroll cue on the phone terminal. UXR-040 requires every finding to be filed as a UXR row and closed with proof, so they become UXR-053 to UXR-057. They are fixed with the web console work (W4), which can regenerate the Pixel 4 screenshot baselines in the Playwright image. UXR-040 stays open until they are closed.

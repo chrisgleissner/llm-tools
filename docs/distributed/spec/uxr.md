@@ -54,3 +54,8 @@ Source: the web console redesign task of 2026-11-07 (PRD-037).
 - UXR-050: (visible) The third part of the Inbox answer line names the kinds that need the operator instead of an instruction (overseer finding R4, D28).
 - UXR-051: (visible) The pill column of an Inbox row is as wide as its pills, so a title starts close to its pill and no pill reaches a title (overseer finding R5, D28).
 - UXR-052: (visible) The phone search button has no fill and no border at rest, like the account button (overseer finding R6, D28).
+- UXR-053: At 360 the top-bar quota pill shows the percentage left for every provider window, including Codex, not only the reset time.
+- UXR-054: At 360 the "All workers" filter on Usage and Sessions is not clipped.
+- UXR-055: At 1440 the Inbox approval reason line ends at a word boundary and the "Needs approval" pill does not wrap.
+- UXR-056: A failed row on Missions at 1440 shows the provider of its last run instead of a blank cell.
+- UXR-057: At 360 the mission terminal shows a visible cue when its content scrolls sideways.
