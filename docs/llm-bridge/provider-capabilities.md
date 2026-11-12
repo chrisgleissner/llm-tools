@@ -1,6 +1,6 @@
 # Provider capabilities
 
-Generated from `llm_tools/bridge_providers.py` and `docs/llm-bridge/evidence/*.json` by
+Generated from `llm_tools/bridge_providers.py` and `llm_tools/provider_evidence/*.json` by
 `python -m llm_tools.bridge_capabilities --write-doc`; `tests/test_bridge_capabilities.py` fails when this file differs.
 Do not edit it by hand. Earlier hand-written discovery notes are in `provider-capabilities-history.md`.
 

@@ -132,6 +132,9 @@ def _format_checkpoint(checkpoint: dict[str, Any]) -> str:
     return "\n".join(lines)[:_CHECKPOINT_LIMIT]
 
 
+CLI_VERSION_TTL_SECONDS = 3600.0
+
+
 class BridgeMissionHooks:
     """Translate durable Bridge task boundaries into the existing Ralph loop."""
 
@@ -179,7 +182,8 @@ class BridgeMissionHooks:
         # Task notices (DOG-017): the delivery state of the operation that runs now.
         self._notice_deliveries: dict[str, bridge_task_notice.TaskNoticeDelivery] = {}
         self._notice_next_look = 0.0
-        self._cli_versions: dict[str, str] = {}
+        self._cli_versions: dict[str, tuple[float, str]] = {}  # provider -> (monotonic time read, version)
+        self._clock: Callable[[], float] = time.monotonic
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -191,12 +195,15 @@ class BridgeMissionHooks:
         return _safe_decision(selection)
 
     def _cli_version(self, provider: str) -> str:
-        """The provider CLI version recorded with each selection (PROV-011), read once per controller and provider."""
-        if provider not in self._cli_versions:
+        """The provider CLI version recorded with each selection (PROV-011); read at most once an hour per provider, since CLIs self-update."""
+        now = self._clock()
+        seen = self._cli_versions.get(provider)
+        if seen is None or now - seen[0] >= CLI_VERSION_TTL_SECONDS:
             from . import bridge_capabilities
 
-            self._cli_versions[provider] = bridge_capabilities.provider_version_record(provider)["cli_version"]
-        return self._cli_versions[provider]
+            seen = (now, bridge_capabilities.provider_version_record(provider)["cli_version"])
+            self._cli_versions[provider] = seen
+        return seen[1]
 
     def on_selection(self, selection: dict[str, Any]) -> None:
         projection = self._selection_projection(selection)
@@ -896,7 +903,7 @@ class BridgeMissionHooks:
 
     def _deliver_task_notices(self, operation_id: str, provider: str) -> None:
         """Type one notice about tasks added or amended during this run into the idle provider pane (DOG-017)."""
-        if self.handle is None or not self.native_tui or self.headless or provider not in bridge_task_notice.NOTICE_PROVIDERS:
+        if self.handle is None or not self.native_tui or self.headless or provider not in bridge_task_notice.notice_providers():
             return
         if not bridge_task_notice.notices_enabled():
             return
@@ -2657,6 +2664,13 @@ def _launch_controller_locked(
             routes_value = routes  # an empty string is an explicit "no routes" for this start
         else:
             routes_value = str(mission["config"].get("routes", ""))
+    if native_tui:
+        from . import config as toolconfig
+        from .bridge_rotation import native_refusal
+
+        refusal = native_refusal(toolconfig.load_config(), providers_value, routes_value)
+        if refusal:
+            raise ValueError(refusal + " · or start with --mode background or headless")
     runtime = _runtime_directory(mission_id)
     log_path = runtime / "controller.log"
     ready = _ready_file(runtime)

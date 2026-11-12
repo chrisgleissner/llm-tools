@@ -2,7 +2,7 @@
 
 The matrix comes from the registry (``bridge_providers``) and the live-evidence files of PROV-010.
 
-Evidence file ``docs/llm-bridge/evidence/<provider>.json`` (schema version 1)::
+Evidence file ``llm_tools/provider_evidence/<provider>.json`` (schema version 1)::
 
     {"schema_version": 1, "provider": "kilo", "cli_version": "7.3.45", "date": "2026-11-12",
      "capabilities": {"launch": true, "reply": true, "stop": true, "exact_resume": true, "context_recall": true}}
@@ -27,7 +27,8 @@ from typing import Any, Callable, Mapping
 from . import bridge_providers
 
 SCHEMA_VERSION = 1
-EVIDENCE_DIR = Path(__file__).resolve().parents[1] / "docs" / "llm-bridge" / "evidence"
+VERSION_TIMEOUT_SECONDS = 2
+EVIDENCE_DIR = Path(__file__).resolve().parent / "provider_evidence"  # packaged with llm_tools (pyproject package-data)
 DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "llm-bridge" / "provider-capabilities.md"
 PROBE_CAPABILITIES = ("launch", "reply", "stop", "exact_resume", "context_recall")
 REGISTRY_CAPABILITIES = ("finish", "limit_notice", "question_detection", "task_notice", "prompt_outside_argv")
@@ -85,16 +86,16 @@ def parse_version(text: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def installed_version(provider: str, run: Callable[..., Any] = subprocess.run) -> str | None:
+def installed_version(provider: str, run: Callable[..., Any] = subprocess.run, *, path: str | None = None) -> str | None:
     """The provider CLI's version string from ``<cli> --version`` (read-only, bounded), or ``None``."""
     spec = bridge_providers.get(provider)
     if spec is None:
         return None
-    resolved = shutil.which(spec.executable)
+    resolved = shutil.which(spec.executable, path=path)
     if resolved is None:
         return None
     try:
-        result = run([resolved, spec.version_flag], check=False, capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
+        result = run([resolved, spec.version_flag], check=False, capture_output=True, text=True, timeout=VERSION_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     match = _VERSION.search((result.stdout or "") + " " + (result.stderr or ""))
@@ -164,7 +165,7 @@ def render_markdown(directory: Path | None = None) -> str:
     return "\n".join([
         "# Provider capabilities",
         "",
-        "Generated from `llm_tools/bridge_providers.py` and `docs/llm-bridge/evidence/*.json` by",
+        "Generated from `llm_tools/bridge_providers.py` and `llm_tools/provider_evidence/*.json` by",
         "`python -m llm_tools.bridge_capabilities --write-doc`; `tests/test_bridge_capabilities.py` fails when this file differs.",
         "Do not edit it by hand. Earlier hand-written discovery notes are in `provider-capabilities-history.md`.",
         "",

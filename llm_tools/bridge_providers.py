@@ -71,6 +71,23 @@ MINIMAX_NATIVE_HINT = (
 
 
 @dataclass(frozen=True)
+class IdlePrompt:
+    """A native screen waits at its input prompt when ``pattern`` matches a line and ``required_text`` (if any) is on screen."""
+
+    pattern: re.Pattern[str]
+    required_text: str | None = None
+
+    def matches(self, screen: str) -> bool:
+        if self.required_text is not None and self.required_text.casefold() not in screen.casefold():
+            return False
+        return bool(self.pattern.search(screen))
+
+
+_CODEX_IDLE = IdlePrompt(re.compile(r"(?m)^\s*›(?:\s+Ask Codex to do anything)?\s*$"), "? for shortcuts")
+_CLAUDE_IDLE = IdlePrompt(re.compile(r"(?m)^\s*❯\s*$"))
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     """Every provider-specific fact Bridge needs, in one record."""
 
@@ -91,7 +108,7 @@ class ProviderSpec:
     new_session_syntax: tuple[str, ...] = ()
     new_session_pattern: re.Pattern[str] | None = None
     exit_command: str | None = None
-    input_prompt: re.Pattern[str] | None = None
+    idle_prompt: IdlePrompt | None = None  # how a native screen shows "waiting at the input prompt"; None: not detectable
     limit_notice_pattern: re.Pattern[str] | None = None
     question_detector: str = QUESTION_NONE
     notice_delivery: bool = False
@@ -109,7 +126,7 @@ REGISTRY: dict[str, ProviderSpec] = {
         headless_argv=("codex", "exec", "{model}", "-C", "{cwd}", "{prompt}"),
         session_sources=frozenset({"codex:session_meta"}),
         resume_syntax=("resume",), resume_help_pattern=re.compile(r"(?im)^\s*resume(?:\s|$)"),
-        exit_command="/quit", input_prompt=COMPOSER_LINE, limit_notice_pattern=_CODEX_LIMIT,
+        exit_command="/quit", idle_prompt=_CODEX_IDLE, limit_notice_pattern=_CODEX_LIMIT,
         question_detector=QUESTION_CODEX_QUEUED, notice_delivery=True,
     ),
     "claude": ProviderSpec(
@@ -120,7 +137,7 @@ REGISTRY: dict[str, ProviderSpec] = {
         session_sources=frozenset({"claude:system.init", "claude:transcript"}),
         resume_syntax=("--resume",), resume_help_pattern=_flag("--resume"),
         new_session_syntax=("--session-id",), new_session_pattern=_flag("--session-id"),
-        exit_command="/exit", input_prompt=COMPOSER_LINE, limit_notice_pattern=_CLAUDE_LIMIT,
+        exit_command="/exit", idle_prompt=_CLAUDE_IDLE, limit_notice_pattern=_CLAUDE_LIMIT,
         question_detector=QUESTION_CLAUDE_IDLE, notice_delivery=True,
     ),
     "copilot": ProviderSpec(
@@ -130,7 +147,7 @@ REGISTRY: dict[str, ProviderSpec] = {
         session_sources=frozenset({"copilot:session.start"}),
         resume_syntax=("--resume",), resume_help_pattern=_flag("--resume"),
         new_session_syntax=("--session-id",), new_session_pattern=_flag("--session-id"),
-        exit_command="/exit", input_prompt=COMPOSER_LINE, notice_delivery=True,
+        exit_command="/exit", notice_delivery=True,
     ),
     "kilo": ProviderSpec(
         "kilo", "Kilo", "kilo",

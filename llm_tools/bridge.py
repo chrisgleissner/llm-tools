@@ -1393,7 +1393,7 @@ def _doctor_provider_checks(mission: dict[str, Any] | None) -> list[dict[str, An
         # Without a mission, check what the home form offers: every enabled provider, and every declared route.
         from . import bridge_launcher
 
-        return bridge_doctor.provider_checks(bridge_launcher.offered_entries())
+        return bridge_doctor.provider_checks(bridge_launcher.offered_entries(), check_versions=True)
     config = mission["config"]
     names = fmt.rotation_names(config)
     conf = _mission_tool_config(config)
@@ -1402,7 +1402,7 @@ def _doctor_provider_checks(mission: dict[str, Any] | None) -> list[dict[str, An
     for position, name in enumerate(names, 1):
         entry = _rotation_entry(conf, name, position, routes_mode=routes_mode)
         entries.append((name, entry["launch_cli"] if routes_mode else name))
-    return bridge_doctor.provider_checks(entries)
+    return bridge_doctor.provider_checks(entries, check_versions=True)
 
 
 def _mission_needs_you(mission: dict[str, Any] | None) -> str | None:
@@ -1571,6 +1571,13 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
     _warn_not_signed_in(args.providers, args.routes)
     from . import bridge_policy, config as toolconfig
+
+    if args.native_tui:
+        from .bridge_rotation import native_refusal
+
+        refusal = native_refusal(toolconfig.load_config(), args.providers, args.routes)
+        if refusal:
+            raise ValueError(refusal + " · or use --mode background or headless")
 
     policy = bridge_policy.defaults_from_tool_config(toolconfig.load_config())
     if args.teams is not None:

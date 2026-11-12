@@ -150,6 +150,21 @@ def entries(conf: dict[str, Any], providers: Any, routes: Any) -> list[tuple[str
     return found
 
 
+def native_refusal(conf: dict[str, Any], providers: Any, routes: Any) -> str | None:
+    """PROV-012: why a rotation cannot run as a native mission (names the route alternative), or ``None``.
+
+    Only entries whose launch CLI has no native session (MiniMax, z.ai) are refused; an unset rotation
+    uses the default, which has none of them.
+    """
+    from . import bridge_providers
+
+    for name, cli in entries(conf, providers, routes):
+        message = bridge_providers.native_unavailable_message(cli)
+        if message is not None:
+            return f"{name} cannot run a native mission: {message}"
+    return None
+
+
 def disabled_entries(enabled: EnabledProviders, conf: dict[str, Any], providers: Any, routes: Any) -> list[tuple[str, str]]:
     """Rotation entries whose launch CLI is not enabled."""
     if enabled.names is None:

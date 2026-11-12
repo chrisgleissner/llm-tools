@@ -884,6 +884,12 @@ class Launcher:
         """
         details = {name: "" for name in self.installed_providers()}
         details.update({route.route_id: route.detail for route in self.routes})
+        if self.native:  # PROV-012: MiniMax and z.ai have no native session; they stay available as routes and in Background/Headless
+            from . import bridge_providers
+
+            route_cli = {route.route_id: route.provider for route in self.routes}
+            details = {name: detail for name, detail in details.items()
+                       if bridge_providers.native_unavailable_message(route_cli.get(name, name)) is None}
         chosen = [name for name in dict.fromkeys(self.selection()) if name in details]
         rest = sorted(name for name in details if name not in chosen)
         return [(name, details[name]) for name in [*chosen, *rest]]
@@ -959,6 +965,13 @@ class Launcher:
             if not provider_installed(binary):
                 what = f"{item} needs {binary}, which is" if route is not None else f"{item} is"
                 raise ValueError(f"{what} not installed (not on PATH). Deselect it or install its CLI.")
+        if self.native:
+            from . import bridge_providers
+
+            for item in providers:
+                message = bridge_providers.native_unavailable_message(routes[item].provider if item in routes else item)
+                if message:
+                    raise ValueError(f"{item} cannot run in Native mode: {message}")
         typed = (self.directory or self.cwd).strip()
         directory = Path(typed).expanduser()
         if not directory.exists():

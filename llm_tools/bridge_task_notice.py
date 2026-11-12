@@ -44,9 +44,6 @@ from .bridge_states import ACTIVE_OPERATION_STATUSES
 def notice_providers() -> frozenset[str]:
     """Providers whose composer the Bridge can type a notice into (the registry's ``notice_delivery``)."""
     return frozenset(name for name, spec in bridge_providers.REGISTRY.items() if spec.notice_delivery)
-
-
-NOTICE_PROVIDERS = notice_providers()
 QUIET_SECONDS = 3.0
 DRAFT_REPORT_SECONDS = 600.0
 KEY_PAUSE_SECONDS = 0.3

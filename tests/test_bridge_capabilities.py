@@ -75,12 +75,12 @@ def test_version_drift_warns_only_for_a_newer_minor(installed: str | None, drift
 def test_doctor_provider_check_warns_on_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _evidence(tmp_path, "codex")
     monkeypatch.setattr(caps, "EVIDENCE_DIR", tmp_path)
-    monkeypatch.setattr(caps, "installed_version", lambda _p, run=None: "1.9.0")
+    monkeypatch.setattr(caps, "installed_version", lambda _p, run=None, **_kw: "1.9.0")
     fake = tmp_path / "bin"
     fake.mkdir()
     (fake / "codex").write_text("#!/bin/sh\n")
     (fake / "codex").chmod(0o755)
-    check = bridge_doctor.provider_check("codex", env={"PATH": str(fake), "HOME": str(tmp_path)})
+    check = bridge_doctor.provider_check("codex", env={"PATH": str(fake), "HOME": str(tmp_path)}, check_version=True)
     assert check["installed"] is True
     assert "newer than the evidence" in check["version_drift"]
     assert "warning" in bridge_format.provider_check_text(check)

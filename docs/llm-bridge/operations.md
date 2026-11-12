@@ -1727,7 +1727,7 @@ cycle ID and wake unit.
 
 `llm-bridge doctor --capabilities` (add `--json` for machine output) prints, for each provider and
 capability, `supported`, `unsupported` or `unverified`, with the evidence date and CLI version from
-`docs/llm-bridge/evidence/<provider>.json`. `unverified` means Bridge implements the capability but no
+`llm_tools/provider_evidence/<provider>.json`. `unverified` means Bridge implements the capability but no
 evidence file records it. `docs/llm-bridge/provider-capabilities.md` is generated from the same registry
 (`llm_tools/bridge_providers.py`); regenerate it with `python -m llm_tools.bridge_capabilities --write-doc`.
 `doctor` also warns when an installed provider CLI has a newer minor version than its evidence.

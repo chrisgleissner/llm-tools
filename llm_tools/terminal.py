@@ -1659,12 +1659,10 @@ _PROVIDER_PROMPT_SEEN: OrderedDict[str, tuple[int, str, str, float]] = OrderedDi
 
 def _native_input_prompt(provider: str, screen: str) -> bool:
     """Recognize only the stable input-prompt chrome for supported native providers."""
-    normalized = provider.casefold().split("-", 1)[0]
-    if normalized == "codex":
-        return "? for shortcuts" in screen.casefold() and bool(re.search(r"(?m)^\s*›(?:\s+Ask Codex to do anything)?\s*$", screen))
-    if normalized == "claude":
-        return bool(re.search(r"(?m)^\s*❯\s*$", screen))
-    return False
+    from . import bridge_providers
+
+    spec = bridge_providers.get(provider.casefold().split("-", 1)[0])
+    return spec is not None and spec.idle_prompt is not None and spec.idle_prompt.matches(screen)
 
 
 def _codex_queued_question_count(screen: str) -> int:
