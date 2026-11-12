@@ -618,3 +618,7 @@ Acceptance: on 2026-11-12 the operator delegated all remaining decisions to the 
 ## D47 Remote verifiers (ORCH-008)
 
 A mission created through the coordinator may name only a verifier that the worker's own configuration declares. A verifier command or verifier file is never accepted over the network, because it would let any holder of a control token run arbitrary commands on the worker.
+
+## D49 Rich is the only runtime dependency (FIND-017)
+
+`AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.

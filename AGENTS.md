@@ -105,6 +105,7 @@ After that, the generic `llm_tools/capacity.decide` logic handles the provider's
 ## Hard invariants
 
 * Keep Python code typed, explicit, and standard-library-first.
+* Rich is the only runtime dependency (`dependencies` in `pyproject.toml`). It is used only to render Markdown in the Bridge document viewer, it is imported lazily inside the rendering functions in `llm_tools/bridge_documents.py` and never at module top level, and Bridge degrades to plain source when it is missing or fails. Adding another runtime dependency needs a recorded decision (D49). `tests/test_release_hygiene.py` enforces this.
 * Missing data must degrade gracefully as `-`, `unknown`, or `unavailable`, never as empty cells or script failure.
 * One provider failing must not block other provider rows.
 * Table and JSON must agree on provider availability and values.
