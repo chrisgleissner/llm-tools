@@ -20,6 +20,8 @@ import pytest
 from llm_tools.terminal import TmuxTerminalBackend
 from tests.conftest import scaled
 
+ATTACH_PAINT_TIMEOUT = 30  # seconds, scaled by TEST_TIMEOUT_SCALE inside wait_for
+
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 
 
@@ -264,7 +266,10 @@ with out.open("ab", buffering=0) as log:
         wait_for_stable(idle, timeout=10, stable_for=0.3)
 
     try:
-        wait_for(lambda: b"NATIVE READY" in screen)
+        # The attach client is a fresh Python process that imports the backend and then starts tmux. On a host
+        # that is saturated by other suites that takes longer than the default 5 s, so the first paint gets a
+        # long deadline; a client that never attaches still fails the test.
+        wait_for(lambda: b"NATIVE READY" in screen, timeout=ATTACH_PAINT_TIMEOUT)
         writers = backend.writable_clients(handle)
         assert len(writers) == 1
         client_name = writers[0]
@@ -413,7 +418,7 @@ with out.open("ab", buffering=0) as log:
         # A new client resumes the same tmux session and provider process.
         process = attach()
         screen.clear()
-        wait_for(lambda: b"NATIVE READY" in screen)
+        wait_for(lambda: b"NATIVE READY" in screen, timeout=ATTACH_PAINT_TIMEOUT)
         wait_for(lambda: active_pane() == handle.provider_pane)
         os.write(master, b"reattached")
         wait_for(lambda: received(provider, b"reattached"))

@@ -628,6 +628,10 @@ class TmuxTerminalBackend:
             # until the operator deliberately sends Ctrl-]. Status-line clicks
             # remain available even while the provider pane is zoomed.
             commands: list[list[str]] = [["set-hook", "-g", "client-resized", resize_hook]]
+            # The command pane is a full-screen application that has no scrollback to browse. Copy mode would
+            # swallow its keys until `q` (wheel or drag before it enables mouse reporting, a stray prefix `[`,
+            # or a restart of the console). Leave it again at once; provider panes keep copy mode.
+            commands.append(["set-hook", "-g", "pane-mode-changed", self._bridge_pane_copy_mode_hook(bridge_pane)])
             for key, target in (("B", bridge_pane), ("b", bridge_pane), ("P", pane), ("p", pane)):
                 commands.append(["bind-key", "-T", "prefix", key, "select-pane", "-t", target, "\\;", "resize-pane", "-Z", "-t", target])
             commands.extend(args for args in self._switcher_binds(bridge_pane, workdir, picker_argv, version) if "display-popup" not in args)
@@ -661,6 +665,11 @@ class TmuxTerminalBackend:
             else:
                 self._unlink_owned_config(socket, config_path)
             raise
+
+    @staticmethod
+    def _bridge_pane_copy_mode_hook(bridge_pane: str) -> str:
+        """``pane-mode-changed`` command that cancels any mode the command pane enters."""
+        return f'if-shell -F -t {bridge_pane} "#{{pane_in_mode}}" "send-keys -t {bridge_pane} -X cancel"'
 
     # Default bindings (tmux 3.6) that open a command prompt or a menu. Typed or
     # pasted text reaching a prompt is parsed as tmux input, and a menu offers

@@ -51,6 +51,9 @@ THINNED_EVENT_KINDS = ("capacity-refresh", "provider-wait", "provider-selection"
 COMMAND_RETENTION_SECONDS = 30 * 86400
 # Largest command result copied into a command-applied/-rejected event (the commands table keeps the whole result).
 COMMAND_EVENT_RESULT_BYTES = 4096
+# Upper bound for one event payload; a larger payload keeps every field but with long values shortened.
+EVENT_PAYLOAD_BYTES = 65_536
+EVENT_VALUE_CHARS = 2000
 
 
 def rotation_label(providers: Any, routes: Any) -> str:
@@ -670,6 +673,21 @@ class BridgeStore:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
+    @classmethod
+    def _shortened_event_data(cls, data: dict[str, Any], payload_bytes: int) -> dict[str, Any]:
+        """``data`` with long strings cut and lists and dicts replaced by a cut JSON summary; no field is dropped."""
+        def short(value: Any) -> Any:
+            text = value if isinstance(value, str) else cls._json(value)
+            if isinstance(value, (bool, int, float)) or value is None or len(text) <= EVENT_VALUE_CHARS:
+                return value
+            return f"{text[:EVENT_VALUE_CHARS]}…[truncated, {len(text)} chars]"
+
+        result = {key: short(value) for key, value in data.items()}
+        result.update(truncated=True, payload_bytes=payload_bytes)
+        if len(cls._json(result).encode("utf-8")) > EVENT_PAYLOAD_BYTES:  # very many fields: keep the names only
+            result = {"truncated": True, "payload_bytes": payload_bytes, "fields": sorted(data)[:200]}
+        return result
+
     def _event(
         self,
         mission_id: str,
@@ -679,9 +697,14 @@ class BridgeStore:
         task_id: int | None = None,
         operation_id: str | None = None,
     ) -> None:
+        encoded = self._json(data)
+        # Encoding costs a copy, so it is done only when the payload could exceed the cap in bytes: a character
+        # is at most 4 bytes, and a payload with at most cap/4 characters cannot.
+        if len(encoded) * 4 > EVENT_PAYLOAD_BYTES and len(encoded.encode("utf-8")) > EVENT_PAYLOAD_BYTES:
+            encoded = self._json(self._shortened_event_data(data, len(encoded.encode("utf-8"))))
         self.db.execute(
             "INSERT INTO events(mission_id,task_id,operation_id,schema_version,kind,data_json,created_at) VALUES(?,?,?,?,?,?,?)",
-            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, self._json(data), utc_now()),
+            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, encoded, utc_now()),
         )
 
     def mission_id_if_exists(self, mission_id: str) -> str | None:
