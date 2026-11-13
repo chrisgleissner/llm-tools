@@ -59,6 +59,23 @@ def strict_context(ca: Path) -> ssl.SSLContext:
     return context
 
 
+def read_listening_line(process: subprocess.Popen) -> str:
+    """Return the "listening on https://..." line of a coordinator, skipping earlier diagnostics.
+
+    The coordinator reports a database call that takes 500 ms or longer as `slow database call <name>: N ms` on
+    stderr. On a loaded host that line can precede the listening line (`cursor_key` ran during start-up on a
+    Windows runner). The warning stays in the log; it is not a start-up failure.
+    """
+    skipped: list[str] = []
+    while True:
+        line = process.stderr.readline()
+        if not line:
+            raise AssertionError(f"coordinator exited before listening; stderr so far: {skipped}")
+        if re.search(r"https://\S+", line):
+            return line
+        skipped.append(line.rstrip())
+
+
 class Coordinator:
     def __init__(self, data: Path) -> None:
         self.data = data
@@ -75,7 +92,7 @@ class Coordinator:
         config_text = config_text.replace("max_connections_per_ip = 32", "max_connections_per_ip = 128")
         config.write_text(config_text)
         self.process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
-        line = self.process.stderr.readline()
+        line = read_listening_line(self.process)
         match = re.search(r"https://(\S+)", line)
         assert match, line
         self.address = match.group(1)
@@ -297,7 +314,7 @@ def test_generated_certificates_pass_strict_verification_before_and_after_renewa
     assert (coordinator.data / "server.pem").read_text() != before
     process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(coordinator.data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        match = re.search(r"https://\S+:(\d+)", process.stderr.readline())
+        match = re.search(r"https://\S+:(\d+)", read_listening_line(process))
         assert match
         assert ("DNS", "localhost") in _handshake(int(match.group(1)), coordinator.data / "ca.pem")["subjectAltName"]
     finally:

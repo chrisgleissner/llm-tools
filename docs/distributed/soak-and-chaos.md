@@ -103,6 +103,15 @@ the coordinator (floor 4), 3.2 descriptors for the two workers (floor 2) and 3.0
 failed on a floor that the 20 minute warm-up of a real run makes irrelevant. A leak of tens of threads or descriptors still fails
 the short run.
 
+`--coordinator-rss-floor-kib` replaces the floor of the `coordinator_rss_kib` row only (default 4096). The short end-to-end test uses
+12288. The coordinator's RSS is still ramping 30 to 60 seconds after it starts (database pages, the connection pool and allocator
+arenas), so a fit over 30 seconds cannot separate that ramp from a leak, and extrapolating it to an hour gives 300 to 900 MiB per
+hour. In 10 loaded runs (3 busy loops at nice 19, 3 cores) the fitted rise over the window was 2.7 to 7.2 MiB, and 2 of the 10 runs
+failed the 4 MiB floor (slope 618413 and 873741 KiB per hour). With the floor at 12 MiB the check fails only when the rise over
+the window is above 12 MiB, which a growth of about 400 KiB per second (1.4 GiB per hour) or more reaches; a unit test and an
+injected 500 KiB per second leak in the sampled RSS both fail the short soak. A slower leak is the job of the full-size soak, which keeps the
+8 MiB per hour slope bound and the 4 MiB floor, and of the 96 MiB ceiling.
+
 Ceilings (`dist_harness.DEFAULT_CEILINGS`, not adjustable from the command line; they apply to the largest single process):
 
 | Series | Ceiling | Measured peak | Why this number |

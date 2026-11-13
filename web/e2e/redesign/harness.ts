@@ -24,9 +24,26 @@ export async function openApp(page: Page, opts: MockOptions = IN, path = "/"): P
   return { ...mock, ix };
 }
 
+/**
+ * Wait until the page has loaded its data and drawn it. The signals are ones the page already exposes, so the production bundle carries no test hook:
+ * the network is idle, the Inbox badge has no title (its title says "Checked N of M active missions" while some mission's attention is unread and the
+ * text reads "13+"), no panel is `aria-busy="true"`, fonts are ready and two frames were drawn. The condition is checked again after the frames,
+ * because a read that starts when the previous one finishes (the status reads, then the lines) can begin between two checks.
+ * The wait for the badge and the busy panels is bounded (`SETTLE_WAIT_MS`) and does not fail the caller: a mission whose status is never read keeps its
+ * "13+" and its title for good (the UXR gate tests T47 and T48 have such missions), and the wait then ends at the bound with the page as it is.
+ * Every screenshot spec calls this before it captures.
+ */
+const SETTLE_WAIT_MS = 5_000;
 export async function settle(page: Page): Promise<void> {
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await page.evaluate(() => document.fonts.ready.then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))));
+  const loaded = () =>
+    page.waitForFunction(() => !document.querySelector('.nav-count:not([hidden])[title]:not([title=""]), [aria-busy="true"]:not(.btn)'), undefined, { timeout: SETTLE_WAIT_MS }).then(() => true, () => false);
+  const frames = () => page.evaluate(() => document.fonts.ready.then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))));
+  for (let pass = 0; pass < 2; pass += 1) {
+    await page.waitForLoadState("networkidle").catch(() => {});
+    if (!(await loaded())) return frames(); // it did not clear within the bound: it is not going to, so do not wait again
+    await frames();
+  }
+  await loaded();
 }
 
 export const viewport = (page: Page) => page.viewportSize() ?? { width: 1440, height: 900 };

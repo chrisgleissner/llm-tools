@@ -230,6 +230,10 @@ test("mission activity humanizes events, counts background events and shows only
   await expect(events).not.toContainText("Command queued");
   await expect(events).not.toContainText("controller alive");
   await expect(page.locator("[data-plumbing-count]")).toContainText("background event");
+  // The terminal events are live-only: the page publishes them when its session pane (a lazy chunk, then a WebSocket) has opened and, in this mock,
+  // been closed again. The pane reaches "ended" after both events were published. Wait for that state itself, not for a time: on a slow browser the chunk
+  // and the socket took up to 5 s of the 10 s that the text assertion below would otherwise have to cover.
+  await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "ended", { timeout: 60_000 });
   // All activity adds the detail events with readable phrases.
   await page.getByRole("button", { name: "All activity" }).click();
   await expect(events).toContainText("Terminal opened");

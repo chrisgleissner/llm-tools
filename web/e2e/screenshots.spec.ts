@@ -7,7 +7,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
 import { DENSE_CALM_URL, mockApp, MISSION_PATH, MISSION_START_PATH } from "./mock";
-import { showTab } from "./redesign/harness";
+import { settle, showTab } from "./redesign/harness";
 import { SCREENS } from "./screens";
 import { IN } from "./screens/types";
 import { currentWorkSummary } from "../src/current-work";
@@ -24,7 +24,10 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto(s.path);
       await s.run(page);
       if (s.mock.auth === "in" && s.path !== "/missions" && !s.name.startsWith("login")) await page.locator("#conn").waitFor();
-      await page.evaluate(() => document.fonts.ready);
+      // A toast that the screen captures dismisses itself after 4 s (8 s for Undo), and settle() may take longer than that on a loaded host. The page holds
+      // a toast while the pointer is on it (src/ui.ts), so send the toast the same `mouseenter`; nothing changes in production code.
+      await page.evaluate(() => document.querySelectorAll(".toast").forEach((toast) => toast.dispatchEvent(new MouseEvent("mouseenter"))));
+      await settle(page); // the data is loaded and drawn (see harness.ts), so the baseline does not depend on timing
       await page.mouse.move(0, 0);
       // Focus rings and the caret must not depend on timing.
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.matches("input, textarea") || (document.activeElement as HTMLElement | null)?.blur?.());
