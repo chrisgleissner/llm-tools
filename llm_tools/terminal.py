@@ -181,6 +181,21 @@ STATUS_REMAIN_ON_EXIT_FORMAT = (
 _MISSION_SESSION_RE = re.compile(r"mission-([0-9a-f]{32})")
 
 
+# Run by the station-switch command (a shell started by `detach-client -E`) before `attach-session`.
+_FIT_BEFORE_ATTACH = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[7])\n"
+    "from pathlib import Path\n"
+    "from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend\n"
+    "a = sys.argv\n"
+    "h = TerminalHandle(Path(a[1]), Path(a[2]), a[3], a[4], a[5], int(a[6]))\n"
+    "try:\n"
+    "    TmuxTerminalBackend()._fit_window_to_terminal(h)\n"
+    "except Exception:\n"
+    "    pass\n"
+)
+
+
 def detach_notice(session_name: str) -> str:
     """The line shown after detaching from a mission station, or ``""`` for any other session.
 
@@ -1171,7 +1186,12 @@ class TmuxTerminalBackend:
         target = f"-t={handle.session_name}"
         probe = shlex.join([*base, "has-session", target])
         attach = shlex.join([*base, "attach-session", target])
-        return f"{probe} >/dev/null 2>&1 && {attach}"
+        # Size the window for this terminal before the client attaches, as `attach()` does; otherwise
+        # tmux resizes it after the first frame and the provider repaints (DOG-029).
+        fit = shlex.join([sys.executable, "-c", _FIT_BEFORE_ATTACH, str(handle.socket_path), str(handle.config_path),
+                          handle.session_name, handle.provider_pane, handle.bridge_pane, str(handle.bridge_rows),
+                          str(Path(__file__).resolve().parent.parent)])
+        return f"{probe} >/dev/null 2>&1 && {{ {fit} >/dev/null 2>&1; {attach}; }}"
 
     def resize(self, handle: TerminalHandle, *, cols: int, rows: int) -> None:
         self._require_owned(handle)

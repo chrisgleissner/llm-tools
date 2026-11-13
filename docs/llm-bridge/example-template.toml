@@ -1,0 +1,49 @@
+# Example mission template. Copy it to <config dir>/llm-tools/templates/release.toml
+# (next to config.toml, usually ~/.config/llm-tools/templates/) and run:
+#   llm-bridge mission create --template release
+# or give the file directly:
+#   llm-bridge mission create --template docs/llm-bridge/example-template.toml
+# See docs/llm-bridge/templates.md for every key.
+
+template = 1                      # schema version; required
+name = "Release train"            # optional; --name overrides it
+objective = """
+Prepare and verify the next release.
+Keep each change small and reviewable.
+"""
+
+[rotation]                        # optional; use providers or routes, as on the command line
+providers = ["claude", "codex"]
+
+[policy]                          # optional; every key matches a mission create option
+teams = "on"
+token_spend = "medium"
+mode = "background"               # native, background or headless
+# trust_folder = true
+# auto_continue = true
+# log_max_bytes = 4194304
+# log_rotations = 3
+# log_retained_runs = 20
+# capacity_refresh_seconds = 60
+
+[verifier]                        # optional; command or argv, not both
+command = "python -m pytest -q"
+files = ["tests/conftest.py"]     # extra files to hash, relative to the mission folder
+timeout_seconds = 300
+
+[[tasks]]
+id = "changelog"                  # letters, digits, '_', '.', '-'; local to this file
+title = "Update the changelog"
+body = "Add an entry for every merged change since the last release."
+acceptance = ["CHANGELOG.md lists each merged change"]
+
+[[tasks]]
+id = "bump"
+title = "Bump the version"
+body = "Update the version string and the lock file."
+depends_on = ["changelog"]
+
+[[tasks]]
+id = "verify"
+title = "Run the full test suite"
+depends_on = ["changelog", "bump"]   # body defaults to the title

@@ -297,8 +297,10 @@ def _build_parser(
     mission = sub.add_parser("mission", help="create or list missions")
     mission_sub = mission.add_subparsers(dest="mission_action", required=True)
     create = mission_sub.add_parser("create", help="create a mission and its first task")
-    _read_prompt_args(create, "mission objective and first task")
+    # --template supplies the objective, so the prompt is checked after parsing (see _parse_arguments).
+    _read_prompt_args(create, "mission objective and first task", required=False)
     _add_mission_create_args(create)
+    create.add_argument("--template", metavar="NAME|PATH", default=None, help="create the mission from a template: a TOML file with objective, tasks, dependencies, verifier, rotation and policy. NAME is NAME.toml in the templates folder next to the llm-tools config; a value with '/' or ending .toml is a file path. Options on the command line override the template; --prompt/--file replaces its objective. See help templates")
     _add_json_arg(create)
     listing = mission_sub.add_parser("list", help="list every mission (the same listing as llm-bridge missions)")
     listing.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
@@ -315,6 +317,16 @@ def _build_parser(
     mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
     mission_delete.add_argument("--force", action="store_true", help="delete a mission whose isolated worktree holds uncommitted or unmerged work; the mission is removed, the worktree and branch are kept")
     _add_json_arg(mission_delete)
+    mission_export = mission_sub.add_parser(
+        "export", help="write a mission's objective, tasks, verifier, rotation and policy as a template file",
+        description="Write the mission as a template that mission create --template can read back. The file contains the task prompts and the "
+                    "verifier command line, so treat it like the mission itself; it is written readable by you only, and an existing file "
+                    "is never overwritten without --force. --template - prints it to standard output.")
+    _add_mission_arg(mission_export, default_mission)
+    mission_export.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
+    mission_export.add_argument("--template", metavar="PATH|NAME", required=True, help="where to write: a file path (with '/' or ending .toml), a bare NAME for the templates folder, or - for standard output")
+    mission_export.add_argument("--force", action="store_true", help="overwrite an existing file")
+    _add_json_arg(mission_export)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
     mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
@@ -614,8 +626,16 @@ def _parse_arguments(arguments: list[str]) -> argparse.Namespace:
         cut = arguments.index("--")
         parsed = _parse_arguments_core(arguments[:cut])
         parsed.verifier_after_dashes = arguments[cut + 1:]
-        return parsed
-    return _parse_arguments_core(arguments)
+    else:
+        parsed = _parse_arguments_core(arguments)
+    if arguments[:2] == ["mission", "create"]:
+        from .bridge_templates import explicit_options
+
+        if parsed.template is not None:
+            parsed.explicit_options = explicit_options(arguments)  # only a template needs to know what was typed
+        if parsed.template is None and parsed.prompt is None and parsed.prompt_file is None:
+            _build_parser().error("one of the arguments --file/--prompt-file --prompt is required")
+    return parsed
 
 
 def _parse_arguments_core(arguments: list[str]) -> argparse.Namespace:
