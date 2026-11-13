@@ -1602,6 +1602,8 @@ class TmuxTerminalBackend:
 
         return MissionLock(default_state_dir() / "locks", match.group(1))
 
+    _FAILED_ATTACH_RECLAIM_SECONDS = 3.0
+
     def _reclaim_after_failed_attach(self, handle: TerminalHandle) -> None:
         """Remove the dead socket of a failed attach, unless a controller may be binding it.
 
@@ -1617,9 +1619,18 @@ class TmuxTerminalBackend:
             except (BlockingIOError, OSError):
                 return
         try:
-            self.reclaim_dead_station(handle.socket_path)
-        except (OSError, RuntimeError):
-            pass
+            # The client returns as soon as the server told it the session does not exist. The server
+            # that attach-session started closes its listener a moment later, and until then the
+            # socket accepts connections and must not be touched. Wait for it to go.
+            deadline = time.monotonic() + self._FAILED_ATTACH_RECLAIM_SECONDS
+            while True:
+                try:
+                    self.reclaim_dead_station(handle.socket_path)
+                except (OSError, RuntimeError):
+                    return
+                if not handle.socket_path.exists() or time.monotonic() >= deadline:
+                    return
+                time.sleep(0.02)
         finally:
             if lock is not None:
                 lock.release()

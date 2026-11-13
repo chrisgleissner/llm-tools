@@ -231,6 +231,39 @@ def test_attach_removes_the_socket_a_failed_attach_leaves_behind(tmp_path: Path,
     assert not socket_path.exists()
 
 
+def test_failed_attach_waits_for_the_server_it_started_to_close_its_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failed client returns before the server it started has closed its listener.
+
+    Until then the socket accepts connections and `reclaim_dead_station` rightly leaves it alone. The
+    reclaim after a failed attach must retry rather than give up on the first refusal (measured: a
+    socket was left behind in 6 of 200 concurrent attaches to a missing session).
+    """
+    socket_path = _dead_socket(_private_dir(tmp_path) / "station.sock")
+    handle = TerminalHandle(socket_path, socket_path.with_name("station.sock.conf"), "gone", "%0", "%1", 6)
+    backend = TmuxTerminalBackend()
+    real = backend.reclaim_dead_station
+    calls: list[int] = []
+
+    def reclaim(path: str | Path) -> bool:
+        calls.append(1)
+        return False if len(calls) < 4 else real(path)  # the listener is still open for three attempts
+
+    monkeypatch.setattr(backend, "reclaim_dead_station", reclaim)
+    backend._reclaim_after_failed_attach(handle)
+    assert len(calls) == 4
+    assert not socket_path.exists()
+
+
+def test_failed_attach_gives_up_on_a_socket_that_stays_reachable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    socket_path = _dead_socket(_private_dir(tmp_path) / "station.sock")
+    handle = TerminalHandle(socket_path, socket_path.with_name("station.sock.conf"), "gone", "%0", "%1", 6)
+    backend = TmuxTerminalBackend()
+    monkeypatch.setattr(TmuxTerminalBackend, "_FAILED_ATTACH_RECLAIM_SECONDS", 0.1)
+    monkeypatch.setattr(backend, "reclaim_dead_station", lambda path: False)
+    backend._reclaim_after_failed_attach(handle)
+    assert socket_path.exists()
+
+
 # stop(), an attach client that lost its server, and reclaim_dead_station() can
 # all clean the same dead station at once. Each test below removes the files, as
 # a concurrent cleaner would, at one specific point inside the shared removal helper. The tests
