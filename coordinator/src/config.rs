@@ -71,6 +71,8 @@ pub struct Config {
     pub backup_dir: Option<String>,
     /// Test hook: when above 0, the interval in seconds, replacing `backup_interval_hours`.
     pub backup_interval_seconds: u64,
+    /// Opt-in daily check of GitHub releases for a newer coordinator (PRD-011). Off by default.
+    pub update_check: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -130,6 +132,7 @@ impl Default for Config {
             backup_keep: 7,
             backup_dir: None,
             backup_interval_seconds: 0,
+            update_check: false,
         }
     }
 }
@@ -215,7 +218,10 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
     # directory (default: backups in the data directory, mode 0700). See install.md.\n\
     backup_interval_hours = {}\n\
     backup_keep = {}\n\
-    # backup_dir = \"/var/backups/bridge-coordinator\"\n",
+    # backup_dir = \"/var/backups/bridge-coordinator\"\n\
+    # Opt-in: once a day ask the public GitHub releases API whether a newer release exists. Sends only a\n\
+    # generic User-Agent (bridge-coordinator); no cookies, no install id. See coordinator.md.\n\
+    update_check = false\n",
         d.min_tls,
         d.max_events_per_worker,
         d.max_connections,

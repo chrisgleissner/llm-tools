@@ -4,8 +4,7 @@
 //! Every check is `{value, status: ok|warn|fail, fix}`. All thresholds are in [`THRESHOLDS`] and are
 //! listed in `docs/distributed/coordinator.md` (Diagnostics thresholds). Nothing leaves the host: the
 //! values are computed from the local database, files and process, and returned to the caller only.
-//! An update-availability check is deliberately absent; it would need an outbound request and is
-//! opt-in only, not implemented.
+//! The opt-in update-availability check reads the local cache maintained by the server.
 
 use crate::backups::{self, Attempt, AttemptResult};
 use crate::config::Config;
@@ -150,6 +149,8 @@ pub struct Inputs {
     pub backup: BackupInputs,
     pub server_cert_not_after: Option<i64>,
     pub ca_cert_not_after: Option<i64>,
+    pub update_enabled: bool,
+    pub update: Option<crate::update_check::Cache>,
 }
 
 const NEEDS_SERVICE: &str = "known only to the running service: read GET /api/v1/diagnostics";
@@ -168,6 +169,24 @@ pub fn build(i: &Inputs, t: &Thresholds) -> Value {
     };
 
     add("version", check(i.versions.clone(), Status::Ok, ""));
+    add(
+        "update_check",
+        if !i.update_enabled {
+            check(json!("off"), Status::Ok, "")
+        } else {
+            let current = i.versions["coordinator"].as_str().unwrap_or(env!("CARGO_PKG_VERSION"));
+            let text = crate::update_check::describe(current, i.update.as_ref());
+            if text.starts_with("update available") {
+                check(
+                    json!(text),
+                    Status::Warn,
+                    "a newer coordinator release exists: read its release notes, then upgrade as described in install.md",
+                )
+            } else {
+                check(json!(text), Status::Ok, "")
+            }
+        },
+    );
     add(
         "schema_version",
         check(
@@ -669,6 +688,8 @@ fn report(data_dir: &Path, cfg: &Config, facts: DbFacts, runtime: Option<Runtime
         },
         server_cert_not_after: cert_expiry(&server_cert),
         ca_cert_not_after: cert_expiry(&data_dir.join("ca.pem")),
+        update_enabled: cfg.update_check,
+        update: if cfg.update_check { crate::update_check::read_cache(data_dir) } else { None },
     };
     build(&inputs, &THRESHOLDS)
 }
@@ -737,11 +758,59 @@ mod tests {
             },
             server_cert_not_after: Some(10_000_000 + 400 * 86_400),
             ca_cert_not_after: Some(10_000_000 + 1000 * 86_400),
+            update_enabled: false,
+            update: None,
         }
     }
 
     fn status(r: &Value, name: &str) -> String {
         r["checks"][name]["status"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn update_check_is_off_by_default_and_says_so() {
+        let r = build(&base(), &THRESHOLDS);
+        assert_eq!(status(&r, "update_check"), "ok");
+        assert_eq!(r["checks"]["update_check"]["value"], "off");
+    }
+
+    #[test]
+    fn update_available_is_a_warning_with_a_fix() {
+        let mut i = base();
+        i.update_enabled = true;
+        i.versions = json!({"coordinator": "1.5.0"});
+        i.update = Some(crate::update_check::Cache {
+            checked_at: i.now,
+            latest: Some("1.6.0".into()),
+            error: None,
+        });
+        let r = build(&i, &THRESHOLDS);
+        assert_eq!(status(&r, "update_check"), "warn");
+        assert_eq!(r["checks"]["update_check"]["value"], "update available: 1.6.0");
+        assert!(!r["checks"]["update_check"]["fix"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn up_to_date_and_failed_checks_are_not_warnings() {
+        let mut i = base();
+        i.update_enabled = true;
+        i.versions = json!({"coordinator": "1.5.0"});
+        i.update = Some(crate::update_check::Cache {
+            checked_at: i.now,
+            latest: Some("1.5.0".into()),
+            error: None,
+        });
+        let r = build(&i, &THRESHOLDS);
+        assert_eq!(status(&r, "update_check"), "ok");
+        assert_eq!(r["checks"]["update_check"]["value"], "up to date");
+        i.update = Some(crate::update_check::Cache {
+            checked_at: i.now,
+            latest: None,
+            error: Some("HTTP 403".into()),
+        });
+        let r = build(&i, &THRESHOLDS);
+        assert_eq!(status(&r, "update_check"), "ok");
+        assert!(r["checks"]["update_check"]["value"].as_str().unwrap().starts_with("check failed"));
     }
 
     #[test]

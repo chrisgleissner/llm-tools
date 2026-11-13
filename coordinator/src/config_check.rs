@@ -125,6 +125,11 @@ fn specs() -> Vec<Spec> {
             default: n(d.backup_interval_seconds),
         },
         Spec {
+            key: "update_check",
+            kind: Kind::Bool,
+            default: Some(d.update_check.to_string()),
+        },
+        Spec {
             key: "min_tls",
             kind: Kind::Choice(&["1.3", "1.2"]),
             default: Some(format!("{:?}", d.min_tls)),
