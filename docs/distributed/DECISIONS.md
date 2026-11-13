@@ -296,6 +296,15 @@ and is unchanged in `budget.json`.
 The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
+Addendum, 2026-11-13 (PRD-014): the gzip cap of the initial JavaScript rises from 31750 to 32000 bytes
+(the raw cap stays 91000). The Missions list needs group headings and a window of rows at 500 missions.
+Both are in a lazy module (`web/src/missions-window.ts`) that the page loads when the active list has
+60 or more missions, and that receives `h` and `reconcile` from the page so that esbuild does not split
+the shared modules into two chunks. The first load still grows: 31717 gzip before, 31911 after
+(+194, of which 142 is the page's own change and 111 a new 110-byte chunk for the route stylesheet
+names, less 62 from the re-split). A fully static version measured 32712. The next change to the
+first load has to remove code or raise the cap again.
+
 ## D18 Web route chunks and the separate routes budget (PRD-037 WP-0, UXR-039)
 
 The redesign adds a state model, shared components and several new pages, so the first load needs room.
@@ -408,6 +417,13 @@ with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until 
 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
+
+Addendum, 2026-11-13 (PRD-014, PRD-015, PRD-016): the routes caps rose to 114900 raw / 47000 gzip for
+JavaScript and 19800 / 5200 for route stylesheets, each the measured figure plus 5% (measured 109461 /
+43380 and 18893 / 4978; before: 93868 raw). The growth is the mission page and its lazy parts: the
+Session block with the turn history, scrollback search and copy, the rotation and settings block,
+and the priority, prerequisite, prompt, Finish and Force stop actions (about 15 KB raw), plus the
+Missions list window module (2.4 KB raw). Nothing of this is in the first load beyond the 250 gzip bytes of D17.
 
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 

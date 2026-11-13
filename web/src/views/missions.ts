@@ -3,6 +3,7 @@
 import * as api from "../api";
 import { debounce, deferSkeleton, disclosure, emptyState, errorBlock, h, searchBox } from "../dom";
 import { store, streamConnecting, subscribe } from "../store";
+import type { MissionWindow } from "../missions-window";
 import {
   attentionCount, attentionGaps, attentionPending, hasLine, hasStatus, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
   type Item, type RowOptions, type RowSpec,
@@ -21,6 +22,11 @@ interface Reply {
   missions: api.MissionEntry[];
   total: number;
 }
+
+/** A list of more mission rows than this is drawn as a window of rows plus spacers; every row of a shorter one is built. */
+export const VIRTUAL_FROM = 60;
+/** Group headings are drawn from this many active missions on. A list that fits a screen or two is read by its state pills, and a heading row would push rows below the fold (T29). */
+export const HEADINGS_FROM = 60;
 
 const updatedMs = (i: Item) => Date.parse(i.entry.mission.updated_at ?? "") || 0;
 
@@ -41,6 +47,8 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   let released = false;
   let heldSince = 0;
   let detailTimer = 0;
+  let win: MissionWindow | null = null;
+  let winLoading = false;
 
   const need = h("span", { "data-q": "need-me" });
   const what = h("span", { "data-q": "what" });
@@ -197,7 +205,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       stateBox.replaceChildren(emptyState({ icon: "search", title: "No missions match", text: "Nothing matches the current search and filters.", action: h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "clear-filters", onclick: clearFilters }, "Clear search and filters")) }));
     } else stateBox.replaceChildren();
 
-    reconcile(list, specs(active));
+    paintList(active);
     finished.hidden = done.length === 0;
     const count = finished.querySelector(".count");
     if (count) count.textContent = `(${done.length})`;
@@ -205,6 +213,16 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     reconcile(finishedList, finished.open || done.length <= 100 ? specs(done) : []);
     total.textContent = shown.length ? `${shown.length} mission${shown.length === 1 ? "" : "s"}` : "";
     fetchDetails(false, active);
+  }
+
+  /** A short list is built whole here; from HEADINGS_FROM missions on the lazy window module draws the headings and, past VIRTUAL_FROM, only the rows near the screen. */
+  function paintList(active: Item[]): void {
+    if (win) return win.set(active, sort === "state" && active.length >= HEADINGS_FROM);
+    if (active.length >= HEADINGS_FROM && !winLoading) {
+      winLoading = true;
+      void import("../missions-window").then((m) => ((win = m.missionWindow({ list, specs, threshold: VIRTUAL_FROM, stopped: () => disposed, h, reconcile })), render()));
+    }
+    reconcile(list, specs(active)); // the whole list until the window module is ready: neither a cut list nor rows without their headings
   }
 
   function renderControls(items: Item[]): void {
@@ -274,6 +292,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     window.clearTimeout(detailTimer);
     window.clearInterval(clock);
     cancelSkeleton?.();
+    win?.dispose();
     un();
     unDetails();
   };
