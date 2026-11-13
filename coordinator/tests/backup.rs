@@ -58,6 +58,24 @@ fn pragma(path: &Path, name: &str) -> i64 {
     Connection::open(path).unwrap().query_row(&format!("PRAGMA {name}"), [], |r| r.get(0)).unwrap()
 }
 
+/// A backup only reads the live database. Setting `auto_vacuum` on it committed a write transaction (and
+/// held the write lock while the log was synced), which made a read-then-write transaction of the serving
+/// coordinator fail with SQLITE_BUSY. `PRAGMA data_version` of another connection changes when any other
+/// connection commits.
+#[test]
+fn a_backup_does_not_commit_to_the_live_database() {
+    let dir = tmp_dir();
+    let db = database_with_free_pages(&dir);
+    let src = db_path(&dir);
+    let observer = Connection::open(&src).unwrap();
+    let version = |c: &Connection| c.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(pragma(&src, "auto_vacuum"), 2);
+    let before = version(&observer);
+    ops::backup(&dir, &dir.join("out.sqlite3")).unwrap();
+    assert_eq!(version(&observer), before, "the backup committed to the live database");
+    drop(db);
+}
+
 #[test]
 fn backup_copy_is_compact_verified_and_has_incremental_vacuum() {
     let dir = tmp_dir();

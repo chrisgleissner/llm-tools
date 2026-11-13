@@ -692,8 +692,12 @@ type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, Str
 impl Db {
     offload_impl! {
     pub fn open(path: &Path) -> R<Db> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // A transaction that reads first and writes later fails with SQLITE_BUSY at once, without waiting
+        // for the busy timeout, when another process holds the write lock at the upgrade. IMMEDIATE takes
+        // the lock at BEGIN, where the busy timeout applies.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
         // Incremental auto-vacuum has to be chosen before the first table exists; an existing
         // database keeps its mode until `bridge-coordinator compact` (or a restore of a backup,
         // which is written compacted with the mode set) rebuilds it.
@@ -2582,6 +2586,36 @@ mod lock_wait_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("test.sqlite3")).unwrap();
         (dir, db)
+    }
+
+    /// Another process (a backup run from the command line, for example) can hold the write lock of the
+    /// database for a moment. A batch of events reads the worker row and then writes; it must wait for
+    /// the lock as the busy timeout allows and not fail at the first write with `SQLITE_BUSY`.
+    #[test]
+    fn a_batch_waits_for_a_write_lock_held_by_another_connection() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        let events = vec![json!({"id": 1, "kind": "task-progress", "mission_id": "m1", "ts": 1})];
+        let outcome = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 0,
+                through: 1,
+                events: &events,
+                mission_cursor: None,
+                missions: None,
+                max: 1000,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventsOutcome::Accepted { .. }));
+        release.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// One test changes the process-wide wait, so the cases run in sequence inside it.
