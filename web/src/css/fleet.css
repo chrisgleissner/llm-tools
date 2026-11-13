@@ -4,9 +4,10 @@
 /* ---------------------------------------------------------------- page head and the one-line answer */
 .fleet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4); }
 .fleet-head h1 { margin: 0; }
-.fleet-filter { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); flex: 1 1 13rem; min-inline-size: 0; }
-/* UXR-054: the select keeps the width of "All workers" at 360; the filter wraps under the title rather than squeezing it */
-.fleet-filter select { inline-size: auto; min-inline-size: 8rem; max-inline-size: min(14rem, 100%); }
+.fleet-filter { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); flex: 1 1 9.5rem; min-inline-size: 0; }
+/* UXR-054: at 360 the select keeps the width of "All workers" on the title row: smaller text and padding, and a smaller gap after the title */
+.fleet-filter select { inline-size: auto; min-inline-size: 7rem; max-inline-size: min(14rem, 100%); }
+@media (max-width: 47.99rem) { .fleet-head:has(.fleet-filter) { column-gap: var(--sp-2); } .fleet-filter select { font-size: var(--fs-md); padding-inline: var(--sp-2); } }
 .answers { margin: var(--sp-2) 0 var(--sp-4); color: var(--text-muted); max-inline-size: 60rem; }
 #view-status { margin-block: 0 var(--sp-3); }
 #view-status:empty { display: none; }

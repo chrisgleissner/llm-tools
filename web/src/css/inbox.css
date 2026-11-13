@@ -9,7 +9,7 @@
 .page-state:empty, .more:empty { display: none; }
 .section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-1) var(--sp-3); margin-block: var(--sp-3) var(--sp-1); }
 .section-head h2 { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
-[data-section="needs-you"] .rows { --pillw: 9.25rem; } 
+[data-section="needs-you"] .rows { --pillw: 8.5rem; }
 [data-section="running"] .rows { --pillw: 6.5rem; }
 .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); container-type: inline-size; }
 .quiet { margin-block: var(--sp-4); }
@@ -40,8 +40,9 @@
 /* With what an approval rests on (verifier result, size of the change) the line is two boxes side by side, each cut at its own end, so the late arrival of the second does not widen the text block of the reason (LCP, T37) */
 .row-reason.one:has(.tail) { display: flex; overflow: visible; }
 .row-reason.one > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* UXR-055: the reason is never cut; the summary after it takes the rest of the line and is cut after a whole word (one clamped line, not a pixel cut) */
-.row-reason.one .tail { flex: 1 1 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; max-block-size: var(--lh-sm); white-space: pre-wrap; }
+/* UXR-055: the reason is never cut; the summary after it takes the rest of the line and is one clamped line, so it is cut after a whole word and ends in an ellipsis. The clamp is on an inner span: a flex item is blockified and loses the clamp. */
+.row-reason.one .tail { flex: 1 1 0; overflow: visible; }
+.tail > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; white-space: pre-wrap; }
 .tail { max-width: 22rem; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }

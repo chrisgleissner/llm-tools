@@ -21,7 +21,7 @@
     "jsRaw": 94000,
     "jsGzip": 38700,
     "cssRaw": 19000,
-    "cssGzip": 5000
+    "cssGzip": 5050
   },
   "lazyRoutes": {
     "login": "Administrator created",

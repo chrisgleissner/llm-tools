@@ -47,7 +47,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   // Only when even that does not fit does the limiting provider show alone. The container clips on its start edge, where scrollWidth shows nothing, so the first chip's position tells.
   const chip = (c: Chip, tight: boolean): HTMLElement => {
     const reset = c.waiting && c.reset ? h("span", { class: "cap-reset" }, ` resets ${c.reset}`) : null;
-    const pct = h("span", { class: "cap-pct" }, `${tight ? "" : " "}${c.percent}%`);
+    const pct = h("span", { class: "cap-pct" }, ` ${c.percent}%`);
     const parts = tight
       ? [h("span", { class: "cap-name" }, c.provider), pct]
       : [h("span", { class: "cap-name" }, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), h("span", {}, pct, ` left${reset ? "," : ""}`)];

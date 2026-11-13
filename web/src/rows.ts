@@ -443,7 +443,7 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
       ...reasons.map((line) => {
         const evidence = rowEvidence(item);
         if (!evidence) return h("span", { class: item.state.id === "needs-approval" ? "row-reason one" : "row-reason clamp-2", title: line }, line);
-        return h("span", { class: "row-reason one", title: `${line} - ${evidence}` }, h("span", {}, line), h("span", { class: "tail" }, ` - ${evidence}`));
+        return h("span", { class: "row-reason one", title: `${line} - ${evidence}` }, h("span", {}, line), h("span", { class: "tail" }, h("span", {}, ` - ${evidence}`)));
       }),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);

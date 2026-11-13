@@ -76,19 +76,20 @@ uxr({ t: "T49", uxr: ["UXR-055"], needs: [...NEEDS] }, "UXR-055: at 1440 an appr
   const m = await row.evaluate((el) => {
     const pill = el.querySelector<HTMLElement>(".pill")!;
     const head = el.querySelector<HTMLElement>(".row-reason > span:first-child")!;
-    const tail = el.querySelector<HTMLElement>(".tail")!;
+    const tail = el.querySelector<HTMLElement>(".tail > span")!;
     const t = getComputedStyle(tail);
     return {
       pillHeight: pill.getBoundingClientRect().height, pillClipped: pill.scrollWidth > pill.clientWidth + 1, pillWrap: getComputedStyle(pill).whiteSpace,
       headCut: head.scrollWidth > head.clientWidth + 1, head: head.textContent, clamp: t.getPropertyValue("-webkit-line-clamp"), tailWrap: t.whiteSpace,
-      tailHeight: tail.getBoundingClientRect().height, lineHeight: parseFloat(t.lineHeight),
+      clipped: tail.scrollHeight > tail.clientHeight + 1, tailHeight: tail.getBoundingClientRect().height, lineHeight: parseFloat(t.lineHeight),
     };
   });
   expect(m.pillHeight, "the pill is one line high").toBeLessThan(34);
   expect(m.pillClipped, "the pill text is not clipped").toBe(false);
   expect(m.pillWrap).toBe("nowrap");
   expect(m.headCut, `the reason "${m.head}" is shown whole`).toBe(false);
-  expect(m.clamp, "the summary clamps at two lines like every clamp, but is one line high: it is cut after a whole word").toBe("2");
+  expect(m.clamp, "the summary after it is one clamped line: it is cut after a whole word and ends in an ellipsis").toBe("1");
+  expect(m.clipped, "the sample summary is longer than the line, so the ellipsis shows").toBe(true);
   expect(m.tailHeight, "and it shows one line").toBeLessThan(m.lineHeight * 1.5);
   expect(m.tailWrap, "the summary can break between words").not.toBe("nowrap");
   await evidence(page, info, ["UXR-055"], "approval-row-1440");
