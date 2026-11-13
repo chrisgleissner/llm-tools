@@ -11,6 +11,11 @@ pub const OUTBOUND_QUEUE: usize = 256;
 pub const STREAM_BUFFER: usize = 32;
 /// Browser fan-out is advisory. Keep each retained message tiny and never duplicate event/result bodies.
 pub const MAX_STREAM_MESSAGE_BYTES: usize = 4 * 1024;
+/// Open browser `/stream` sockets. An upgraded WebSocket no longer holds a TCP connection slot, so this is the only
+/// bound on them. Measured on x86-64 (docs/distributed/capacity-measurements): about 0.19 MiB per client.
+pub const MAX_STREAM_CLIENTS: usize = 128;
+/// Open `/stream` sockets of one login session or API token (several tabs of one user).
+pub const MAX_STREAM_CLIENTS_PER_SESSION: usize = 16;
 pub const MAX_TERMINALS_PER_WORKER: usize = 16;
 pub const MAX_TERMINALS: usize = 64;
 
@@ -36,6 +41,13 @@ pub struct TermReg {
     pub id: String,
     pub attach: oneshot::Receiver<WebSocket>,
     pub status: mpsc::Receiver<TermStatus>,
+}
+
+impl TermReg {
+    /// Count a browser input frame dropped because the worker-side queue was full (diagnostics only).
+    pub fn dropped_input(&self) {
+        self.hub.dropped_terminal_input.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Drop for TermReg {
@@ -76,6 +88,28 @@ pub struct Hub {
     pending: Mutex<HashSet<String>>,
     /// Messages and bytes since start, by direction and message type (diagnostics only; not persisted).
     link: Mutex<LinkCounts>,
+    /// Open `/stream` browser sockets.
+    stream_clients: AtomicUsize,
+    /// Open `/stream` sockets per login session or API token.
+    stream_by: Mutex<HashMap<String, usize>>,
+    /// Browser terminal input frames dropped since start because the per-session byte budget was full.
+    dropped_terminal_input: AtomicU64,
+}
+
+/// Counts one open `/stream` socket for diagnostics.
+pub struct StreamGuard(Arc<Hub>, String);
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.0.stream_clients.fetch_sub(1, Ordering::SeqCst);
+        let mut by = self.0.stream_by.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = by.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                by.remove(&self.1);
+            }
+        }
+    }
 }
 
 /// Marks one worker token as having a connection waiting for its hello (at most one at a time).
@@ -109,6 +143,43 @@ impl Hub {
             active: AtomicUsize::new(0),
             pending: Mutex::new(HashSet::new()),
             link: Mutex::new(BTreeMap::new()),
+            stream_clients: AtomicUsize::new(0),
+            stream_by: Mutex::new(HashMap::new()),
+            dropped_terminal_input: AtomicU64::new(0),
+        })
+    }
+
+    /// Claim one `/stream` slot for the session or token `key`; `Err` carries the refusal text.
+    pub fn try_stream_open(self: &Arc<Self>, key: &str) -> Result<StreamGuard, String> {
+        let mut by = self.stream_by.lock().unwrap_or_else(|e| e.into_inner());
+        if by.get(key).copied().unwrap_or(0) >= MAX_STREAM_CLIENTS_PER_SESSION {
+            return Err(format!(
+                "this session already has {MAX_STREAM_CLIENTS_PER_SESSION} browser streams open; close a tab and retry"
+            ));
+        }
+        if self.stream_clients.fetch_add(1, Ordering::SeqCst) >= MAX_STREAM_CLIENTS {
+            self.stream_clients.fetch_sub(1, Ordering::SeqCst);
+            return Err(format!(
+                "the coordinator already serves {MAX_STREAM_CLIENTS} browser streams; close one and retry"
+            ));
+        }
+        *by.entry(key.to_string()).or_default() += 1;
+        Ok(StreamGuard(self.clone(), key.to_string()))
+    }
+
+    /// Resource counters for `GET /api/v1/diagnostics` (capacity plan F9). All are cheap reads.
+    pub fn resource_counts(&self) -> serde_json::Value {
+        let (depth_max, depth_total) = self.map().values().fold((0usize, 0usize), |(max, total), h| {
+            let depth = OUTBOUND_QUEUE - h.tx.capacity().min(OUTBOUND_QUEUE);
+            (max.max(depth), total + depth)
+        });
+        serde_json::json!({
+            "worker_connections": self.active.load(Ordering::SeqCst),
+            "outbound_queue_depth_max": depth_max,
+            "outbound_queue_depth_total": depth_total,
+            "stream_clients": self.stream_clients.load(Ordering::SeqCst),
+            "terminal_sessions": self.terminal_count(),
+            "terminal_input_frames_dropped": self.dropped_terminal_input.load(Ordering::Relaxed),
         })
     }
 

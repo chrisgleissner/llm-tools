@@ -74,6 +74,9 @@ def _worker_command(args: argparse.Namespace) -> int:
     print(f"Worker {session.config.name} connecting to {session.config.coordinator_url}; Ctrl-C stops it.", flush=True)
     try:
         worker.run(session, worker.websocket_connector(), stop=stop, log=lambda text: print(text, file=sys.stderr, flush=True))
+    except worker.WorkerFatalError as exc:
+        print(f"Error: {exc}", file=sys.stderr, flush=True)
+        return 1
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -99,11 +102,16 @@ def _format_worker_status(value: dict[str, Any]) -> str:
         "disconnected": "disconnected from the coordinator",
         "last-connected": "last connection ended or is unavailable",
         "not-connected": "not connected yet",
+        "refused": "refused by the coordinator (not reconnecting)",
     }.get(str(value.get("connection_state")), "connection state unknown")
     lines = [f"Worker {value.get('name', 'unknown')} · {connection}", f"Coordinator: {value.get('coordinator_url', 'unknown')}"]
     last_connected = value.get("last_connected_at")
     if last_connected:
         lines.append(f"Last connected: {last_connected}")
+    if value.get("missions_refused"):
+        lines.append(f"{value['missions_refused']} missions refused by coordinator cap (at most {value.get('missions_cap')} per worker); finish or delete missions")
+    if value.get("refused_code"):
+        lines.append(f"Refused: {value['refused_code']}. Fix: {value.get('refused_fix')}")
     lines.append(f"Worker service: {value.get('service_state', 'unknown')}")
     lines.append(f"Remote access: {'control and terminal' if value.get('allow_control') else 'read-only'}")
     lines.append(f"Remote creation: {'allowed' if value.get('allow_create') else 'disabled'}")

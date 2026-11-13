@@ -233,7 +233,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
 | GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
 | GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
-| POST | `/workers` | `{name}` → one-time `{token, mutual_tls}` and, when coordinator `worker_mtls` is enabled, the client certificate/private key. |
+| POST | `/workers` | `{name}` → one-time `{token, mutual_tls}` and, when coordinator `worker_mtls` is enabled, the client certificate/private key. At most 256 enrolled workers; the 257th gets 409 `too-many-workers` (revoke one first). |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, expiry metadata, optional `allowed_cidrs`, and optional `allowed_workers`. Requires an administrator session or an `admin` token. |
 | POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?, allowed_workers?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses; up to 32 existing worker names may restrict object access. Empty worker restrictions mean all workers. Worker-bound tokens see filtered worker/mission lists and must name an allowed worker on worker, mission and terminal routes; global audit, diagnostics, token management, and low-level `/commands` are denied. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
@@ -252,7 +252,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/stream` | WebSocket; pushes change notices: `worker` (state), `event`, `command` and `terminal`. A notice never carries events, request parameters or results, so its size does not depend on the data: see "Browser stream" below. |
 | GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation; the frame and backlog bounds are specified there and the session counts are in the limits table below (over the cap: `x` frame, close 1013). Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
 | GET | `/worker/terminal/{session_id}` | Worker side of a session; worker bearer token; accepted once, only for a session opened for that worker. |
-| GET | `/diagnostics` | Admin only. Versions, uptime, RSS, DB size, connected workers, queue depths, and `link_bytes` (messages and bytes since start by direction and message type), plus `status` (worst of all checks), `checks` and `backup`; see Diagnostics and backups below. |
+| GET | `/diagnostics` | Admin only. Versions, uptime, RSS, DB size, connected workers, queue depths, `enrolled_workers`, `missions_indexed`, `resources` (`worker_connections`, `outbound_queue_depth_max`, `outbound_queue_depth_total`, `stream_clients`, `terminal_sessions`, `terminal_input_frames_dropped`), `warnings` (workers over the mission cap), and `link_bytes` (messages and bytes since start by direction and message type), plus `status` (worst of all checks), `checks` and `backup`; see Diagnostics and backups below. |
 
 ### Diagnostics and backups (PRD-011, PRD-013)
 
@@ -420,6 +420,8 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Wait for the next HTTP request header (keep-alive idle and slow-header limit) | 30 s | `http_idle_timeout_secs` |
 | Receive a complete request body once the handler reads it (slow-body limit); the connection is closed with 408 | 30 s | `request_body_timeout_secs` |
 | Browser `/stream` and `/terminal` WebSockets | server ping every 30 s; closed with 1001 `idle timeout` when nothing (pong or message) arrived for 90 s, checked at each ping | `ws_ping_interval_secs`, `ws_idle_timeout_secs` |
+| Enrolled workers | 256; the 257th enrolment gets 409 `too-many-workers` | fixed |
+| Missions indexed | 5 000 per `hello` (`invalid-message`); 10 000 summaries per worker, over which the finished ones the coordinator touched longest ago are dropped and, if all are active, the newest excess is not indexed (diagnostics warning `missions-over-cap`); a hello is never answered with an error for this | fixed |
 | Worker connections | 64; ping every 20 s; closed after 60 s of silence | fixed |
 | Terminal sessions | 16 per worker, 64 total | fixed |
 | Terminal relay queues | 256 KiB of worker output awaiting a browser and 128 KiB of browser input awaiting a worker per session; at the 64-session cap, queued frame text is at most 24 MiB total; browser input is also at most 64 KiB decoded per frame | fixed |
@@ -429,6 +431,7 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Graceful shutdown | 10 s | fixed |
 | Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers); durable pending requests also have a 64 KiB per-request, 512 KiB per-worker and 8 MiB coordinator-wide byte cap | fixed |
 | Worker protocol event batch | 500 events and 128 KiB serialized event data maximum (the whole message remains capped at 1 MiB) | fixed |
+| Browser `/stream` sockets | 128 in total and 16 per login session or API token (Bridge has one operator, so every session is the same person and one user cannot starve another; no per-user quota is planned); over either the upgrade gets 503 `busy` with Retry-After. An upgraded WebSocket no longer holds a TCP connection slot | fixed |
 | Browser change stream | 32 retained messages, each at most 4 KiB; event and command bodies are fetched through their scoped API resources rather than retained in the fan-out ring | fixed |
 | Worker terminal status queue | 16 small messages per terminal; reason text is capped at 256 bytes and excess advisory updates are dropped | fixed |
 | Stored events per worker | 50 000, oldest deleted first, in passes that keep 90 % of the cap once it is reached (worker databases keep the authoritative copy) | `max_events_per_worker` |

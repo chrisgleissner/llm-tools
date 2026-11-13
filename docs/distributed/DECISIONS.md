@@ -918,3 +918,19 @@ The coordinator stores no provider usage, so placement reads the latest `usage.s
 
 `command_template` replaces the provider command on the worker, so it is refused for remote creation in the same way as a verifier command (D47).
 
+## D56 Capacity caps and what stays open (FIND-006, FIND-009, PRD-009)
+
+Measurements are in `capacity-plan.md`. Mission summaries: at most 10 000 per worker. On a hello or an events upsert above that, the coordinator drops the worker's oldest finished summaries first. If every remaining summary is active it does not index the newest excess and sets the diagnostics warning `missions-over-cap`. It never rejects a hello and never closes with 1008 for this. A first version refused the hello above a coordinator-wide 10 000; a refused worker reconnects with its normal backoff, so that cap caused a reconnect storm. `too-many-missions` is removed from the protocol.
+
+`/stream`: 128 sockets in total and 16 per login session or API token, answered with 503 `busy`. An upgraded WebSocket releases its TCP connection slot, so the TCP cap does not bound it. Enrolment: 256 workers, with the name check, count and insert in one transaction.
+
+The Python worker resets its reconnect backoff only after a `welcome`, and stops (exit status 1, status `refused`) on `worker-id-mismatch`, `unsupported-version` or a "worker revoked" close, because retrying cannot succeed.
+
+Deferred: F7 (events per second limit). No rate was found at which the coordinator fails (10 000 events/s on x86-64 at 38 MiB), and a limit needs a protocol error code and worker retry behaviour; revisit with physical-Pi figures. The rest of F8 (a bounded 503 reply instead of a silent drop above the 256 TCP slots) needs a change in the accept loop.
+
+FIND-009 stays open until a 24 h run on the physical Pi with `memory.events` sampled. The 96 MiB limit is kept: anonymous memory peaked at about 60 MiB on the emulated Pi and no kill occurred.
+
+Review follow-up. Eviction orders by `missions.touched_at`, a coordinator-side column set on insert and on every change of a summary (schema version 18, which also adds the refused count and time to `workers`); the worker's `updated_at` is not trusted. The worker sends a bounded hello (all active missions, then the newest finished, at most 2000 or 640 KiB) and the rest in `events` batches after the `welcome`, because the coordinator still rejects a hello above 5000 missions or 1 MiB. A refused summary is counted on the worker row and reported to the worker in a `notice` message. The worker's backoff starts over only after 30 s of uptime after a welcome. A per-user `/stream` quota is not planned: Bridge has one operator, so all sessions are the same person.
+
+Second review follow-up. Replayed summaries (`replay: true` on the deferred `events` batches, optional field, resent without it to an older coordinator) take `touched_at` values below the worker's minimum, decreasing in arrival order, so over the cap they are evicted before hello rows and live updates; the worker sends them newest first. Refused ids are stored as a set (`worker_refused_missions`) and counted once; the count falls only when an id is stored, deleted or replaced by a new hello. Migration 18 numbers existing rows by `updated_at` and adds the index `missions_worker_touched(worker, touched_at)`. The worker keeps the last `notice` in its state file.
+
