@@ -64,7 +64,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
         "command.ack" => (&["request_id", "status"], &[]),
         "command.result" => (&["schema_version", "request_id", "operation", "outcome", "result", "error"], &[]),
-        "events" => (&["after", "through", "events"], &["mission_cursor", "missions", "deleted_missions"]),
+        "events" => (&["after", "through", "events"], &["mission_cursor", "missions", "deleted_missions", "replay"]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
         "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
@@ -157,6 +157,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
             };
             if serde_json::to_vec(events).map_or(true, |bytes| bytes.len() > MAX_EVENT_BATCH_BYTES) {
                 return perr("message-too-large", format!("event batch exceeds {MAX_EVENT_BATCH_BYTES} bytes"));
+            }
+            if p.get("replay").is_some_and(|r| !r.is_boolean()) {
+                return perr("invalid-message", "replay must be a boolean");
             }
             let mut previous = after;
             for e in events {

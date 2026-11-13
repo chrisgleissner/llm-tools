@@ -68,22 +68,30 @@ the hello deadline), and a frame above 1 MiB closes the connection with 1009. A 
 hello: all active missions first, then the newest finished ones, until 2000 missions or a frame budget of 640 KiB
 (measured on the encoded frame) is reached. It sends the remaining summaries after the `welcome` in `events`
 messages with no events (`through == after`, `mission_cursor` equal to the cursor), at most 1000 summaries and
-about 384 KiB each, oldest finished last-to-first so their relative age is kept.
+about 384 KiB each, active ones first and then finished ones newest first. These batches carry the optional field
+`replay: true`. A coordinator from before this field rejects it with `invalid-message` (`in_reply_to` the batch);
+the worker then sends the same summaries without the field for the rest of that connection.
 
 The coordinator keeps at most 10 000 mission summaries per worker. A `hello` or an `events` upsert is never
 refused for this. When a worker exceeds the limit, the coordinator drops the finished summaries it touched longest
-ago first (`missions.touched_at`, set by the coordinator when a row is inserted or its summary changes; the
-worker's `updated_at` is not used). In a `hello` the first mission listed counts as the newest. An update of a
-stored mission is never refused. If the remaining summaries are all active, the newest excess ids are not
-indexed. The coordinator stores the number refused and the time on the worker row (so `GET /api/v1/diagnostics`
-shows the warning `missions-over-cap` with both, also after a restart) and sends the worker a `notice` message.
+ago first (`missions.touched_at`, set by the coordinator; the worker's `updated_at` is not used). In a `hello`
+the first mission listed counts as the newest. A live update, with or without a change of a stored row, is
+touched now. For a `replay` batch, a new row gets a value below every stored row of the worker, decreasing in
+arrival order, and a stored row keeps its place, so replayed old rows always rank older than the hello rows and
+than live updates, and the order the worker sent them in is kept. An update of a stored mission is never refused.
+If the remaining summaries are all active, the newest excess ids are not indexed. The coordinator remembers each
+refused id once (table `worker_refused_missions`, at most 10 000 per worker), however often it is sent again, and
+forgets it when the mission is stored later, deleted (tombstone) or the worker sends a new `hello`. The count of
+remembered ids, with the last refusal time, is the `missions-over-cap` warning in `GET /api/v1/diagnostics`; it
+survives a restart and is gone only when the set is empty. The coordinator sends the worker a `notice` message
+when the count changes.
 
 | Type | Direction | Payload |
 |---|---|---|
-| `notice` | coordinator to worker | `code` (`missions-over-cap`), `refused` (summaries refused so far; 0 when the warning cleared), `cap`, `message`. Sent when the count changes. |
+| `notice` | coordinator to worker | `code` (`missions-over-cap`), `refused` (distinct mission ids refused now; 0 when the warning cleared), `cap`, `message`. Sent only when the count changes. |
 
 A worker that does not know `notice` answers with an `error` `unsupported-message`, which the coordinator ignores.
-The Python worker records the notice, and `llm-bridge worker status` shows "N missions refused by coordinator cap".
+The Python worker keeps the last notice in its state file (not only in the audit log), and `llm-bridge worker status` shows "N missions refused by coordinator cap".
 
 Fatal refusals. After the error codes `worker-id-mismatch` and `unsupported-version`, or the close reason
 `worker revoked`, reconnecting cannot succeed until the operator acts. The Python worker stops, logs one error

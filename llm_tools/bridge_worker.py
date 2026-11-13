@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -114,6 +114,7 @@ class WorkerConfig:
     allow_power: bool = False
     allow_restore: bool = False
     client_certificate: bool = False
+    coordinator_notice: dict[str, Any] = field(default_factory=dict)  # the last `notice` (refused missions), kept across restarts
 
     @property
     def terminal_view(self) -> bool:
@@ -309,11 +310,11 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
         connection_state = "last-connected"
     else:
         connection_state = "not-connected"
-    notices = [entry for entry in read_audit(200, env) if entry.get("action") == "coordinator.notice"]
-    refused = int(notices[-1].get("refused") or 0) if notices else 0
+    notice = config.coordinator_notice
+    refused = int(notice.get("refused") or 0)
     return {
         **config.public(),
-        **({"missions_refused": refused, "missions_cap": notices[-1].get("cap")} if refused else {}),
+        **({"missions_refused": refused, "missions_cap": notice.get("cap")} if refused else {}),
         "connection_state": connection_state,
         "last_connected_at": last_connected,
         "service_state": service_state,
@@ -445,6 +446,7 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             allow_roots=_stored_roots(value.get("allow_roots", [])),
             allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
             client_certificate=bool(value.get("client_certificate", False)),
+            coordinator_notice=dict(value.get("coordinator_notice") or {}),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -594,6 +596,7 @@ class InFlightBatch:
     through: int
     message_id: str = ""
     tombstones: tuple[str, ...] = ()  # deleted mission IDs this batch carries; marked replicated once its pong arrives
+    replay: tuple[dict[str, Any], ...] = ()  # the replayed summaries this batch carries, offered again if the coordinator rejects `replay`
 
 
 class WorkerSession:
@@ -627,6 +630,7 @@ class WorkerSession:
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
         self.fatal: WorkerFatalError | None = None  # set when the coordinator refused this worker for good
         self.deferred_missions: list[dict[str, Any]] = []  # summaries that did not fit in the hello
+        self.replay_unsupported = False  # the coordinator rejected the optional `replay` marker on this connection
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
@@ -697,8 +701,10 @@ class WorkerSession:
                 break
             taken -= 1  # the estimate was low (escaping, separators): measure the encoded frame and shrink
         rest = ordered[taken:]
-        # Oldest finished first, so the coordinator's own ordering of the late rows keeps their relative age.
-        self.deferred_missions = [item for item in rest if is_active(item)] + [item for item in reversed(rest) if not is_active(item)]
+        # Newest first: the coordinator ranks replayed rows below everything stored, in arrival order, so the
+        # order sent is the order of importance.
+        self.deferred_missions = [item for item in rest if is_active(item)] + [item for item in rest if not is_active(item)]
+        self.replay_unsupported = False
         return message
 
     def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
@@ -841,13 +847,22 @@ class WorkerSession:
             return []
         if message.type == "notice":
             refused = int(message.payload.get("refused", 0) or 0)
-            self.audit("coordinator.notice", code=str(message.payload.get("code", ""))[:64], refused=refused,
-                       cap=int(message.payload.get("cap", 0) or 0))
+            cap = int(message.payload.get("cap", 0) or 0)
+            self.audit("coordinator.notice", code=str(message.payload.get("code", ""))[:64], refused=refused, cap=cap)
+            notice = {"code": str(message.payload.get("code", ""))[:64], "refused": refused, "cap": cap} if refused else {}
+            if notice != self.config.coordinator_notice:
+                self.config = dataclasses.replace(self.config, coordinator_notice=notice)
+                self.save(self.config)  # `worker status` reads it from the state file, not from the audit log
             return []
         if message.type == "error":
             code = str(message.payload.get("code", ""))
             if code in FATAL_COORDINATOR_CODES and self.generation == 0:
                 self.fatal = WorkerFatalError(code, str(message.payload.get("message", ""))[:200])
+                return []
+            if self.inflight is not None and self.inflight.replay and message.payload.get("in_reply_to") == self.inflight.message_id:
+                # A coordinator from before `replay` rejects the optional field: send the same summaries without it.
+                self.replay_unsupported = True
+                self.deferred_missions = list(self.inflight.replay) + self.deferred_missions
                 return []
             if self.inflight is not None and self.inflight.tombstones and message.payload.get("in_reply_to") == self.inflight.message_id:
                 # A coordinator from before PRD-038 rejects the unknown field. Keep the tombstones pending
@@ -1066,10 +1081,13 @@ class WorkerSession:
                         break
                     size += item_size
                     chunk.append(self.deferred_missions.pop(0))
-                batch = self.message("events", {"after": self.cursor, "through": self.cursor, "events": [],
-                                                 "mission_cursor": self.cursor, "missions": chunk})
+                body: dict[str, Any] = {"after": self.cursor, "through": self.cursor, "events": [],
+                                        "mission_cursor": self.cursor, "missions": chunk}
+                if not self.replay_unsupported:
+                    body["replay"] = True  # optional marker; an older coordinator rejects it and gets the chunk again without it
+                batch = self.message("events", body)
                 self.batch_seq += 1
-                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id)
+                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, replay=tuple(chunk))
                 self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
                 return batch
             events, through = self._replicable_events(store, self.cursor)

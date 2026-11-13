@@ -36,7 +36,7 @@ MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "command": (frozenset({"schema_version", "operation", "params", "mission_id", "target", "request_id"}), frozenset()),
     "command.ack": (frozenset({"request_id", "status"}), frozenset()),
     "command.result": (frozenset({"schema_version", "request_id", "operation", "outcome", "result", "error"}), frozenset()),
-    "events": (frozenset({"after", "through", "events"}), frozenset({"mission_cursor", "missions", "deleted_missions"})),
+    "events": (frozenset({"after", "through", "events"}), frozenset({"mission_cursor", "missions", "deleted_missions", "replay"})),
     "events.nack": (frozenset({"expected_after"}), frozenset()),
     "terminal.open": (frozenset({"session_id", "mission_id", "mode", "cols", "rows"}), frozenset()),
     "terminal.close": (frozenset({"session_id"}), frozenset()),
@@ -133,6 +133,8 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
             if (not isinstance(deleted, list) or len(deleted) > MAX_DELETED_MISSIONS_PER_MESSAGE
                     or any(not isinstance(item, str) or not _DELETED_MISSION_ID.fullmatch(item) for item in deleted)):
                 raise ProtocolError("invalid-message", f"deleted_missions must be a list of at most {MAX_DELETED_MISSIONS_PER_MESSAGE} mission IDs")
+        if "replay" in payload and not isinstance(payload["replay"], bool):
+            raise ProtocolError("invalid-message", "replay must be a boolean")
         if "mission_cursor" in payload and _int(payload["mission_cursor"], "mission_cursor") > through:
             raise ProtocolError("invalid-message", "mission_cursor must not be greater than through")
         if through < after:

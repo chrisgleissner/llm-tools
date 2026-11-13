@@ -88,3 +88,39 @@ def test_a_refusal_notice_is_recorded_and_shown_by_worker_status(state):
     assert "3 missions refused by coordinator cap" in _format_worker_status(status)
     session.handle(Message("notice", "c", 1, {"code": "missions-over-cap", "refused": 0, "cap": 10000, "message": "cleared"}))
     assert "missions_refused" not in worker.status_public(service_state="active")
+
+
+def test_deferred_batches_are_marked_replay_newest_first_and_resent_unmarked_to_an_old_coordinator(state, monkeypatch):
+    from llm_tools.bridge_protocol import Message
+
+    session, every_id = _wire_session(state, monkeypatch, active=0, finished=4000)
+    hello = session.hello()
+    sent = {item["id"] for item in hello.payload["missions"]}
+    session.cursor = 7
+    first = session.next_events()
+    assert first.payload["replay"] is True
+    ids = [item["id"] for item in first.payload["missions"]]
+    assert ids == sorted(ids, reverse=True), "newest finished first"
+    assert max(ids) < min(sent), "the replay carries the older rows"
+    # An older coordinator rejects the unknown field: the same summaries are offered again, without it.
+    error = Message("error", "c", 0, {"code": "invalid-message", "message": "events: unknown replay", "in_reply_to": first.id})
+    session.generation = 1
+    session.handle(error)
+    session.inflight, session.send_not_before = None, 0.0
+    again = session.next_events()
+    assert "replay" not in again.payload
+    assert [item["id"] for item in again.payload["missions"]] == ids
+
+
+def test_the_last_notice_is_kept_in_the_worker_state_file(state):
+    from llm_tools.bridge_protocol import Message
+
+    directory, _ = state
+    session, saved = _session(directory)
+    session.handle(Message("notice", "c", 1, {"code": "missions-over-cap", "refused": 4, "cap": 10000, "message": "x"}))
+    assert saved and worker.load_config().coordinator_notice["refused"] == 4
+    for _ in range(300):  # a long audit log does not push it out
+        session.audit("filler")
+    assert worker.status_public(service_state="active")["missions_refused"] == 4
+    session.handle(Message("notice", "c", 1, {"code": "missions-over-cap", "refused": 0, "cap": 10000, "message": "x"}))
+    assert worker.load_config().coordinator_notice == {}

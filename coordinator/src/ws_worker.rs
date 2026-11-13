@@ -558,6 +558,7 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
                     events: &events,
                     mission_cursor,
                     missions: missions.as_deref(),
+                    replay: p.get("replay").and_then(Value::as_bool).unwrap_or(false),
                     max: st.cfg.max_events_per_worker,
                 })
                 .map_err(db)?
