@@ -44,6 +44,39 @@ Three facts explain most of Bridge's behaviour:
    Add `--providers claude,codex` to choose the rotation, or `--verifier
    'python -m pytest -q'` to check each finished task.
 
+   Bridge can commit and push for you, for isolated missions only (`--isolate
+   worktree`) that have a verifier. `--commit per-task` makes Bridge itself
+   commit the whole worktree after the verifier passes for each task; the
+   provider is told not to commit. The commit message is `Task N: <title>` with
+   the mission and task numbers and the verifier summary, and the author comes
+   from the repository's git configuration. A task that changed nothing records
+   "nothing to commit". `--push per-task` or `--push per-mission` (needs
+   `--commit per-task`) pushes to the branch's upstream, or to
+   `branch.<name>.pushRemote` / `remote.pushDefault` with the same branch name.
+   Bridge never force-pushes and never chooses a remote. It refuses to push to
+   the remote's default branch, as `git ls-remote --symref REMOTE HEAD` reports
+   it, unless the mission was created with `--push-default-branch`; when the
+   default branch cannot be determined the push is refused too. A failed commit
+   or push holds the mission (status PAUSED, shown as `Held`) and records an
+   event; fix the cause and run `llm-bridge start`. Bridge then redoes that
+   task's commit or push, with its own message, before the next task starts.
+   `commit` and `push` are local settings: a coordinator cannot change them.
+   Change them later with `llm-bridge mission set --commit ... --push ...`.
+
+   `--budget-runs N`, `--budget-minutes N`, `--budget-provider-changes N` and
+   `--budget-spend AMOUNT --budget-currency CODE` limit a mission. Before each
+   provider launch, and on the controller's heartbeat for the wall-clock limit,
+   Bridge checks them. A reached limit holds the mission with the reason
+   `budget-exhausted`; a run in flight is never killed, it finishes and the
+   next one does not start. With a run limit, the scheduler's own retries are
+   off, so every launch is a counted run. `llm-bridge status` and the console
+   show the limits and use. Spend is the increase of a rotation provider's
+   reported figure (Kilo month-to-date cost, Copilot add-on spend) since the
+   mission's first reading, in the budget currency; a spend limit is refused
+   unless a rotation provider can report it. Raise a limit with `llm-bridge
+   mission set --budget-runs N` (or `none` to remove it); the mission resumes
+   at once when no limit is reached any more.
+
    Add `--isolate worktree` to run the mission in its own git worktree, so
    several missions can work on one repository at the same time. Bridge
    creates the worktree under its state directory on a new branch

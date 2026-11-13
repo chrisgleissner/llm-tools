@@ -47,6 +47,8 @@ from .bridge_sessions import (
     child_pids,
     confirm_restored,
     codex_owned_argv,
+    DB_SESSION_PROVIDERS,
+    discover_new_db_session,
     discover_owned_codex_session,
     new_session_argv,
     provider_session_metadata,
@@ -165,6 +167,8 @@ class BridgeMissionHooks:
         self._session_providers: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
         self._codex_owned_operations: set[str] = set()
+        self._db_session_seen: dict[str, NativeSessionIdentity] = {}  # session seen during a Kilo/OpenCode run, confirmed again at its end
+        self._db_session_operations: dict[str, float] = {}  # Kilo/OpenCode runs awaiting their session row -> next look
         self._codex_observe_schedule: dict[str, tuple[int, float]] = {}  # operation -> (backoff step or -1 once found, next look)
         # The (providers, routes) pair the running Ralph loop currently uses.
         self.applied_rotation: tuple[str, str] | None = None
@@ -194,6 +198,17 @@ class BridgeMissionHooks:
 
         return _safe_decision(selection)
 
+    def _sample_spend(self, selection: dict[str, Any]) -> None:
+        """At each provider selection: turn the rotation providers' reported spend into ``provider-spend`` events (best effort)."""
+        try:
+            from . import bridge_budget
+
+            mission = self.store.get_mission(self.mission_id)
+            if "spend" in bridge_budget.budget_of(mission.get("config")):
+                bridge_budget.sample_spend(self.store, mission, selection)
+        except Exception:  # noqa: BLE001 - a spend reading must never stop provider selection
+            pass
+
     def _cli_version(self, provider: str) -> str:
         """The provider CLI version recorded with each selection (PROV-011); read at most once an hour per provider, since CLIs self-update."""
         now = self._clock()
@@ -206,6 +221,7 @@ class BridgeMissionHooks:
         return seen[1]
 
     def on_selection(self, selection: dict[str, Any]) -> None:
+        self._sample_spend(selection)
         projection = self._selection_projection(selection)
         if projection.get("provider"):
             projection["cli_version"] = self._cli_version(str(projection["provider"]))
@@ -336,6 +352,15 @@ class BridgeMissionHooks:
                 time.sleep(0.5)
                 continue
 
+            if mission["config"].get("hold_reason"):
+                # The operator resumed a mission that Bridge held (budget, commit or push). The budget is checked
+                # again before the next run, so a limit that is still reached holds the mission again.
+                self.store.set_mission_config_values(self.mission_id, {"hold_reason": "", "hold_detail": ""}, event_kind="mission-hold-released")
+                from .bridge_publish import retry_pending
+
+                # A commit or push that failed is redone for its own task before the next task starts.
+                if not retry_pending(self.store, self.store.get_mission(self.mission_id)):
+                    continue
             hold = self.store.sync_review_hold_events(self.mission_id)
             if hold is not None:
                 # A native operator is at the station: do not start the next
@@ -351,6 +376,10 @@ class BridgeMissionHooks:
                 self._operator_wait_state = None
                 self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
+                from . import bridge_budget
+
+                if bridge_budget.hold_if_reached(self.store, mission) is not None:
+                    continue  # held as budget-exhausted; the PAUSED branch waits for the operator
                 current = self.store.begin_iteration(int(task["id"]))
                 self._iteration += 1
                 history = self.store.recent_task_history(self.mission_id, int(current["id"]))
@@ -389,6 +418,11 @@ class BridgeMissionHooks:
                     f"Durable checkpoint (latest bounded history):\n{_format_checkpoint(checkpoint)}\n\n"
                     "Continue from this state. Do not claim work from an earlier provider session unless supported by the evidence above."
                 )
+                from .bridge_publish import policy_prompt
+
+                policy_text = policy_prompt(mission["config"]).strip()
+                if policy_text:
+                    prompt += "\n\n" + policy_text
                 if self.native_tui and not self.headless:
                     prompt += f" {NATIVE_COMPLETION_NOTE}"
                 return {
@@ -414,6 +448,10 @@ class BridgeMissionHooks:
             total = sum(counts.values())
             completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
             if completed and completed + cancelled == total:
+                from .bridge_publish import push_mission
+
+                if not push_mission(self.store, mission):
+                    continue  # the push failed or was refused: the mission is held PAUSED until the operator fixes it
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
             if total and cancelled == total:
@@ -586,6 +624,14 @@ class BridgeMissionHooks:
             return False
         provider = str(selection.get("provider") or scheduler_config.provider)
         route_id = str(selection.get("route") or "")
+        from . import bridge_budget
+
+        if bridge_budget.hold_if_reached(self.store, mission) is not None:
+            return False  # every launch is checked, so a retry of a failed run counts against the limit too
+        if "runs" in bridge_budget.budget_of(mission.get("config")):
+            # A scheduler-internal retry would start a provider process without passing here. With a run limit, each
+            # launch is a new, counted operation instead; Ralph's own loop retries it.
+            scheduler_config.retry_delays = ""
         try:
             operation_id = self.store.begin_operation(int(context["task_id"]), iteration=iteration, station=route_id or provider)
         except TransitionError:
@@ -747,6 +793,8 @@ class BridgeMissionHooks:
                     expected = None
             if expected is not None:
                 resume = resume_argv(expected, executable=argv[0]) if expected.provider == provider and expected.cwd == cwd else None
+                if resume and provider in DB_SESSION_PROVIDERS and provider_session_metadata(provider, expected.session_id, cwd=cwd) is None:
+                    resume = None  # the saved session is gone from the store: start fresh
                 if resume:
                     self._session_restore_expectations[operation_id] = expected
                     current = provider_session_metadata(provider, expected.session_id, cwd=cwd)
@@ -765,6 +813,12 @@ class BridgeMissionHooks:
                         # the exact resume subcommand and saved session UUID.
                         return [argv[0], *argv[1:-1], *resume[1:], argv[-1]]
                     return [*resume, *argv[1:]]
+            if provider in DB_SESSION_PROVIDERS:
+                # Kilo and OpenCode create their own session id; it is read from the session store
+                # for this run only (parentless, in this directory, created after launch).
+                self._db_session_operations[operation_id] = 0.0
+                self._session_started_ns[operation_id] = time.time_ns()
+                return argv
             if provider not in {"claude", "copilot"} or Path(argv[0]).name != provider:
                 # New Codex IDs are captured only from this operation's owned
                 # writable process descriptors, never from recency scans.
@@ -804,6 +858,14 @@ class BridgeMissionHooks:
 
     def _record_session_outcome(self, operation_id: str, provider: str, cwd: str) -> None:
         expected = self._session_restore_expectations.pop(operation_id, None)
+        if self._db_session_operations.pop(operation_id, None) is not None or operation_id in self._db_session_seen:
+            # Kilo/OpenCode: the session is confirmed once more now. It is kept only if the store
+            # still holds exactly one fitting row and it is the one seen during the run.
+            seen = self._db_session_seen.pop(operation_id, None)
+            self._session_candidates.pop(operation_id, None)
+            found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if expected is None else None
+            if found is not None and (seen is None or seen.session_id == found.session_id):
+                self._session_candidates[operation_id] = found
         candidate = self._session_candidates.pop(operation_id, None)
         baseline = self._session_baselines.pop(operation_id, {})
         started_ns = self._session_started_ns.pop(operation_id, 0)
@@ -842,7 +904,7 @@ class BridgeMissionHooks:
         try:
             self._record_session_outcome(operation_id, provider, str(Path(cwd).expanduser().resolve(strict=True)))
         except Exception:  # noqa: BLE001 - provider session files and the folder can disappear
-            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule):
+            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule, self._db_session_operations, self._db_session_seen):
                 pending.pop(operation_id, None)
             self._codex_owned_operations.discard(operation_id)
             try:
@@ -884,6 +946,20 @@ class BridgeMissionHooks:
             session_id=identity.session_id, cwd=identity.cwd, source=identity.source)
         self._codex_observe_schedule[operation_id] = (-1, 0.0)  # found: stop looking
 
+    def _observe_db_session(self, operation_id: str, provider: str) -> None:
+        """Record the Kilo/OpenCode session once exactly one fits this run; ambiguity records nothing."""
+        due = self._db_session_operations.get(operation_id)
+        now = time.monotonic()
+        if due is None or now < due:
+            return
+        self._db_session_operations[operation_id] = now + 2.0
+        cwd = self._session_cwds.get(operation_id, "")
+        found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if cwd else None
+        if found is None:
+            return
+        self._db_session_seen[operation_id] = found  # persisted only by the end-of-run confirmation
+        self._db_session_operations.pop(operation_id, None)
+
     # Seconds between reads of the provider pane while a native provider runs.
     USAGE_LIMIT_LOOK_SECONDS = 2.0
 
@@ -893,6 +969,7 @@ class BridgeMissionHooks:
         Returns a status when the watch ended the provider run, else ``None``.
         """
         self._observe_owned_codex_session(operation_id)
+        self._observe_db_session(operation_id, provider)
         ended = self._observe_usage_limit(operation_id, provider, route_id)
         if ended is None and operation_id not in self._usage_limited:
             self._deliver_task_notices(operation_id, provider)
@@ -1718,6 +1795,11 @@ def run_configured_verifier(
             except TransitionError:
                 current = store.get_task(task_id)
                 outcome.update(status=current["status"], passed=False, reason="task-changed-during-verification")
+            else:
+                from .bridge_publish import commit_task
+
+                # Bridge commits (and pushes, per the mission's policy) itself; a failure holds the mission.
+                outcome["committed"] = commit_task(store, store.get_mission(mission_id), store.get_task(task_id), summary)
             return outcome
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             outcome["reason"] = f"invalid-result: {exc}"

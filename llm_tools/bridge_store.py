@@ -2517,6 +2517,17 @@ class BridgeStore:
                 self._event(mission_id, "rotation-changed", {"from": before, "to": after, "providers": providers, "routes": routes, "source": source})
         return {"changed": bool(before) and before != after, "from": before, "to": after, "mission": self.get_mission(mission_id)}
 
+    def hold_mission(self, mission_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Save a hold reason (and any related values) and pause a running mission in one transaction.
+
+        A reader never sees the status ``PAUSED`` without the reason, or the reason on a mission that kept running.
+        """
+        with self._transaction():
+            self.set_mission_config_values(mission_id, values, event_kind="mission-held")
+            if str(self._mission_row(mission_id)["status"]) == "RUNNING":
+                self.set_mission_status(mission_id, "PAUSED")
+        return self.get_mission(mission_id)
+
     def set_mission_config_values(self, mission_id: str, values: dict[str, Any], *, event_kind: str) -> dict[str, Any]:
         """Atomically persist a related set of controller configuration values."""
         if not values or any(not key or key in {"id", "cwd", "objective"} for key in values):

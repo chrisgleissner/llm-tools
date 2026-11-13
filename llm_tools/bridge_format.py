@@ -267,6 +267,47 @@ def format_mission_created(result: dict[str, Any]) -> str:
     return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\"{folder} · task {task_number(task) or 1}{suffix}{checks} · start with: llm-bridge start --mission {mid}"
 
 
+def format_mission_settings(value: dict[str, Any]) -> str:
+    """The `mission settings` line: review hold, suspend, guidance, then commit, push, budget and any Bridge hold."""
+    policy = value.get("execution_policy") or {}
+    text = (f"Auto-continue {'on' if value.get('auto_continue') else 'off'} · capacity-wait suspend {'on' if value.get('suspend_when_rate_limited') else 'off'} · "
+            f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}")
+    if value.get("commit") is not None:
+        text += f" · commit {value['commit']} · push {value.get('push', 'never')}"
+    budget = value.get("budget")
+    if budget:
+        from .bridge_budget import summary
+
+        text += " · budget " + summary(budget)
+    if value.get("hold_reason"):
+        text += f" · held: {value['hold_reason']}"
+    return text
+
+
+def budget_lines(snapshot: dict[str, Any], mission_id: str) -> list[str]:
+    """Status lines for commit/push policy, budget usage and a Bridge hold; empty when none applies."""
+    from .bridge_budget import summary
+    from .bridge_publish import policy_of
+
+    mission = snapshot.get("mission") or {}
+    policy = policy_of(mission.get("config"))
+    lines: list[str] = []
+    if policy["commit"] != "none":
+        lines.append(f"Commit      {policy['commit']} · push {policy['push']}")
+    budget = snapshot.get("budget")
+    if isinstance(budget, dict):
+        if budget.get("limits"):
+            lines.append("Budget      " + summary(budget["limits"], budget.get("used")))
+        if budget.get("hold_reason"):
+            detail = f" — {budget['hold_detail']}" if budget.get("hold_detail") else ""
+            if budget["hold_reason"] == "budget-exhausted":
+                fix = f"raise a limit with: llm-bridge mission set --mission {short_id(mission_id)} --budget-runs N (or --budget-minutes, --budget-provider-changes, --budget-spend)"
+            else:
+                fix = f"fix the cause, then run: llm-bridge start --mission {short_id(mission_id)}"
+            lines.append(f"Held        {budget['hold_reason']}{detail} · {fix}")
+    return lines
+
+
 def format_mission_colour(result: dict[str, Any]) -> str:
     """Receipt for `mission colour`."""
     how = "pinned" if result.get("pinned") else "automatic"
@@ -861,6 +902,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         policy = effective_settings(config)
     policy_label = LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
     lines.append(f"Policy      {policy_label}")
+    lines.extend(budget_lines(snapshot, mid))
     context = snapshot.get("station_context") or {}
     current = snapshot.get("current_task")
     if current and current.get("status") in {"READY", "QUEUED"} and not isinstance(snapshot.get("waiting"), dict):

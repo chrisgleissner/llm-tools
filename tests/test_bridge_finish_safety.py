@@ -113,3 +113,70 @@ def test_skip_check_override_types_without_reading_the_pane(state: Path, tmp_pat
     finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None,
                    env={bridge_finish.SKIP_CHECK_ENV: "1"})
     assert backend.sent[:2] == ["/quit", "Enter"]
+
+
+# ------------------------------------------------------------------ PROV-005: every native provider
+
+OPENCODE_IDLE = '  Ask anything... "Fix broken tests"\n\n  build  Claude Sonnet\n                                   tab agents  ctrl+p commands\n'
+OPENCODE_BUSY = "  Reading files\n\n  build  Claude Sonnet     esc interrupt\n                                   tab agents  ctrl+p commands\n"
+OPENCODE_PERMISSION = "  Permission required: edit src/app.py\n  Allow once   Allow always   Reject\n  ctrl+p commands\n"
+COPILOT_IDLE = "work output\n\n> Type @ to mention files or / for commands\n"
+
+
+@pytest.mark.parametrize("provider", ["kilo", "opencode"])
+def test_kilo_and_opencode_finish_types_the_default_exit_command_at_their_prompt(state: Path, tmp_path: Path, provider: str) -> None:
+    store, mission_id, _task, operation = running_native(state, tmp_path, provider)
+    backend = FakeBackend(exit_after_enters=1, screen=OPENCODE_IDLE, popup=False)
+    backend.on_exit = lambda: store.finish_operation(operation, exit_code=0)
+    result = finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={})
+    assert backend.sent[:2] == ["/exit", "Enter"] and result.command == "/exit" and result.provider == provider
+
+
+@pytest.mark.parametrize("provider", ["kilo", "opencode"])
+@pytest.mark.parametrize("screen", [OPENCODE_BUSY, OPENCODE_PERMISSION, "> \n", "plain shell output\n$ "])
+def test_kilo_and_opencode_never_get_keys_unless_their_prompt_is_on_screen(state: Path, tmp_path: Path, provider: str, screen: str) -> None:
+    store, mission_id, _task, _operation = running_native(state, tmp_path, provider)
+    backend = FakeBackend(screen=screen)
+    with pytest.raises(FinishError, match="asking something"):
+        finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={})
+    assert backend.sent == []
+
+
+def test_kilo_exit_command_override_still_wins(state: Path, tmp_path: Path) -> None:
+    store, mission_id, _task, operation = running_native(state, tmp_path, "kilo")
+    backend = FakeBackend(exit_after_enters=1, screen=OPENCODE_IDLE, popup=False)
+    backend.on_exit = lambda: store.finish_operation(operation, exit_code=0)
+    result = finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={"LLM_BRIDGE_FINISH_KILO": "/quit"})
+    assert backend.sent[0] == "/quit" and result.command == "/quit"
+
+
+def test_copilot_finish_is_checked_against_its_own_prompt(state: Path, tmp_path: Path) -> None:
+    store, mission_id, _task, operation = running_native(state, tmp_path, "copilot")
+    backend = FakeBackend(exit_after_enters=1, screen=COPILOT_IDLE, popup=False)
+    backend.on_exit = lambda: store.finish_operation(operation, exit_code=0)
+    finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={})
+    assert backend.sent[:2] == ["/exit", "Enter"]
+    (tmp_path / "again").mkdir()
+    store2, mission2, _t, _o = running_native(state, tmp_path / "again", "copilot")
+    blocked = FakeBackend(screen=COPILOT_TRUST)
+    with pytest.raises(FinishError, match="asking something"):
+        finish_mission(mission2, backend=blocked, handle=HANDLE, store=store2, sleep=lambda _s: None, env={})
+    assert blocked.sent == []
+
+
+def test_provider_without_a_known_input_prompt_is_refused_with_the_reason(state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    from llm_tools import bridge_providers as reg
+
+    monkeypatch.setitem(reg.REGISTRY, "kilo", dataclasses.replace(reg.REGISTRY["kilo"], idle_prompt=None, finish_idle_prompt=None))
+    store, mission_id, _task, operation = running_native(state, tmp_path, "kilo")
+    backend = FakeBackend(screen=OPENCODE_IDLE)
+    with pytest.raises(FinishError, match="No input prompt is known for kilo · finish will not type into its pane"):
+        finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={})
+    assert backend.sent == []
+    # The explicit operator override still works for a screen these heuristics do not know.
+    backend2 = FakeBackend(exit_after_enters=1, screen="custom", popup=False)
+    backend2.on_exit = lambda: store.finish_operation(operation, exit_code=0)
+    finish_mission(mission_id, backend=backend2, handle=HANDLE, store=store, sleep=lambda _s: None, env={bridge_finish.SKIP_CHECK_ENV: "1"})
+    assert backend2.sent[:2] == ["/exit", "Enter"]

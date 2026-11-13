@@ -420,36 +420,36 @@ Recorded so that fixes do not regress it:
 
 | Finding | Disposition |
 | --- | --- |
-| WUX-001 | FIND-007 |
-| WUX-002 | FIND-007 |
-| WUX-003 | FIND-007 |
-| WUX-004 | FIND-007 |
-| WUX-005 | FIND-007 |
-| WUX-006 | FIND-007 |
-| WUX-007 | FIND-007 |
-| WUX-008 | FIND-007 |
-| WUX-009 | FIND-007 |
-| WUX-010 | FIND-007 |
-| WUX-011 | FIND-007 |
-| WUX-012 | FIND-007 |
-| WUX-013 | FIND-007 |
-| WUX-014 | FIND-007 |
-| WUX-015 | FIND-007 |
-| WUX-016 | FIND-007 |
-| WUX-017 | FIND-007 |
-| WUX-018 | FIND-007 |
-| WUX-019 | FIND-007 |
-| WUX-020 | FIND-007 |
-| WUX-021 | FIND-007 |
-| WUX-022 | FIND-007 |
-| WUX-023 | FIND-007 |
-| WUX-024 | FIND-007 |
-| WUX-025 | FIND-007 |
-| WUX-026 | FIND-007 |
-| WUX-027 | FIND-007 |
-| WUX-028 | FIND-007 |
-| WUX-029 | FIND-007 |
-| WUX-030 | FIND-007 |
-| WUX-031 | FIND-007 |
-| WUX-032 | FIND-007 |
-| WUX-033 | FIND-007 |
+| WUX-001 | fixed in `web/src/views/mission/header.ts` and `page.ts` (action bar with the primary action under the title, live session above the tasks, no CLI sentence in the attention card; UXR-004, UXR-007, UXR-048), test `web/e2e/redesign/uxr-mission.spec.ts` (T10 arrival) and `web/e2e/redesign/uxr-decisions.spec.ts::D28.4: the primary action reads 'Approve' and keeps the task number in its accessible name` |
+| WUX-002 | fixed in `web/src/ui.ts` `onceDialog` (Escape and the close button ask "Close without saving it?" before the token is discarded, and a warning says the token is shown once), test `web/e2e/ui-features.spec.ts::adding a worker shows its token once; removing one asks for confirmation` |
+| WUX-003 | PRD-016 (tracked; full operator control from the console). On main the mission page blocks actions only for a disconnected stream or an offline worker (`web/src/views/mission/page.ts` `blocked()`). The worker capabilities in `api.ts` are not read, the Workers page has no Access column, and a view-only worker still gets enabled Approve and Reject |
+| WUX-004 | fixed in `web/src/views/login.ts` (the lockout text is a `role="status"` element that is announced once, not on every countdown tick), test `web/e2e/auth-ux.spec.ts::rate limiting says when to retry and treats every user name alike (no enumeration)`. The test does not count mutations of the live region |
+| WUX-005 | fixed in the redesigned rows and list components (UXR-003, UXR-025, UXR-026), test `web/e2e/redesign/uxr-text.spec.ts` (T08, long-names data set with an unbroken slug) and `web/e2e/redesign/uxr-matrix.spec.ts::<page>: the page never scrolls horizontally` (T30) |
+| WUX-006 | fixed in `web/src/views/mission/page.ts` (`taskError` shows "The worker is offline, so tasks cannot be loaded." when the tasks never loaded; the empty state needs `taskLoaded`), no dedicated test of the offline mission page |
+| WUX-007 | fixed by removing the Overview tiles (the Inbox shows Needs you, with skeleton rows while loading; UXR-012, UXR-034), test `web/e2e/redesign/uxr-state.spec.ts::a skeleton appears only after 150 ms of loading` |
+| WUX-008 | fixed by removing the Overview tiles; the Inbox lists the missions that need the operator with inline Approve, Reject and Retry (UXR-012, UXR-049), test `web/e2e/redesign/uxr-decisions.spec.ts` (T48, one exact count in badge, tab title and heading) |
+| WUX-009 | fixed in `web/src/views/mission/page.ts` (the tab title is `<mission name> - LLM Bridge` once the mission is known), no test asserts the mission name in the title; `web/e2e/redesign/uxr-calm.spec.ts` tests only the count prefix |
+| WUX-010 | fixed in `web/src/shell.ts` (the skip link is the first focusable element), test `web/e2e/shell.spec.ts::the skip link is the first Tab stop, then the brand and the search button` |
+| WUX-011 | fixed in `web/src/css/base.css` (`scroll-padding-top` and `scroll-padding-bottom` for the sticky header and bottom bar) and the toast rules of `web/src/ui.ts` (UXR-011), test `web/e2e/redesign/uxr-matrix.spec.ts` (T33 and T34, the focused element is not covered by anything) |
+| WUX-012 | fixed in `web/src/views/account.ts` (the secret opens in the once-only dialog "Token created", with the close confirmation of WUX-002), test `web/e2e/auth-ux.spec.ts::API tokens can be scoped, shown once, listed and revoked from account settings` |
+| WUX-013 | PRD-016 (tracked; full operator control from the console). The mission page has an inline "Add task" field (UXR-020, `web/e2e/redesign/uxr-mission.spec.ts` T21). Task title and prompt editing, reordering, priority and mission creation are not in the web console |
+| WUX-014 | PRD-015 (tracked; live session view). The pane shows "The worker is offline." or "Not connected." in `web/src/session.ts`. The compact state card with a reason and one action is not implemented |
+| WUX-015 | fixed in `web/src/ui.ts` (toasts only for user-initiated results, a labelled "Notifications" status region, timers pause on hover and focus; UXR-011), test `web/e2e/redesign/uxr-calm.spec.ts::no toast for done, a worker offline under 10 s, or a reconnect under 10 s` |
+| WUX-016 | fixed by the phone list rows of the redesign (UXR-029; no label and value cards), test `web/e2e/redesign/uxr-fleet.spec.ts::rows are compact, there is no id column and no table` |
+| WUX-017 | fixed in `web/src/views/usage.ts` (one card per provider across workers, `role="meter"` bars, `reasonText` maps reason codes to sentences), test `web/e2e/redesign/uxr-fleet.spec.ts` (T22, one click on the chip opens Usage, where every meter has a text value) |
+| WUX-018 | PRD-033 (tracked; web findings for phase B). `docs/site/index.html` and `style.css` have not changed for this finding; the scrollable blocks still have no `tabindex` |
+| WUX-019 | PRD-033 (tracked; web findings for phase B). The site has no phone section navigation; `docs/site/` has not changed for this finding |
+| WUX-020 | fixed in `web/src/main.ts` (a session that ends during use shows the session-expired notice on the sign-in page), test `web/e2e/auth-ux.spec.ts::a session ended while the page is open shows a session-expired notice; sign-out shows a signed-out notice` |
+| WUX-021 | fixed in `web/src/ui.ts` `confirmDialog` (inline "Enter a reason." with `aria-invalid` and `aria-describedby`, no browser bubble; UXR-019), test `web/e2e/redesign/uxr-inbox.spec.ts::Reject with an empty reason shows an inline error and sends nothing` |
+| WUX-022 | PRD-033 (tracked; web findings for phase B). The unreachable screen has a heading and `role="alert"`, but `web/src` has no automatic retry and no Retry button on error notices |
+| WUX-023 | fixed in `web/src/views/diagnostics.ts` (uptime in words and plain sentences), no dedicated test |
+| WUX-024 | fixed by the 44 px coarse-pointer and 24 px minimum target rules (UXR-027), test `web/e2e/redesign/uxr-matrix.spec.ts::interactive elements are at least 44 px on coarse pointers and 24 px on fine pointers` and `web/e2e/mobile.spec.ts` |
+| WUX-025 | fixed in `web/src/ui.ts` (`#toasts` is a labelled "Notifications" status region), test `web/e2e/redesign/uxr-matrix.spec.ts` (T33, axe on every page with overlays open) |
+| WUX-026 | fixed in `web/src/views/login.ts` (the setup-token help is a `<details>` "Where do I find the setup token?"), test `web/e2e/auth-ux.spec.ts::explains the setup token, states the policy, shows strength live and validates inline` |
+| WUX-027 | fixed in `web/src/views/account.ts` (separate blocks for session, password, API tokens and passkeys from the redesign), no dedicated test |
+| WUX-028 | fixed in `web/src/views/inbox.ts` (`NEEDS_VISIBLE` rows and "Show n more", sorted failed, approval, input), test `web/e2e/redesign/uxr-decisions.spec.ts::D28.1: failures older than 24 hours are one row after the input rows, 'N older failures', and Show expands them` |
+| WUX-029 | fixed in `web/src/current-work.ts` (unknown parts are omitted), test `web/e2e/foundations.spec.ts::current-work summary omits unknown parts instead of printing Provider unknown` |
+| WUX-030 | UXR-057 (tracked; visible cue when the mobile terminal scrolls sideways) |
+| WUX-031 | PRD-033 (tracked; web findings for phase B). `docs/site/index.html` sets `data-theme="dark"` and only a stored choice overrides it; the operating-system preference is not read |
+| WUX-032 | PRD-033 (tracked; web findings for phase B). `docs/site/` has not changed for this finding |
+| WUX-033 | fixed in `web/src/css/base.css` (`forced-colors: active` rules for `aria-current` and pills), test `web/e2e/redesign/uxr-state.spec.ts` (pills keep a border in forced-colors mode; the `aria-current` border has no test) |
