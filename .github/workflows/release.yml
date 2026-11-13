@@ -131,8 +131,8 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           COSIGN_PASSWORD= cosign generate-key-pair
-          cosign sign --yes --key cosign.key --tlog-upload=false --allow-insecure-registry "$IMAGE@$DIGEST"
-          cosign verify --key cosign.pub --insecure-ignore-tlog=true --allow-insecure-registry "$IMAGE@$DIGEST"
+          cosign sign --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry "$IMAGE@$DIGEST"
+          cosign verify --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry "$IMAGE@$DIGEST"
       - name: Create and verify local attestations
         env:
           IMAGE: ${{ steps.build.outputs.image }}
@@ -140,10 +140,10 @@ jobs:
           COSIGN_PASSWORD: ""
         run: |
           cd "$RUNNER_TEMP"
-          cosign attest --yes --key cosign.key --tlog-upload=false --allow-insecure-registry --type cyclonedx --predicate "$GITHUB_WORKSPACE/container.cdx.json" "$IMAGE@$DIGEST"
-          cosign attest --yes --key cosign.key --tlog-upload=false --allow-insecure-registry --type custom --predicate "$RUNNER_TEMP/build-metadata.json" "$IMAGE@$DIGEST"
-          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --allow-insecure-registry --type cyclonedx "$IMAGE@$DIGEST" > /dev/null
-          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --allow-insecure-registry --type custom "$IMAGE@$DIGEST" > /dev/null
+          cosign attest --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry --type cyclonedx --predicate "$GITHUB_WORKSPACE/container.cdx.json" "$IMAGE@$DIGEST"
+          cosign attest --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry --type custom --predicate "$RUNNER_TEMP/build-metadata.json" "$IMAGE@$DIGEST"
+          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry --type cyclonedx "$IMAGE@$DIGEST" > /dev/null
+          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry --type custom "$IMAGE@$DIGEST" > /dev/null
       - name: Collect artifacts and write SHA-256 checksums
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
