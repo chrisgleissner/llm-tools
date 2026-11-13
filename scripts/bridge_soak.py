@@ -12,13 +12,13 @@ Pass criteria (each is a line of the report, and any failure gives exit status 1
   that did not apply (``dist_harness.verify_exactly_once``);
 * no unbounded growth of coordinator memory, file descriptors, threads or database size, and of the
   workers' memory, descriptors and threads: the least-squares slope after warm-up (``--warmup-seconds``,
-  20 minutes by default) is compared with ``dist_harness.DEFAULT_BOUNDS``, the controllers one process at a
+  30 minutes by default) is compared with ``dist_harness.DEFAULT_BOUNDS``, the controllers one process at a
   time; the database must also be explained by its row count; no single controller, worker or coordinator
   may pass the memory ceilings of ``dist_harness.DEFAULT_CEILINGS``;
 * p99 API latency inside the budgets of ``dist_harness.DEFAULT_LATENCY_BUDGET_MS``;
 * the coordinator process survived without a panic, and every worker is online at the end.
 
-Defaults give the PRD's scaled-down run (30 minutes, 10 workers, 50 missions). The full 24-hour run
+Defaults give the PRD's scaled-down run (45 minutes, 10 workers, 50 missions). The full 24-hour run
 is ``--duration 86400``. Nothing real is touched: see the safety rules in ``dist_harness``.
 
     python scripts/bridge_soak.py --duration 300 --workers 3 --missions 10 --sample-seconds 15
@@ -46,15 +46,13 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_NO_BINARY = 3
 MIN_SAMPLES_AFTER_WARMUP = 4
-WARMUP_SECONDS = 1200.0  # memory of controllers, workers and the coordinator is settled 20 minutes after the start (soak-and-chaos.md)
+WARMUP_SECONDS = 1800.0  # controller memory is settled 30 minutes after the start on a 2-core runner, and 1800 s is two periods of the 900 s retention pass of the capacity refresh worker (soak-and-chaos.md)
 WARMUP_MAX_SHARE = 2 / 3  # a short run cannot ignore more than two thirds of itself
 
 # Items that need features which are not on this branch (PR #31); each names what it expects.
 PHASE_B: list[dict[str, str]] = [
     {"id": "coordinator-task-count", "todo": "TODO(phase B): sample the coordinator's own task count. Until then the thread count of the process is the "
      "task metric (coordinator_threads). Expected: a `tasks` integer in GET /api/v1/diagnostics; add it to Sampler.take and DEFAULT_BOUNDS."},
-    {"id": "worker-command-backlog", "todo": "TODO(phase B): sample per-worker unfinished command counts from GET /api/v1/workers (expected field "
-     "`queue_depth`) so a growing backlog is a metric, not only the final `unfinished` check."},
 ]
 
 
@@ -80,7 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--coordinator-bin", help="bridge-coordinator binary (default: $BRIDGE_COORDINATOR_BIN, then coordinator/target/{release,debug})")
     parser.add_argument("--build", action="store_true", help="run cargo build --release when no binary is found")
-    parser.add_argument("--duration", type=float, default=1800.0, help="seconds of load (default: 1800, the scaled-down run; 86400 for the full 24 hours)")
+    parser.add_argument("--duration", type=float, default=2700.0, help="seconds of load (default: 2700, the scaled-down run: 30 minutes of warm-up and a 15-minute fit; 86400 for the full 24 hours)")
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--missions", type=int, default=50, help="missions in total, spread over the workers")
     parser.add_argument("--sample-seconds", type=float, default=60.0, help="seconds between resource samples (default: 60)")
@@ -298,6 +296,7 @@ class Soak:
         explained = h.check_database_explained_by_rows(self.sampler.samples)
         events_cap = len(self.nodes) * h.MAX_EVENTS_PER_WORKER
         max_events = max((int((s.get("rows") or {}).get("events", 0)) for s in self.sampler.samples), default=0)
+        backlog = h.check_command_backlog(self.sampler.samples)
         budgets = {"read": args.p99_read_ms, "submit": args.p99_submit_ms, "roundtrip": args.p99_roundtrip_ms}
         latency = h.check_latency(self.coordinator.recorder, budgets)
         workers_online = sum(1 for item in self.coordinator.api.workers() if item.get("state") == "online")
@@ -317,6 +316,8 @@ class Soak:
                        f"{len(verification.violations)} violations, {len(verification.unfinished)} unfinished, {len(verification.uncertain)} uncertain"},
             *[{"check": item.metric if item.metric.endswith(" ceiling") else f"slope {item.metric}", "verdict": item.verdict, "detail": item.detail} for item in slopes],
             {"check": "database explained by rows", "verdict": "fail" if explained else "pass", "detail": "; ".join(explained[:3]) or "ok"},
+            {"check": "worker command backlog", "verdict": "inconclusive" if backlog is None else "fail" if backlog else "pass",
+             "detail": "no sample carries queue_depths" if backlog is None else "; ".join(backlog[:3]) or f"no worker above {h.MAX_WORKER_BACKLOG} unfinished commands"},
             {"check": "events within retention cap", "verdict": "fail" if max_events > events_cap else "pass", "detail": f"max {max_events}, cap {events_cap}"},
             *[{"check": f"p99 latency {item['class']}", "verdict": item["verdict"],
                "detail": f"p99 {item['p99_ms']} ms (budget {item['budget_p99_ms']}), n={item['count']}, errors={item['errors']}"} for item in latency],

@@ -172,6 +172,10 @@ form, `--help`, `llm-bridge help` and `status`.
 - The command line defaults to Background because it needs no terminal, so a
   script behaves the same on every machine.
 - Older documentation and saved events call Background mode "autonomous".
+  Earlier controllers stored that old name as the `actual_mode` of
+  `controller-mode` events. Bridge shows such events as `background` and leaves
+  the stored row unchanged. Copies replicated to the coordinator keep the old
+  stored name.
 - Mission JSON carries `"mode": "native|background|headless"` in `config`, next
   to the saved `headless` and `native_tui` booleans.
 
@@ -1513,7 +1517,7 @@ Event classes and audit details are in [Retention reference](#retention-referenc
 ### Database upgrades, backups and downgrades
 
 The database records its schema version in SQLite's `PRAGMA user_version`
-(currently 10). Migrations are forward-only and run automatically the first time a
+(currently 11). Migrations are forward-only and run automatically the first time a
 newer `llm-bridge` opens an older database, whichever command opens it. The
 release history has used versions 2, 3, 6 and 10 (1.1.0 and 1.2.x shipped 6; 1.3.0
 shipped 10).

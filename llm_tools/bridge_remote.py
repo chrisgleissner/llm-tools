@@ -391,6 +391,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         if getattr(args, "template", None):
             raise ValueError("mission create --template reads a file on this computer and is not available with --target; create the mission on the worker, or pass the objective with --prompt")
         unsupported_options: list[str] = []
+        if getattr(args, "isolate", "none") != "none":
+            unsupported_options.append("--isolate")
         if args.verifier_command is not None:
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):

@@ -305,6 +305,16 @@ def apply_to_args(args: argparse.Namespace, template: dict[str, Any], explicit: 
             args.verifier_timeout = verifier["timeout_seconds"]
 
 
+def prepare_args(args: argparse.Namespace, auto_continue: bool) -> bool:
+    """Apply ``--template`` to the create arguments, if given; returns the effective ``auto_continue``."""
+    if not getattr(args, "template", None):
+        return auto_continue
+    if getattr(args, "isolate", "none") == "worktree":
+        raise ValueError("--template cannot be combined with --isolate worktree yet; create the mission without --isolate")
+    apply_to_args(args, load_template(args.template), getattr(args, "explicit_options", frozenset()))
+    return auto_continue or bool(getattr(args, "auto_continue", False))
+
+
 def create_template_tasks(store: Any, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and the template's tasks and dependencies; returns ``{"mission", "task"}``.
 
@@ -432,3 +442,27 @@ def export_mission(store: Any, mission_id: str) -> str:
     tasks = [t for t in store.list_tasks(mission_id)
              if (t.get("origin") == "operator" or t.get("proposal_status") == "ACCEPTED") and t["status"] != "CANCELLED"]
     return render_template(mission, sorted(tasks, key=lambda t: int(t["ordinal"])))
+
+
+def export_command(args: argparse.Namespace) -> int:
+    """`mission export --template PATH|NAME|-`: write the mission as a template, or print it for ``-``."""
+    import sys
+
+    from . import bridge_format as fmt
+    from .bridge import _json_print, open_store
+
+    target = export_target(args.template)
+    with open_store(readonly=True) as store:
+        text = export_mission(store, args.mission)
+    if target is None:
+        if args.json:
+            _json_print({"template": text})
+        else:
+            sys.stdout.write(text)
+        return 0
+    write_export(text, target, force=args.force)
+    if args.json:
+        _json_print({"path": str(target), "mission": args.mission})
+        return 0
+    print(f"Wrote template {target} from mission {fmt.short_id(args.mission)} \u00b7 create from it with: llm-bridge mission create --template {target}")
+    return 0

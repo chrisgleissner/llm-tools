@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_glyphs, bridge_tui, bridge_viewer
+from llm_tools import bridge_composer, bridge_glyphs, bridge_tui, bridge_viewer
 from llm_tools.bridge_documents import DocumentViewer
 from llm_tools.bridge_help import HOME_HELP, topic_text, view_help
 from tests.fakes import FakeScreen, ScriptExhausted
@@ -247,7 +247,7 @@ def test_closing_a_composer_with_text_says_the_draft_is_kept(monkeypatch, tmp_pa
     kept = tmp_path / "state" / "drafts" / (bridge_tui.TASK_DRAFT_PREFIX + "x.md")
     kept.parent.mkdir(parents=True, mode=0o700)
     kept.write_text("text")
-    monkeypatch.setattr(bridge_tui, "LAST_RECOVERY_DRAFT", kept)
+    monkeypatch.setattr(bridge_composer, "LAST_RECOVERY_DRAFT", kept)
     monkeypatch.setattr(bridge_tui, "compose_document", lambda *_a, **_k: None)
     bridge_tui._compose_task_prompt(_screen(monkeypatch), state)
     assert state.output[-1] == "Draft kept · Ctrl-E reopens it"

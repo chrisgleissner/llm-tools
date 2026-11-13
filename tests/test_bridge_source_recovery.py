@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge, bridge_tui as tui
+from llm_tools import bridge, bridge_composer, bridge_tui as tui
 
 
 def settle(state, predicate):
@@ -91,7 +91,7 @@ def test_failed_task_file_creation_retains_complete_checkpoint_and_reports_it(mo
     checkpoint=tmp_path/'checkpoint.md'
     source='complete\r\n'+'x'*65536+'TAIL\n'
     checkpoint.write_bytes(source.encode())
-    monkeypatch.setattr(tui,'LAST_RECOVERY_DRAFT',checkpoint)
+    monkeypatch.setattr(bridge_composer,'LAST_RECOVERY_DRAFT',checkpoint)
     monkeypatch.setattr(tui,'compose_document',lambda *args,**kwargs:source)
     monkeypatch.setattr(tui.tempfile,'mkstemp',lambda *args,**kwargs: (_ for _ in ()).throw(OSError('disk full')))
     class Window:

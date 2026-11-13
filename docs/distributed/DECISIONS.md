@@ -107,7 +107,6 @@ is documented as an accepted risk.
 | L6 An over-long integer in a message raised an unhandled exception in the worker. | Fixed: it is a protocol error. |
 | L7 The session cookie had no `__Host-` prefix, the systemd unit lacked system call filtering, and the remote CLI followed redirects with the bearer token. | Fixed: `__Host-bridge_session`, `SystemCallFilter=@system-service`, `ProtectProc=invisible`, `ProcSubset=pid`; redirects are refused. |
 
-
 ## D8 Platform support and Windows (operator addendum 4, TEST-013, TEST-016)
 
 CI runs on six GitHub-hosted platforms: Linux x86-64 (`ubuntu-latest`), Linux ARM64
@@ -622,6 +621,21 @@ A mission created through the coordinator may name only a verifier that the work
 ## D49 Rich is the only runtime dependency (FIND-017)
 
 `AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.
+
+## D51 Soak memory gate and remaining phase-B soak items (FIND-001, FIND-005)
+
+This replaces the 1200 s warm-up recorded in D16. The controller memory slope is fitted after a 1800 s warm-up, and the nightly soak runs 2700 s so that the fit window lies between two 900 s retention passes. The recorded nightly series show no leak: the failures came from a fit window that ended on a retention peak. A 900 s window cannot resolve a controller leak below about 2 MiB/h; the long nightly run covers that range.
+
+The soak items `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore` are deferred to 1.6.0. Each needs a coordinator change (a task count in diagnostics, a native clock source, or a query of unfinished commands per worker). Until then the thread count, the `LD_PRELOAD` clock shim and the `db-corrupt-page` restore fault cover them in part.
+
+## D52 Lost frames and lost audit writes in the coordinator (FIND-003, FIND-004)
+
+- A lost command or result frame is repaired by re-sending, not by a protocol change. The coordinator re-sends a mutating command that has been idle for 10 s, checked every 5 s. The worker is responsible for running each mutating request id at most once: it records every mutating result in a private outcome ledger before it answers, and answers a duplicate from the ledger. A crash after the effect and before the record can still run a command once more after a restart; `protocol.md` states this window.
+- A failed audit write fails the action where the action and its audit row can share one transaction (`command.submit`). Where they cannot, because the action has already taken effect, the failure is reported as a health fault (`/healthz` 503 `audit-write-failed`) until an audit write succeeds again.
+
+## D53 Old mode names are normalised on read, not migrated (FIND-018)
+
+Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
 
 ## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
 

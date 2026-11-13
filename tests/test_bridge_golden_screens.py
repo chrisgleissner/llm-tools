@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 
 from llm_tools import (
+    bridge_composer,
     bridge_documents,
     bridge_format,
     bridge_glyphs,
@@ -299,7 +300,7 @@ def _deterministic(tmp_path: Path) -> Iterator[None]:
         patch.setenv("LLM_BRIDGE_STATE_DIR", str(state_dir))
         for module in (bridge_monitor, bridge_format, bridge_launcher, bridge_switcher, bridge_tui):
             patch.setattr(module, "time", _FixedTime(), raising=False)
-        patch.setattr(bridge_tui, "LAST_RECOVERY_DRAFT", None, raising=False)  # compose_document assigns it
+        patch.setattr(bridge_composer, "LAST_RECOVERY_DRAFT", None, raising=False)  # compose_document assigns it
         yield
     time.tzset()  # the environment is restored now
 

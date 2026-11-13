@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from llm_tools import bridge_commands as commands
+from llm_tools import bridge_worker
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled, wait_for
 from tests.distributed_harness import requires_coordinator, restart, running_system
@@ -37,6 +38,15 @@ def test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect(tm
     entered, release = threading.Event(), threading.Event()
     executions: list[str] = []
     real_execute, real_finish = commands.execute, BridgeStore.finish_command
+    ledger_hits: list[str] = []  # redeliveries the worker answered from its outcome ledger instead of executing
+    real_stored = bridge_worker.WorkerSession._stored_outcome
+
+    def counting_stored(self, request_id):
+        outcome = real_stored(self, request_id)
+        if outcome is not None and request_id == REQUEST_ID:
+            ledger_hits.append(request_id)
+        return outcome
+
     failures = iter([sqlite3.OperationalError("disk I/O error")] * storage_failures)
 
     def gated(request):
@@ -55,6 +65,7 @@ def test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect(tm
         return real_finish(self, *args, **kwargs)
 
     monkeypatch.setattr(commands, "execute", gated)
+    monkeypatch.setattr(bridge_worker.WorkerSession, "_stored_outcome", counting_stored)
     monkeypatch.setattr(BridgeStore, "finish_command", flaky_finish)
     with running_system(tmp_path, monkeypatch, capsys, allow_control=True) as system:
         coordinator = system.coordinator
@@ -86,7 +97,10 @@ def test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect(tm
         if storage_failures == 0:
             assert result["outcome"] == "applied"
             assert tasks == 1, "the redelivered command must not be applied twice"
-            assert len(executions) == 2, "the coordinator redelivered the command after the restart"
+            # The coordinator redelivered the command after the restart: the worker saw the id again and answered it from
+            # its outcome ledger, so the operation itself ran once.
+            assert ledger_hits, "the coordinator did not redeliver the command after the restart"
+            assert len(executions) == 1, "the redelivered command was executed again"
         else:
             assert result["outcome"] == "uncertain", result
             assert result["error"]["code"] == "internal"
