@@ -899,6 +899,8 @@ A mission created through the coordinator may name only a verifier that the work
 
 The fresh-eyes critique of every console page at 1440 and 360 pixels, in both themes, found five faults: an incomplete quota pill at 360, a clipped worker filter at 360, an approval reason cut mid-word and a wrapping pill in the Inbox at 1440, a blank provider cell on failed mission rows, and no sideways-scroll cue on the phone terminal. UXR-040 requires every finding to be filed as a UXR row and closed with proof, so they become UXR-053 to UXR-057. They are fixed with the web console work (W4), which can regenerate the Pixel 4 screenshot baselines in the Playwright image. UXR-040 stays open until they are closed.
 
+Addendum 2026-11-13: the routes JavaScript raw cap rose from 94000 to 99000 bytes (measured 94256 on main plus 5%), because merged changes had pushed main over the cap and failed the web budget test on every pull request.
+
 ## D49 Rich is the only runtime dependency (FIND-017)
 
 `AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.
