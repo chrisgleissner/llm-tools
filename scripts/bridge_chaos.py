@@ -360,8 +360,13 @@ def fault_clock_jump(fabric: Fabric, offset_file: Path) -> dict[str, Any]:
     for label, offset in (("forward", 3600), ("backward", -7200), ("restored", 0)):
         write_offset(offset)
         bounce()
-        stamped = last_seen("chaos-w1")
-        shift = stamped - time.time()
+        # The worker can be reported online before its reconnect is stamped with the shifted clock, so wait for the stamp.
+        deadline = time.monotonic() + 30
+        while True:
+            shift = last_seen("chaos-w1") - time.time()
+            if label == "restored" or abs(shift - offset) < 120 or time.monotonic() > deadline:
+                break
+            time.sleep(0.5)
         results[label] = {"offset_seconds": offset, "last_seen_shift_seconds": round(shift)}
         if label != "restored":
             expect(abs(shift - offset) < 120, f"the clock shim had no effect on the coordinator (last_seen shifted {shift:.0f}s, expected {offset}s)")

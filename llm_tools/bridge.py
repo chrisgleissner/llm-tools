@@ -1313,8 +1313,16 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
     argv = list(getattr(args, "verifier_argv", []) or [])
     command = getattr(args, "verifier_command", None)
     after_dashes = list(getattr(args, "verifier_after_dashes", []) or [])
-    if sum(bool(form) for form in (argv, command is not None, after_dashes)) > 1:
-        raise ValueError("give one verifier form: --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    name = getattr(args, "verifier_name", None)
+    if sum(bool(form) for form in (argv, command is not None, after_dashes, name)) > 1:
+        raise ValueError("give one verifier form: --verifier-name NAME, --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    named_timeout: float | None = None
+    if name:
+        from . import config as toolconfig
+
+        declared = toolconfig.named_verifier(toolconfig.load_config(), name)
+        argv, named_timeout = declared["argv"], declared["timeout_seconds"]
+        args.verifier_files = list(declared["files"])
     if command is not None:
         try:
             argv = shlex.split(command)
@@ -1326,7 +1334,9 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
         argv = after_dashes
     if not argv:
         return None
-    timeout = float(getattr(args, "verifier_timeout", 300))
+    requested = getattr(args, "verifier_timeout", None)
+    # An explicit timeout wins over the declared one, even when it equals the default.
+    timeout = float(requested) if requested is not None else (named_timeout if named_timeout is not None else 300.0)
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
     if any("\x00" in arg for arg in argv):

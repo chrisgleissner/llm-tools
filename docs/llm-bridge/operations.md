@@ -1004,6 +1004,19 @@ Turn the feature off with:
 task_notices = false # default true
 ```
 
+### Named verifiers
+
+A mission created through the coordinator may not carry a verifier command or file. It names a verifier that the worker declares in its own `config.toml`:
+
+```toml
+[bridge.verifiers.unit]
+argv = ["python", "-m", "pytest", "-q"]
+files = ["pytest.ini"]   # optional, relative to the mission folder; hashed by the verifier guard
+timeout_seconds = 600    # optional, default 300, at most 3600
+```
+
+Use it with `mission create --verifier-name unit`, locally or with `--target`. An undeclared name fails with `unknown-verifier`.
+
 ### Provider native teams and token spend preference
 
 New missions default to provider-native team guidance enabled and Medium token

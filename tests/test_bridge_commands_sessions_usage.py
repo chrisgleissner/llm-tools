@@ -133,3 +133,16 @@ def test_read_only_worker_serves_both_operations(mission, monkeypatch):
         assert result.payload["outcome"] == "ok", (operation, result.payload)
     catalog = {entry["operation"]: entry for entry in commands.operation_catalog()}
     assert catalog["session.list"]["mutating"] is False and catalog["usage.snapshot"]["needs_mission"] is False
+
+
+def test_usage_snapshot_lists_configured_routes(tmp_path, monkeypatch):
+    from llm_tools import usage
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "s"))
+    _inject_codex(monkeypatch)
+    monkeypatch.setattr(usage, "route_decision_summary", lambda cfg=None: [
+        {"route": "fast", "provider": "codex", "available": True}, {"route": "slow", "provider": "codex", "available": False}, {"provider": "x"}])
+    result = commands.execute(CommandRequest("usage.snapshot"))
+    assert result.result["routes"] == [{"route": "fast", "provider": "codex", "available": True}, {"route": "slow", "provider": "codex", "available": False}]
+    monkeypatch.setattr(usage, "route_decision_summary", lambda cfg=None: (_ for _ in ()).throw(SystemExit(2)))
+    assert commands.execute(CommandRequest("usage.snapshot")).result["routes"] == []

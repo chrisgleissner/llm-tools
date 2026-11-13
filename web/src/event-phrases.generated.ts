@@ -1,87 +1,62 @@
 // Generated from llm_tools.bridge_tui._HUMANIZERS by generate_event_phrases.py. Do not edit.
-export const TUI_EVENT_PHRASES: Readonly<Record<string, string>> = {
-  "capacity-refresh": "Capacity refreshed: providers",
-  "capacity-refresh-error": "Capacity refresh failed",
-  "capacity-wake-armed": "Capacity wake armed",
-  "capacity-wake-plan": "Shared wake plan updated",
-  "capacity-wake-resume-unverified": "Capacity wake could not be verified",
-  "capacity-wake-resumed": "Capacity wake observed",
-  "capacity-wake-unavailable": "Capacity wake unavailable",
-  "command-applied": "Command applied",
-  "command-failed": "Command failed",
-  "command-queued": "Command queued",
-  "command-rejected": "Command rejected",
-  "controller-config": "Controller configured",
-  "controller-exited-unexpectedly": "Controller exited unexpectedly",
-  "controller-failed": "Controller failed",
-  "controller-heartbeat": "controller alive",
-  "controller-heartbeat-error": "controller heartbeat failed",
-  "controller-mode": "Controller mode: unknown",
-  "controller-ownership": "Controller ownership verified",
-  "dependency-added": "Task now waits for",
-  "mission-colour": "Mission colour back to automatic",
-  "mission-created": "Mission created",
-  "mission-reopened": "Mission reopened",
-  "mission-status": "Mission changed",
-  "mission-suspend-when-rate-limited": "Capacity-wait suspend off",
-  "mission-waiting-for-operator": "Waiting for you · no task can run",
-  "native-session-restoration": "Session unknown",
-  "operation-aborted-before-launch": "Launch aborted",
-  "operation-exited": "Provider exited (?)",
-  "operation-prepared": "Preparing provider",
-  "operation-process": "Provider process started",
-  "operation-progress": "Provider progress noted",
-  "operation-running": "Started provider",
-  "operation-uncertain": "Provider outcome unknown",
-  "provider-handoff": "Task handed off after exit ? (failure ?/?)",
-  "provider-handoff-exhausted": "Task out of handoffs (? failures, limit ?)",
-  "provider-handoff-selected": "Handing off to ?",
-  "provider-orphaned": "Provider process ? could not be stopped",
-  "provider-result-diagnosed": "Provider result recorded",
-  "provider-selection": "Selected",
-  "provider-switched": "Switched provider ? → ?",
-  "provider-usage-limit": "Provider usage limit reached, reset time unknown",
-  "provider-wait": "Waiting for capacity",
-  "repository-checkpoint": "Repository checkpoint saved",
-  "review-hold": "Holding the next task for your review",
-  "review-hold-released": "Review hold released",
-  "rotation-applied": "Rotation applied: default",
-  "rotation-changed": "Rotation changed to default",
-  "rotation-rejected": "Rotation change rejected",
-  "station-handoff": "Switched provider ? → ?",
-  "station-observation": "Provider screen observed",
-  "station-stopped": "Provider station stopped",
-  "steering-handoff-consumed": "Steering handoff consumed",
-  "steering-handoff-requested": "Steering handoff requested",
-  "steering-pause-applied": "Steering pause applied",
-  "steering-pause-requested": "Steering pause requested",
-  "steering-stop-task-applied": "Steering stop task applied",
-  "steering-stop-task-requested": "Steering stop task requested",
-  "steering-verify-applied": "Steering verify applied",
-  "steering-verify-drained": "Steering verify drained",
-  "steering-verify-requested": "Steering verify requested",
-  "suspend-decision": "Suspend path",
-  "suspend-intent": "Capacity suspend requested",
-  "suspend-outcome": "Capacity suspend finished",
-  "suspend-provider-started": "Provider resumed after verified sleep",
-  "suspend-refused": "Capacity suspend refused",
-  "suspend-work-resumed": "Capacity-wait work resumed",
-  "task-added": "Task added",
-  "task-amended": "Task amended",
-  "task-amendment-applied": "Task amendment applied",
-  "task-awaiting-answer": "Task asked a question and is waiting for you · see the provider output",
-  "task-evidence-recorded": "Task evidence recorded",
-  "task-notice-deferred": "Provider not told about queued task changes yet · its prompt holds unsent text",
-  "task-notice-delivered": "Provider told about queued task changes",
-  "task-priority": "Task priority changed",
-  "task-proposal-accepted": "Proposal accepted: task",
-  "task-proposal-rejected": "Proposal rejected: task",
-  "task-proposed": "Agent proposed task",
-  "task-ready": "Task updated",
-  "task-rejected": "Task sent back",
-  "task-reordered": "Task reordered",
-  "task-status": "Task updated",
-  "task-status-transition": "Task  → ",
-  "task-verified": "Task verified",
-  "verification-failed": "Task verification failed"
-};
+// Kinds whose phrase is the kind spelled out as words (task-added: Task added) are omitted; src/event-humanizer.ts derives them.
+export const TUI_EVENT_PHRASES: Readonly<Record<string, string>> = Object.fromEntries(
+  `capacity-refresh	Capacity refreshed: providers
+capacity-refresh-error	Capacity refresh failed
+capacity-wake-plan	Shared wake plan updated
+capacity-wake-resume-unverified	Capacity wake could not be verified
+capacity-wake-resumed	Capacity wake observed
+controller-config	Controller configured
+controller-heartbeat	controller alive
+controller-heartbeat-error	controller heartbeat failed
+controller-mode	Controller mode: unknown
+controller-ownership	Controller ownership verified
+dependency-added	Task now waits for
+mission-colour	Mission colour back to automatic
+mission-status	Mission changed
+mission-suspend-when-rate-limited	Capacity-wait suspend off
+mission-waiting-for-operator	Waiting for you · no task can run
+native-session-restoration	Session unknown
+operation-aborted-before-launch	Launch aborted
+operation-exited	Provider exited (?)
+operation-prepared	Preparing provider
+operation-process	Provider process started
+operation-progress	Provider progress noted
+operation-running	Started provider
+operation-uncertain	Provider outcome unknown
+provider-handoff	Task handed off after exit ? (failure ?/?)
+provider-handoff-exhausted	Task out of handoffs (? failures, limit ?)
+provider-handoff-selected	Handing off to ?
+provider-orphaned	Provider process ? could not be stopped
+provider-result-diagnosed	Provider result recorded
+provider-selection	Selected
+provider-switched	Switched provider ? → ?
+provider-usage-limit	Provider usage limit reached, reset time unknown
+provider-wait	Waiting for capacity
+repository-checkpoint	Repository checkpoint saved
+review-hold	Holding the next task for your review
+rotation-applied	Rotation applied: default
+rotation-changed	Rotation changed to default
+rotation-rejected	Rotation change rejected
+station-handoff	Switched provider ? → ?
+station-observation	Provider screen observed
+station-stopped	Provider station stopped
+suspend-decision	Suspend path
+suspend-intent	Capacity suspend requested
+suspend-outcome	Capacity suspend finished
+suspend-provider-started	Provider resumed after verified sleep
+suspend-refused	Capacity suspend refused
+suspend-work-resumed	Capacity-wait work resumed
+task-awaiting-answer	Task asked a question and is waiting for you · see the provider output
+task-notice-deferred	Provider not told about queued task changes yet · its prompt holds unsent text
+task-notice-delivered	Provider told about queued task changes
+task-priority	Task priority changed
+task-proposal-accepted	Proposal accepted: task
+task-proposal-rejected	Proposal rejected: task
+task-proposed	Agent proposed task
+task-ready	Task updated
+task-rejected	Task sent back
+task-status	Task updated
+task-status-transition	Task  → 
+verification-failed	Task verification failed`.split("\n").map((line) => line.split("\t") as [string, string]),
+);

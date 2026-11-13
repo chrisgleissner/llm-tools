@@ -1,7 +1,8 @@
 import * as api from "./api";
 import type { MissionEntry, WorkerInfo } from "./api";
+import { deriveState, type ConnState, type DerivedState } from "./state";
 
-export type ConnState = "live" | "reconnecting" | "offline";
+export type { ConnState };
 
 type Listener = () => void;
 
@@ -10,6 +11,8 @@ export const store = {
   missions: [] as MissionEntry[],
   conn: "offline" as ConnState,
   loaded: false,
+  /** Epoch milliseconds of the last data from the coordinator (a refresh or a stream message); 0 before the first. Drives "as of 14:02 (3m ago)". */
+  lastSync: 0,
 };
 
 const listeners = new Set<Listener>();
@@ -51,18 +54,65 @@ function emit(): void {
   for (const l of [...listeners]) l();
 }
 
+/** True when the worker replicated the digest (task counts, and for a live mission the current task, provider, model and needs): DOG-021. */
+export const hasDigest = (m: api.MissionInfo): boolean => m.task_counts !== undefined;
+
+/**
+ * Why the operator is needed, from what the coordinator's mission list already carries, so no worker is asked: `attention`
+ * (PRD-037 WP-7), else the digest's `needs_you` or `needs_kind`. `null` means nothing is needed, `undefined` that the worker sent
+ * neither (it predates both), so the status has to be read.
+ */
+export function listedNeeds(m: api.MissionInfo): api.NeedsYou | null | undefined {
+  if (m.attention !== undefined) return m.attention;
+  if (m.needs_you) return m.needs_you;
+  if (m.needs_kind) return { kind: m.needs_kind, message: "", tasks: [] };
+  return m.needs_kind === null ? null : undefined;
+}
+
 export function worker(name: string): WorkerInfo | undefined {
   return store.workers.find((w) => w.name === name);
 }
 
-/** A mission is stale when the coordinator says so or its worker is not online right now. */
-export function isStale(m: MissionEntry): boolean {
-  return store.conn !== "live" || m.stale || worker(m.worker)?.state !== "online";
+// The last state shown for each mission and worker while the stream was live. While the stream is down the page keeps these:
+// it does not recompute Offline from data it can no longer refresh (spec 5.1).
+const lastMissionState = new Map<string, DerivedState>();
+const lastWorkerState = new Map<string, DerivedState>();
+
+/**
+ * The single state of a mission. `extra` carries what the status projection adds beyond the mission list (`needs_you` with
+ * its task numbers, `task_counts`). The coordinator's replication flag (`stale`) is ignored.
+ */
+export function missionState(m: MissionEntry, extra: { needsYou?: api.NeedsYou | null; taskCounts?: Record<string, number> | null } = {}): DerivedState {
+  const key = `${m.worker}/${m.mission.id}`;
+  const w = worker(m.worker);
+  const state = deriveState({
+    entity: "mission",
+    status: m.mission.status,
+    // `null` is an answer ("nothing needs you", for example a hint the task list contradicts), only an absent value falls back to the list.
+    needsYou: extra.needsYou !== undefined ? extra.needsYou : (m.mission.needs_you ?? null),
+    taskCounts: extra.taskCounts ?? null,
+    worker: w ? { state: w.state, lastSeen: w.last_seen } : null,
+    conn: store.conn,
+  });
+  if (store.conn === "live") {
+    lastMissionState.set(key, state);
+    return state;
+  }
+  return lastMissionState.get(key) ?? state;
 }
 
-/** Worker state as shown: while the stream is down the coordinator's view is unknown, so it reads as stale. */
-export function workerState(w: WorkerInfo): "online" | "offline" | "stale" {
-  if (store.conn !== "live" && w.state === "online") return "stale";
+/** Worker liveness as a state (Online or Offline). While the stream is down it is the last state shown. */
+export function workerDerived(w: WorkerInfo): DerivedState {
+  const state = deriveState({ entity: "worker", status: w.state, worker: { state: w.state, lastSeen: w.last_seen }, conn: store.conn });
+  if (store.conn === "live") {
+    lastWorkerState.set(w.name, state);
+    return state;
+  }
+  return lastWorkerState.get(w.name) ?? state;
+}
+
+/** Worker state as reported by the coordinator: `online` or `offline`. */
+export function workerState(w: WorkerInfo): "online" | "offline" {
   return w.state;
 }
 
@@ -72,6 +122,7 @@ export async function refresh(): Promise<void> {
   store.workers = w.workers;
   store.missions = m.missions;
   store.loaded = true;
+  store.lastSync = Date.now();
   if (changed) emit();
 }
 
@@ -81,6 +132,9 @@ let poll: number | undefined;
 let attempts = 0;
 let wanted = false;
 let refreshTimer: number | undefined;
+
+/** True while the stream's first connection attempt is still open: `store.conn` is "offline" then, only because nothing has connected yet. */
+export const streamConnecting = (): boolean => ws?.readyState === WebSocket.CONNECTING;
 
 function setConn(c: ConnState): void {
   if (store.conn === c) return;
@@ -110,6 +164,7 @@ function connect(): void {
     } catch {
       return;
     }
+    store.lastSync = Date.now();
     if (msg.type === "worker" && msg.worker) {
       const w = worker(msg.worker);
       if (w && (msg.state === "online" || msg.state === "offline")) {
@@ -128,7 +183,6 @@ function connect(): void {
     if (!wanted) return;
     attempts += 1;
     setConn(attempts > 4 || navigator.onLine === false ? "offline" : "reconnecting");
-    // Mark every worker stale while the coordinator cannot be reached: its view of them is unknown.
     timer = window.setTimeout(connect, Math.min(15000, 500 * 2 ** attempts));
     void api.authState().then((s) => !s.authenticated && api.onUnauthorizedNow()).catch(() => {});
   };
@@ -159,6 +213,9 @@ export function stopLive(): void {
   attempts = 0;
   store.conn = "offline";
   store.loaded = false;
+  store.lastSync = 0;
+  lastMissionState.clear();
+  lastWorkerState.clear();
   store.workers = [];
   store.missions = [];
   emit();
