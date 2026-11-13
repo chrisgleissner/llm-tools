@@ -328,3 +328,43 @@ def test_backup_file_format_does_not_depend_on_the_architecture(tmp_path, monkey
     assert not Path(str(backup) + "-wal").exists() and not Path(str(backup) + "-shm").exists()
     guide = GUIDE.read_text(encoding="utf-8")
     assert "https://www.sqlite.org/onefile.html" in guide and "https://www.sqlite.org/lts.html" in guide
+
+
+# --------------------------------------------------------------------------- coordinator install methods (PRD-005)
+
+COORDINATOR_INSTALL = ROOT / "docs" / "distributed" / "install.md"
+COORDINATOR_UNINSTALL = ROOT / "docs" / "distributed" / "uninstall.md"
+# Each documented coordinator install method (a heading of install.md) and the heading that removes it.
+COORDINATOR_METHODS = {
+    "Container deployment (recommended)": "Container deployment",
+    "Windows": "Windows",
+    "Native install with systemd (alternative)": "Native install with systemd",
+}
+
+
+def _headings(path: Path) -> set[str]:
+    return {line[3:].strip() for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("## ")}
+
+
+def test_every_coordinator_install_method_has_an_uninstall_section():
+    install_headings = _headings(COORDINATOR_INSTALL)
+    uninstall_headings = _headings(COORDINATOR_UNINSTALL)
+    for install_heading, uninstall_heading in COORDINATOR_METHODS.items():
+        assert install_heading in install_headings, f"install.md lost the method {install_heading!r}; update COORDINATOR_METHODS"
+        assert uninstall_heading in uninstall_headings, f"uninstall.md has no section for {install_heading!r}"
+    assert "uninstall.md" in COORDINATOR_INSTALL.read_text(encoding="utf-8")
+
+
+def test_coordinator_uninstall_names_what_the_installers_create():
+    guide = COORDINATOR_UNINSTALL.read_text(encoding="utf-8")
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    for path in ("/usr/local/bin/bridge-coordinator", "/usr/local/bin/llm-bridge-coordinator", "/usr/share/bridge-coordinator",
+                 "/var/lib/bridge-coordinator", "/etc/systemd/system/bridge-coordinator.service"):
+        assert path in guide, path
+        assert Path(path).name in script, path  # the installer creates it (names appear in deploy/install.sh)
+    assert "user=bridge" in script and "userdel bridge" in guide
+    compose = (ROOT / "container" / "compose.yaml").read_text(encoding="utf-8")
+    volumes = re.findall(r"^  ([a-z-]+):$", compose[compose.index("\nvolumes:"):], re.M)
+    assert "bridge-data" in volumes and "bridge-data" in guide
+    assert "--profile tailscale down --volumes" in guide and "profiles: [\"tailscale\"]" in compose
+    assert 'bridge-coordinator backup' in guide and "unenroll" in guide
