@@ -15,11 +15,12 @@ from .bridge_events import recent_hidden_kinds
 from .bridge_projection import ProjectionParams, Snapshot
 from .bridge_states import ACTIVE_OPERATION_STATUSES
 from .bridge_vocab import mission_mode
+from .bridge_vocab import normalize_event_data
 
 
 def _decode_event(row: Any) -> dict[str, Any]:
     item = dict(row)
-    item["data"] = json.loads(item.pop("data_json"))
+    item["data"] = normalize_event_data(item["kind"], json.loads(item.pop("data_json")))
     return item
 
 
@@ -614,8 +615,6 @@ def _project_snapshot(
     latest_mode = _latest_event(store, mission_id, "controller-mode")
     mode_data = (latest_mode or {}).get("data", {})
     actual_mode = mode_data.get("actual_mode", "unknown") if isinstance(mode_data, dict) and mode_data.get("verified") is True else "unknown"
-    if actual_mode == "autonomous":  # the name earlier controllers recorded for Background mode
-        actual_mode = "background"
     configured_mode = configured["configured_mode"]
     suspend_data = (latest_suspend or {}).get("data", {})
     suspend_data = suspend_data if isinstance(suspend_data, dict) else {}
