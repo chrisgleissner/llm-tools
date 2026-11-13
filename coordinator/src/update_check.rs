@@ -10,6 +10,7 @@ pub const RELEASES_URL: &str = "https://api.github.com/repos/chrisgleissner/llm-
 pub const USER_AGENT: &str = "bridge-coordinator";
 pub const INTERVAL_SECS: i64 = 24 * 3600;
 pub const TIMEOUT_SECS: u64 = 5;
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cache {
@@ -85,6 +86,15 @@ pub fn describe(current: &str, cache: Option<&Cache>) -> String {
     }
 }
 
+/// Append a chunk only if the resulting body fits within the cap.
+pub fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> Result<(), String> {
+    if buf.len() > cap || chunk.len() > cap - buf.len() {
+        return Err("response too large".into());
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
 /// The real HTTP fetch. Sends only the GitHub JSON Accept header and a generic User-Agent.
 pub async fn fetch_release(url: String) -> Result<String, String> {
     use std::time::Duration;
@@ -94,7 +104,7 @@ pub async fn fetch_release(url: String) -> Result<String, String> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "network error".to_string())?;
-    let response = client
+    let mut response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
@@ -104,7 +114,14 @@ pub async fn fetch_release(url: String) -> Result<String, String> {
     if status.as_u16() != 200 {
         return Err(format!("HTTP {}", status.as_u16()));
     }
-    response.text().await.map_err(|_| "network error".to_string())
+    if response.content_length().is_some_and(|n| n > MAX_BODY_BYTES as u64) {
+        return Err("response too large".into());
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "network error".to_string())? {
+        push_capped(&mut buf, &chunk, MAX_BODY_BYTES)?;
+    }
+    String::from_utf8(buf).map_err(|_| "unexpected response".to_string())
 }
 
 /// Refresh the cache when enabled and due. Failed checks are retried on the next call.
@@ -160,6 +177,81 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("wp9a-uc-{}-{name}", std::process::id()))
+    }
+
+    async fn serve_response(headers: &'static str, body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buf).await.unwrap();
+                assert_ne!(count, 0, "connection closed before request headers");
+                request.extend_from_slice(&buf[..count]);
+            }
+            if stream.write_all(headers.as_bytes()).await.is_err() {
+                return;
+            }
+            for chunk in body.chunks(1024) {
+                if stream.write_all(chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), task)
+    }
+
+    #[test]
+    fn push_capped_accepts_up_to_the_cap_and_refuses_beyond() {
+        let mut buf = Vec::new();
+        assert_eq!(push_capped(&mut buf, b"12345", 10), Ok(()));
+        assert_eq!(push_capped(&mut buf, b"67890", 10), Ok(()));
+        assert_eq!(buf.len(), 10);
+        assert_eq!(push_capped(&mut buf, b"x", 10), Err("response too large".into()));
+        assert_eq!(buf, b"1234567890");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_refused_while_reading() {
+        let (url, server) = serve_response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", vec![b'x'; 200 * 1024]).await;
+        assert_eq!(fetch_release(url).await, Err("response too large".into()));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_declared_oversized_body_is_refused_before_reading() {
+        let (url, server) = serve_response("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 200000\r\n\r\n", b"xxx".to_vec()).await;
+        assert_eq!(fetch_release(url).await, Err("response too large".into()));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_small_body_is_returned() {
+        let body = r#"{"tag_name":"v1.2.3"}"#;
+        let (url, server) = serve_response("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", body.as_bytes().to_vec()).await;
+        let result = fetch_release(url).await.unwrap();
+        assert_eq!(result, body);
+        assert_eq!(parse_latest(&result), Some("1.2.3".into()));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_caches_an_oversized_response_as_an_error() {
+        let dir = temp_dir("oversized");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Config {
+            update_check: true,
+            ..Config::default()
+        };
+        let cache = refresh(&cfg, &dir, 100, |_| async { Err("response too large".into()) }).await.unwrap();
+        assert_eq!(cache.latest, None);
+        assert_eq!(cache.error.as_deref(), Some("response too large"));
+        assert_eq!(read_cache(&dir), Some(cache));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

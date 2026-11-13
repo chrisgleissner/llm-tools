@@ -8,7 +8,201 @@ use std::path::Path;
 use std::time::Duration;
 
 const PREFIX: &str = "bridge-support-bundle/";
-const LOG_HEADER: &str = "# recent log lines, scrubbed (tokens, addresses, URLs, e-mail addresses and values of sensitive keys removed; lines that mention a prompt dropped). The scrubbing is pattern based, not an allow-list: read before sharing.";
+const LOG_HEADER: &str = "# recent coordinator log records reduced to timestamp, level and a fixed event id from an allow-list of the coordinator's static messages; message text, values and host names are never copied";
+
+pub struct LogEvent {
+    pub id: &'static str,
+    pub level: &'static str,
+    pub prefix: &'static str,
+}
+
+/// Allow-list of the coordinator's static log messages. `prefix` is the static text up to
+/// the first interpolated value, after removing a leading "bridge-coordinator: ".
+/// Matching uses `message.starts_with(prefix)`; the longest matching prefix wins.
+pub const LOG_EVENTS: &[LogEvent] = &[
+    LogEvent {
+        id: "database_error",
+        level: "error",
+        prefix: "database error: ",
+    },
+    LogEvent {
+        id: "passkey_origin_failed",
+        level: "warn",
+        prefix: "could not persist the canonical passkey origin: ",
+    },
+    LogEvent {
+        id: "notification_persist_failed",
+        level: "error",
+        prefix: "security notification could not be persisted",
+    },
+    LogEvent {
+        id: "webhook_client_failed",
+        level: "error",
+        prefix: "security notification webhook client could not be created",
+    },
+    LogEvent {
+        id: "webhook_response",
+        level: "info",
+        prefix: "security notification webhook returned HTTP ",
+    },
+    LogEvent {
+        id: "webhook_failed",
+        level: "warn",
+        prefix: "security notification webhook delivery failed",
+    },
+    LogEvent {
+        id: "backup_progress",
+        level: "info",
+        prefix: "backup: ",
+    },
+    LogEvent {
+        id: "backup_remove_failed",
+        level: "warn",
+        prefix: "cannot remove old backup ",
+    },
+    LogEvent {
+        id: "backup_status_failed",
+        level: "error",
+        prefix: "cannot write ",
+    },
+    LogEvent {
+        id: "backup_written",
+        level: "info",
+        prefix: "automatic backup ",
+    },
+    LogEvent {
+        id: "backups_disabled",
+        level: "info",
+        prefix: "automatic backups are off (backup_interval_hours = 0)",
+    },
+    LogEvent {
+        id: "backup_panicked",
+        level: "error",
+        prefix: "automatic backup task panicked",
+    },
+    LogEvent {
+        id: "maintenance_slow",
+        level: "warn",
+        prefix: "slow database maintenance step ",
+    },
+    LogEvent {
+        id: "database_slow",
+        level: "warn",
+        prefix: "slow database call ",
+    },
+    LogEvent {
+        id: "audit_failed",
+        level: "error",
+        prefix: "audit write failed for ",
+    },
+    LogEvent {
+        id: "schema_migration",
+        level: "info",
+        prefix: "database schema ",
+    },
+    LogEvent {
+        id: "backup_started",
+        level: "info",
+        prefix: "backup: running at ",
+    },
+    LogEvent {
+        id: "compact_started",
+        level: "info",
+        prefix: "compact: running at ",
+    },
+    LogEvent {
+        id: "listener_started",
+        level: "info",
+        prefix: "bridge-coordinator ",
+    },
+    LogEvent {
+        id: "shutdown",
+        level: "info",
+        prefix: "shutting down",
+    },
+    LogEvent {
+        id: "token_scopes",
+        level: "info",
+        prefix: "note: token scopes: ",
+    },
+    LogEvent {
+        id: "command_error",
+        level: "error",
+        prefix: "error: ",
+    },
+    LogEvent {
+        id: "quick_check_slow",
+        level: "warn",
+        prefix: "database quick_check passed in ",
+    },
+    LogEvent {
+        id: "tls_reload_deferred",
+        level: "warn",
+        prefix: "TLS file certificate reload deferred: ",
+    },
+    LogEvent {
+        id: "maintenance_failed",
+        level: "error",
+        prefix: "maintenance failed: ",
+    },
+];
+
+pub struct LogRecord {
+    pub timestamp: String,
+    pub level: &'static str,
+    pub target: &'static str,
+    pub event: &'static str,
+}
+
+pub fn log_records(lines: &[String]) -> Vec<LogRecord> {
+    lines
+        .iter()
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            let first = fields.next().unwrap_or("");
+            let valid = (19..=32).contains(&first.len()) && first.bytes().all(|b| b.is_ascii_digit() || b"-T:+.Z".contains(&b));
+            let (timestamp, message) = if valid {
+                // Discard the host name, then the unit/pid token.
+                fields.next();
+                fields.by_ref().find(|token| token.ends_with(':'));
+                (first, fields.collect::<Vec<_>>().join(" "))
+            } else {
+                ("unknown", line.clone())
+            };
+            let message = message.strip_prefix("bridge-coordinator: ").unwrap_or(&message);
+            let event = LOG_EVENTS
+                .iter()
+                .filter(|e| !e.prefix.is_empty() && message.starts_with(e.prefix))
+                .max_by_key(|e| e.prefix.len());
+            LogRecord {
+                timestamp: timestamp.into(),
+                level: event.map_or("unknown", |e| e.level),
+                target: "bridge-coordinator",
+                event: event.map_or("unrecognized", |e| e.id),
+            }
+        })
+        .collect()
+}
+
+pub fn render_logs(lines: &[String]) -> String {
+    let records = log_records(lines);
+    let mut counts = std::collections::BTreeMap::new();
+    for record in &records {
+        *counts.entry(record.event).or_insert(0usize) += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.cmp(b)));
+    let mut output = vec![LOG_HEADER.to_string(), "# event histogram (all records read)".into()];
+    output.extend(counts.into_iter().map(|(id, count)| format!("{id} {count}")));
+    output.push("# last 300 records".into());
+    output.extend(
+        records
+            .iter()
+            .skip(records.len().saturating_sub(300))
+            .map(|r| format!("{} {} {} {}", r.timestamp, r.level, r.target, r.event)),
+    );
+    output.iter().filter_map(|line| scrub_line(line)).map(|line| format!("{line}\n")).collect()
+}
 
 fn safe_key(s: &str) -> bool {
     !s.is_empty() && s.len() <= 48 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -187,17 +381,11 @@ pub fn members(data_dir: &Path, log_lines: &[String], now: i64) -> Vec<(String, 
         .unwrap_or_else(|_| json!({"error": "diagnostics unavailable"}));
     let names = ["version.json", "diagnostics.json", "config.json", "database.json", "logs.txt"];
     let manifest = json!({"format": 1, "created_at": now, "members": names,
-        "note": "Redacted by allow-list. Contains no database rows, passwords, password hashes, tokens, TOTP secrets, prompts, host names or network addresses."});
+        "note": "Redacted by allow-list. Contains no database rows, credentials, private input, host names or network addresses."});
     let version = json!({"coordinator": env!("CARGO_PKG_VERSION"), "protocol": crate::protocol::PROTOCOL_VERSION,
         "schema_version_expected": crate::db::SCHEMA_VERSION, "sqlite": rusqlite::version(),
         "os": std::env::consts::OS, "arch": std::env::consts::ARCH});
-    let mut logs: Vec<String> = log_lines.iter().filter_map(|s| scrub_line(s)).collect();
-    let start = logs.len().saturating_sub(300);
-    let mut text = format!("{LOG_HEADER}\n");
-    for line in logs.drain(start..) {
-        text.push_str(&line);
-        text.push('\n');
-    }
+    let text = render_logs(log_lines);
     vec![
         ("manifest.json".into(), manifest),
         ("version.json".into(), version),
@@ -346,9 +534,11 @@ pub fn scrub_line(line: &str) -> Option<String> {
     let mut i = 0;
     while i < line.len() {
         let rest = &line[i..];
-        if rest.starts_with("http://") || rest.starts_with("https://") {
+        let scheme = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let home = rest.starts_with("/home/") || rest.starts_with("/Users/") || rest.starts_with("/root");
+        if (scheme > 0 && rest[scheme..].starts_with("://")) || home {
             i += rest.find(char::is_whitespace).unwrap_or(rest.len());
-            text.push_str("[url]");
+            text.push_str(if home { "[path]" } else { "[url]" });
         } else {
             let c = rest.chars().next()?;
             text.push(c);
@@ -364,13 +554,17 @@ pub fn scrub_line(line: &str) -> Option<String> {
             })
         },
     );
-    // Bearer is case insensitive; keep the scheme and redact its following word.
+    // Authentication schemes are case insensitive; redact their following word.
     let lower = text.to_ascii_lowercase();
     let mut bearer = String::new();
     i = 0;
-    while let Some(pos) = lower[i..].find("bearer ") {
+    while let Some((pos, length)) = ["bearer ", "basic "]
+        .iter()
+        .filter_map(|scheme| lower[i..].find(scheme).map(|pos| (pos, scheme.len())))
+        .min_by_key(|(pos, _)| *pos)
+    {
         let start = i + pos;
-        let value = start + 7;
+        let value = start + length;
         bearer.push_str(&text[i..value]);
         let end = text[value..].find(char::is_whitespace).map_or(text.len(), |n| value + n);
         if end > value {
@@ -393,27 +587,27 @@ pub fn scrub_line(line: &str) -> Option<String> {
         "hash",
         // Login names are sensitive too (the seeded support-bundle fixture includes one).
         "user",
+        "session",
+        "credential",
+        "bearer",
     ];
     let mut scrubbed = String::new();
     i = 0;
     while i < text.len() {
-        let boundary = i == 0 || !text.as_bytes()[i - 1].is_ascii_alphanumeric() && text.as_bytes()[i - 1] != b'_';
         let mut found = None;
-        if boundary {
-            for key in keys {
-                if !lower[i..].starts_with(key) {
-                    continue;
-                }
-                let mut j = i + key.len();
-                if text.as_bytes().get(j) == Some(&b'"') {
-                    j += 1;
-                }
-                while text.as_bytes().get(j).is_some_and(u8::is_ascii_whitespace) {
-                    j += 1;
-                }
-                if !matches!(text.as_bytes().get(j), Some(b'=' | b':')) {
-                    continue;
-                }
+        // Scan the whole key so sensitive substrings also cover api_key and x-auth-token.
+        let key_len = text[i..].find(|c: char| c.is_whitespace() || "\"'=:{},".contains(c)).unwrap_or(text.len() - i);
+        let key = &lower[i..i + key_len];
+        if key_len > 0 && keys.iter().any(|sensitive| key.contains(sensitive)) {
+            let mut j = i + key_len;
+            if text.as_bytes().get(j) == Some(&b'"') {
+                j += 1;
+            }
+            while text.as_bytes().get(j).is_some_and(u8::is_ascii_whitespace) {
+                j += 1;
+            }
+            if matches!(text.as_bytes().get(j), Some(b'=' | b':')) {
+                let authorization = key.contains("authorization") && text.as_bytes()[j] == b':';
                 j += 1;
                 while text.as_bytes().get(j).is_some_and(u8::is_ascii_whitespace) {
                     j += 1;
@@ -421,11 +615,14 @@ pub fn scrub_line(line: &str) -> Option<String> {
                 if text.as_bytes().get(j) == Some(&b'"') {
                     j += 1;
                 }
-                let end = text[j..]
-                    .find(|c: char| c.is_whitespace() || c == ',' || c == '"')
-                    .map_or(text.len(), |n| j + n);
+                let end = if authorization {
+                    text.len()
+                } else {
+                    text[j..]
+                        .find(|c: char| c.is_whitespace() || c == ',' || c == '"')
+                        .map_or(text.len(), |n| j + n)
+                };
                 found = Some((j, end));
-                break;
             }
         }
         if let Some((j, end)) = found {
@@ -451,6 +648,20 @@ pub fn scrub_line(line: &str) -> Option<String> {
         |c| c.is_ascii_hexdigit() || c == ':',
         |w| (w.matches(':').count() >= 2 && w.parse::<Ipv6Addr>().is_ok()).then(|| "[address]".into()),
     );
+    text = runs(
+        &text,
+        |c| c.is_ascii_alphanumeric() || "_-.".contains(c),
+        |w| {
+            let parts: Vec<_> = w.split('.').collect();
+            (parts.len() >= 3
+                && parts[0].starts_with("eyJ")
+                && parts
+                    .iter()
+                    .all(|p| p.len() >= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))))
+            .then(|| "[redacted]".into())
+        },
+    );
+    text = runs(&text, |c| c.is_ascii_hexdigit(), |w| (w.len() >= 32).then(|| "[redacted]".into()));
     text = runs(
         &text,
         |c| c.is_ascii_alphanumeric() || "+/_=-".contains(c),

@@ -43,9 +43,9 @@ fn text(c: &Connection, sql: &str, version: i64) -> String {
 }
 
 #[test]
-fn fixtures_cover_every_schema_version_that_shipped() {
+fn fixtures_cover_every_schema_version_including_the_half_migrated_15() {
     let actual = versions();
-    let expected: BTreeSet<_> = (1..=SCHEMA_VERSION).filter(|v| *v != 15).collect();
+    let expected: BTreeSet<_> = (1..=SCHEMA_VERSION).collect();
     assert_eq!(actual, expected, "add a fixture with scripts/make_coordinator_schema_fixtures.py");
     for version in actual {
         assert!(

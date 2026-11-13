@@ -186,7 +186,7 @@ fn open_db(dir: &std::path::Path) -> Result<Db, String> {
 fn journal_lines() -> Vec<String> {
     use std::process::{Command, Stdio};
     match Command::new("journalctl")
-        .args(["-u", "bridge-coordinator", "-n", "300", "--no-pager", "-o", "cat"])
+        .args(["-u", "bridge-coordinator", "-n", "5000", "--no-pager", "-o", "short-iso"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

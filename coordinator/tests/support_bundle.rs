@@ -51,10 +51,25 @@ INSERT INTO audit(ts,actor,action,detail,remote) VALUES(1,'seed-admin','login','
         "prompt: rotate the seeded launch codes",
         "https://hooks.example.test/hook/TOKENSECRET0123456789",
         "owner@secret-host.lan",
-        "backup written (3 old removed)",
+        "api_key=AKIAexample0123 rejected",
+        "session=sess_abcdef0123456789 expired",
+        "password_hash=$argon2id$v=19$m=19456,t=2,p=1$SEEDSALT$SEEDHASH",
+        "opened /home/alice/projects/secret/notes.txt",
+        "worker worker-secret-name connected from host secret-host.lan",
+        "connect wss://worker.example.test/ws?token=abc failed",
+        "GET HTTPS://UPPER.example.test/x failed",
+        "digest abcdefabcdefabcdefabcdefabcdefab",
+        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl",
+        "Authorization: Basic dXNlcjpwdw==",
+        "Basic dTpw",
+        "task: fix the login bug in the billing service for ACME",
+        "bridge-coordinator: automatic backup coordinator-20260101T000000Z.sqlite3 written (12.3 MiB, 3 old removed)",
+        "bridge-coordinator: database quick_check passed in 2.1 s",
     ]
-    .map(str::to_string)
-    .to_vec();
+    .iter()
+    .enumerate()
+    .map(|(n, message)| format!("2026-11-13T21:00:{n:02}+0000 secret-host bridge-coordinator[123]: {message}"))
+    .collect();
     (Fixture(dir), logs)
 }
 fn archive(f: &Fixture, logs: &[String]) -> Vec<(String, Vec<u8>)> {
@@ -72,7 +87,7 @@ fn value(files: &[(String, Vec<u8>)], name: &str) -> Value {
 fn bundle_contains_none_of_the_seeded_secrets() {
     let (f, logs) = seed();
     for (member, data) in archive(&f, &logs) {
-        let text = String::from_utf8(data).unwrap();
+        let text = std::str::from_utf8(&data).unwrap();
         for needle in [
             "$argon2id",
             "SEEDHASHVALUE",
@@ -94,16 +109,27 @@ fn bundle_contains_none_of_the_seeded_secrets() {
             "hunter2",
             "seed-admin",
             "owner@",
+            "AKIAexample",
+            "sess_abcdef",
+            "/home/alice",
+            "alice",
+            "worker-secret-name",
+            "worker.example.test",
+            "UPPER.example.test",
+            "abcdefabcdef",
+            "eyJhbGci",
+            "dXNlcjpw",
+            "dTpw",
+            "billing service",
+            "ACME",
+            "login bug",
+            "coordinator-20260101T000000Z",
         ] {
-            assert!(!text.contains(needle), "{member} leaked {needle}");
-            // The required manifest and log header contain the generic word 'prompts'/'prompt'.
-            // The uppercase seeded marker is checked literally above; check the full prompt below.
-            if needle != "PROMPT" {
-                assert!(
-                    !text.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()),
-                    "{member} leaked {needle} case-insensitively"
-                );
-            }
+            assert!(!data.windows(needle.len()).any(|bytes| bytes == needle.as_bytes()), "{member} leaked {needle}");
+            assert!(
+                !text.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()),
+                "{member} leaked {needle} case-insensitively"
+            );
         }
     }
 }
@@ -136,7 +162,8 @@ fn bundle_has_the_expected_members_and_safe_content() {
     assert_eq!(db["tables"]["workers"], 1);
     assert_eq!(db["user_version"], bridge_coordinator::db::SCHEMA_VERSION);
     let logs = String::from_utf8(files.last().unwrap().1.clone()).unwrap();
-    assert!(logs.contains("backup written"));
+    assert!(logs.contains("backup_written 1"));
+    assert!(logs.contains("# event histogram (all records read)"));
     assert!(!logs.lines().skip(1).any(|s| s.to_ascii_lowercase().contains("prompt")));
     let manifest = value(&files, "manifest.json");
     assert_eq!(manifest["format"], 1);
@@ -202,6 +229,27 @@ fn diagnostics_view_keeps_numbers_and_drops_names() {
 #[test]
 fn scrub_line_table() {
     for (line, expected) in [
+        ("api_key=AKIAexample0123 rejected", Some("api_key=[redacted] rejected")),
+        ("session=sess_abcdef0123456789 expired", Some("session=[redacted] expired")),
+        (
+            "password_hash=$argon2id$v=19$m=19456,t=2,p=1$SEEDSALT$SEEDHASH",
+            Some("password_hash=[redacted],t=2,p=1$SEEDSALT$SEEDHASH"),
+        ),
+        ("x-auth-token: abc", Some("x-auth-token: [redacted]")),
+        ("XCredentialID=value", Some("XCredentialID=[redacted]")),
+        ("\"api_key\":\"abc\"", Some("\"api_key\":\"[redacted]\"")),
+        ("Authorization: Basic dXNlcjpwdw==", Some("Authorization: [redacted]")),
+        ("aUtHoRiZaTiOn: Bearer x y", Some("aUtHoRiZaTiOn: [redacted]")),
+        ("Basic dTpw", Some("Basic [redacted]")),
+        ("bAsIc x", Some("bAsIc [redacted]")),
+        ("wss://worker.example.test/ws?token=abc failed", Some("[url] failed")),
+        ("GET HTTPS://UPPER.example.test/x failed", Some("GET [url] failed")),
+        ("ftp://example.test/file", Some("[url]")),
+        ("opened /home/alice/projects/secret/notes.txt", Some("opened [path]")),
+        ("/Users/alice/file /root/.ssh/key /root", Some("[path] [path] [path]")),
+        ("abcdefabcdefabcdefabcdefabcdefab", Some("[redacted]")),
+        ("ABCDEFABCDEFABCDEFABCDEFABCDEFABCD", Some("[redacted]")),
+        ("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl", Some("jwt [redacted]")),
         ("PROMPT is sensitive", None),
         ("unprompted", None),
         ("visit https://example.test/token now", Some("visit [url] now")),
@@ -282,7 +330,10 @@ fn failures_are_generic_and_surviving_logs_are_bounded() {
     assert!(!f.0.join("missing.sqlite3").exists());
     let manifest: Value = serde_json::from_slice(&files[0].1).unwrap();
     assert_eq!(manifest["created_at"], 123);
-    assert_eq!(String::from_utf8_lossy(&files[5].1).lines().count(), 301);
+    let logs = String::from_utf8_lossy(&files[5].1);
+    let last = logs.split("# last 300 records\n").nth(1).unwrap();
+    assert_eq!(last.lines().count(), 300);
+    assert!(logs.contains("unrecognized 325"));
 }
 
 #[test]
@@ -331,4 +382,120 @@ fn worker_names_that_look_like_identifiers_are_not_copied_as_keys() {
     let text = String::from_utf8_lossy(&diagnostics.1).to_string();
     assert!(!text.contains("alicelaptop"), "{text}");
     assert!(text.contains("worker_1"), "{text}");
+}
+
+#[test]
+fn log_member_has_only_ids_levels_and_timestamps() {
+    let (f, logs) = seed();
+    let files = archive(&f, &logs);
+    let text = String::from_utf8_lossy(&files.last().unwrap().1);
+    let known = |id: &str| id == "unrecognized" || bundle::LOG_EVENTS.iter().any(|e| e.id == id);
+    for line in text.lines().filter(|line| !line.starts_with('#')) {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            [id, count] => {
+                assert!(known(id), "{line}");
+                assert!(count.parse::<usize>().is_ok(), "{line}");
+            }
+            [timestamp, level, target, id] => {
+                assert!(
+                    *timestamp == "unknown"
+                        || ((19..=32).contains(&timestamp.len()) && timestamp.bytes().all(|b| b.is_ascii_digit() || b"-T:+.Z".contains(&b))),
+                    "{line}"
+                );
+                assert!(["info", "warn", "error", "unknown"].contains(level), "{line}");
+                assert_eq!(*target, "bridge-coordinator");
+                assert!(known(id), "{line}");
+            }
+            _ => panic!("unexpected log line: {line}"),
+        }
+    }
+}
+
+#[test]
+fn unrecognized_lines_are_counted_not_copied() {
+    let lines = vec![
+        "private text".into(),
+        "prompt secret".into(),
+        "2026-11-13T21:00:00+0000 private-host bridge-coordinator[123]: private text".into(),
+    ];
+    let text = bundle::render_logs(&lines);
+    assert!(text.contains("unrecognized 3"));
+    assert!(!text.contains("private"));
+    assert!(!text.contains("prompt"));
+    let records = bundle::log_records(&lines);
+    assert_eq!(records[0].timestamp, "unknown");
+    assert_eq!(records[2].timestamp, "2026-11-13T21:00:00+0000");
+}
+
+#[test]
+fn every_eprintln_in_the_source_has_an_allow_listed_event() {
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        for (offset, _) in source.match_indices("eprintln!(") {
+            let tail = source[offset + "eprintln!(".len()..].trim_start();
+            // Empty invocations have no message; all other invocations use a literal.
+            if tail.starts_with(')') {
+                continue;
+            }
+            let literal = tail.strip_prefix('"').expect("eprintln must start with a string literal");
+            let prefix = literal.split(['{', '"']).next().unwrap();
+            let prefix = prefix.strip_prefix("bridge-coordinator: ").unwrap_or(prefix);
+            if prefix.is_empty() {
+                continue;
+            }
+            if !bundle::LOG_EVENTS.iter().any(|e| !e.prefix.is_empty() && prefix.starts_with(e.prefix)) {
+                failures.push(format!("{}:{}: {prefix:?}", path.display(), source[..offset].lines().count()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "missing log events:\n{}", failures.join("\n"));
+    for (index, event) in bundle::LOG_EVENTS.iter().enumerate() {
+        assert!(!event.prefix.is_empty());
+        assert!(event.id.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
+        assert!(["info", "warn", "error"].contains(&event.level));
+        assert!(!bundle::LOG_EVENTS[..index].iter().any(|e| e.prefix == event.prefix || e.id == event.id));
+    }
+}
+
+#[test]
+fn log_histogram_covers_all_records_and_orders_ties_by_id() {
+    let mut lines = vec!["shutting down".into(); 301];
+    lines.extend(["database error: secret".into(), "error: secret".into()]);
+    let text = bundle::render_logs(&lines);
+    assert!(text.contains("shutdown 301\ncommand_error 1\ndatabase_error 1\n"));
+    assert_eq!(text.split("# last 300 records\n").nth(1).unwrap().lines().count(), 300);
+    let record = bundle::log_records(&["backup: running at idle".into()]);
+    assert_eq!(record[0].event, "backup_started", "longest prefix must win");
+}
+
+#[test]
+fn log_records_validate_timestamps_and_never_copy_message_values() {
+    let lines = [
+        "bridge-coordinator: automatic backup private-name written (secret)",
+        "2026-11-13T21:00:00+0000 host bridge-coordinator[987]: bridge-coordinator: automatic backup private-name written (secret)",
+        "not-a-timestamp host bridge-coordinator[987]: shutting down",
+        "2026-11-13T21:00:00+0000",
+        "",
+    ]
+    .map(str::to_string);
+    let records = bundle::log_records(&lines);
+    assert_eq!(records.len(), lines.len());
+    assert_eq!(records[0].timestamp, "unknown");
+    assert_eq!(records[0].event, "backup_written");
+    assert_eq!(records[1].timestamp, "2026-11-13T21:00:00+0000");
+    assert_eq!(records[1].event, "backup_written");
+    assert_eq!(records[2].timestamp, "unknown");
+    assert_eq!(records[2].event, "unrecognized");
+    assert_eq!(records[3].event, "unrecognized");
+    assert_eq!(records[4].timestamp, "unknown");
+    let text = bundle::render_logs(&lines);
+    assert!(!text.contains("private-name"));
+    assert!(!text.contains("secret"));
+    assert!(!text.contains("987"));
 }
