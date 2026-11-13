@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Mapping, cast
 import uuid
 
+from . import bridge_providers
 from .fileio import open_regular_file, read_proc_text
 
 
@@ -52,30 +53,47 @@ class _Capability:
     new_session_pattern: re.Pattern[str] | None = None
 
 
-_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
-_OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}\Z")  # a leading dash would be read as an option by the provider CLI
-_SESSION_SOURCES = {
-    "codex": frozenset({"codex:session_meta"}),
-    "claude": frozenset({"claude:system.init", "claude:transcript"}),
-    "copilot": frozenset({"copilot:session.start"}),
-}
+_UUID = bridge_providers._UUID
+_OPAQUE_ID = bridge_providers._OPAQUE_ID
+
+
+class _SessionSources:
+    """Read-through view of each provider's accepted identity sources in the registry."""
+
+    def get(self, provider: str, default: frozenset[str] | None = None) -> frozenset[str] | None:
+        spec = bridge_providers.get(provider)
+        return spec.session_sources if spec is not None and spec.session_sources else default
+
+
+_SESSION_SOURCES = _SessionSources()
 _CODEX_NO_DAEMON = re.compile(r"(?<![A-Za-z0-9_-])--no-daemon(?:\s|[=<]|[\]\)]|$)")
 _CODEX_ACTIVITY_LINE_BYTES = 16 * 1024
 _CODEX_ACTIVITY_MAX_LINES = 100_000
 _CODEX_TOOL_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
-_CAPABILITIES: dict[str, _Capability] = {
-    "codex": _Capability("codex", ("resume",), re.compile(r"(?im)^\s*resume(?:\s|$)"), _UUID),
-    "claude": _Capability(
-        "claude", ("--resume",), re.compile(r"(?<!\S)--resume(?:\s|[=<]|$)"), _UUID,
-        ("--session-id",), re.compile(r"(?<!\S)--session-id(?:\s|[=<]|$)"),
-    ),
-    "copilot": _Capability(
-        "copilot", ("--resume",), re.compile(r"(?<!\S)--resume(?:\s|[=<]|$)"), _UUID,
-        ("--session-id",), re.compile(r"(?<!\S)--session-id(?:\s|[=<]|$)"),
-    ),
-    "kilo": _Capability("kilo", ("--session",), re.compile(r"(?<!\S)--session(?:\s|[=<]|$)"), _OPAQUE_ID),
-    "opencode": _Capability("opencode", ("--session",), re.compile(r"(?<!\S)--session(?:\s|[=<]|$)"), _OPAQUE_ID),
-}
+
+
+class _CapabilityView:
+    """Read-through view of the registry's resume facts, so a registry change reaches every caller."""
+
+    @staticmethod
+    def _of(spec: bridge_providers.ProviderSpec) -> _Capability | None:
+        if not spec.resume_syntax or spec.resume_help_pattern is None:
+            return None
+        return _Capability(spec.executable, spec.resume_syntax, spec.resume_help_pattern, spec.id_pattern,
+                           spec.new_session_syntax, spec.new_session_pattern)
+
+    def get(self, provider: str, default: _Capability | None = None) -> _Capability | None:
+        spec = bridge_providers.get(provider)
+        return (self._of(spec) if spec is not None else None) or default
+
+    def __getitem__(self, provider: str) -> _Capability:
+        capability = self.get(provider)
+        if capability is None:
+            raise KeyError(provider)
+        return capability
+
+
+_CAPABILITIES = _CapabilityView()
 
 
 def _absolute_cwd(cwd: str | os.PathLike[str]) -> str:

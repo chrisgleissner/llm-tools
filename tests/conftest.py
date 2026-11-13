@@ -195,6 +195,9 @@ def _hermetic_power_env(monkeypatch: pytest.MonkeyPatch) -> None:
     inhibitor/suspend behaviour override these explicitly.
     """
     monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
+    # Failure backoff would add real waits to every failure-path test; the
+    # backoff tests enable it explicitly.
+    monkeypatch.setenv("LLM_TOOLS_FAILURE_BACKOFF_BASE", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -666,6 +669,7 @@ def env(tmp_path: Path, _private_runtime_dir: Path) -> dict[str, str]:
         # Never spawn a real systemd-inhibit helper from in-process or
         # subprocess test runs; inhibitor behaviour is covered explicitly.
         "LLM_TOOLS_NO_INHIBIT": "1",
+        "LLM_TOOLS_FAILURE_BACKOFF_BASE": "0",
         "LLM_SCHEDULER_HEADLESS": "1",
     }
     # Only enable coverage instrumentation on CLI subprocesses when the parent

@@ -316,6 +316,7 @@ A [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the
 
 - Rotates providers, burning quotas evenly. The default rotation is `claude,codex,opencode`, or whatever `[ralph].providers` in your config says.
 - With everything exhausted, suspends the machine and wakes it at the earliest reset.
+- Backs off after a provider fails for a reason other than a rate limit (non-zero exit, crash, autonomy abort). The n-th consecutive failure of the same provider or route delays its next launch by `min(max, base * 2^(n-1))` seconds, default base 30 and max 900. Set `LLM_TOOLS_FAILURE_BACKOFF_BASE` / `LLM_TOOLS_FAILURE_BACKOFF_MAX`, or `failure_backoff_base` / `failure_backoff_max` under `[ralph]`; a base of 0 disables it. Other ready providers are not delayed, and a known rate-limit reset keeps its own wait. Bridge missions use the same loop and record the wait as a `provider-wait` event.
 - Holds an idle inhibitor, so your desktop cannot suspend it mid-task.
 - Never suspends without a wake alarm.
 - Records every resume. A USB keyboard with wakeup enabled can wake the machine before the alarm; that is logged as an early wake, not as a failed resume. Only a machine that rebooted during a suspend triggers the wedged-resume warning. Details: [Reliable sleep/wake](./docs/ralph-robin.md#reliable-sleepwake).

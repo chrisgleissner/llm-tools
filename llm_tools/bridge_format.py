@@ -596,12 +596,13 @@ def provider_check_text(check: dict[str, Any], *, mission: bool = True) -> str:
     if check.get("installed") is None:
         return f"{name}: {check.get('detail') or 'not checked'}"
     login = check.get("logged_in")
+    drift = f" · warning: {check['version_drift']}" if check.get("version_drift") else ""
     if login is True:
-        return f"{name}: installed, logged in"
+        return f"{name}: installed, logged in{drift}"
     if login is False:
         hint = f" ({check['detail']})" if check.get("detail") else ""
-        return f"{name}: installed, not logged in{hint}"
-    return f"{name}: installed, login not checked"
+        return f"{name}: installed, not logged in{hint}{drift}"
+    return f"{name}: installed, login not checked{drift}"
 
 
 def format_doctor(report: dict[str, Any]) -> str:

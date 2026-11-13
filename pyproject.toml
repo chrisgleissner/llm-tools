@@ -21,6 +21,9 @@ llm-bridge = "llm_tools.bridge:main"
 [tool.setuptools.packages.find]
 include = ["llm_tools*"]
 
+[tool.setuptools.package-data]
+llm_tools = ["provider_evidence/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
