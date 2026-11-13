@@ -146,7 +146,13 @@ macro_rules! offload_impl {
 }
 pub(crate) use offload_impl;
 
-/// Longest a caller waits for the connection before getting a busy error.
+/// How long the writer connection waits inside SQLite for a lock that another connection or process
+/// holds (a backup, for example) before it returns `SQLITE_BUSY`. It is applied while a caller holds
+/// the writer connection, so every caller queued behind it waits that long as well. It must stay below
+/// [`lock_wait`] (the 3 s a caller waits for the connection, the budget of a worker message): a queued
+/// caller then sees at most one such wait plus the commit of its predecessor before its own turn.
+const WRITER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Longest a caller waits for the connection before getting a busy error. See [`WRITER_BUSY_TIMEOUT`].
 static LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(3_000);
 /// Callers allowed to wait for the connection at once when the server has not set its own limit. Every
 /// connection has at most one request or worker message in flight, and the default `max_connections`
@@ -693,7 +699,7 @@ impl Db {
     offload_impl! {
     pub fn open(path: &Path) -> R<Db> {
         let mut conn = Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(WRITER_BUSY_TIMEOUT)?;
         // A transaction that reads first and writes later fails with SQLITE_BUSY at once, without waiting
         // for the busy timeout, when another process holds the write lock at the upgrade. IMMEDIATE takes
         // the lock at BEGIN, where the busy timeout applies.
@@ -1780,6 +1786,15 @@ impl Db {
             missions,
             max,
         } = batch;
+        // A batch that does not follow the stored cursor is refused without the write lock. The check is
+        // repeated inside the transaction, which is the one that counts.
+        let stored: Option<i64> = self
+            .r()?
+            .query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))
+            .optional()?;
+        if let Some(cursor) = stored.filter(|cursor| after != *cursor as u64) {
+            return Ok(EventsOutcome::Nack { expected: cursor as u64 });
+        }
         let mut c = self.c()?;
         let tx = c.transaction()?;
         let (cursor, previous_mission_cursor): (i64, i64) =
@@ -2615,6 +2630,57 @@ mod lock_wait_tests {
             .unwrap();
         assert!(matches!(outcome, EventsOutcome::Accepted { .. }));
         release.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A lock held by another connection for longer than the busy timeout ends the wait with the typed
+    /// busy error (HTTP 503 `database-busy`, which `is_busy` recognises), not with some other failure.
+    #[test]
+    fn a_lock_held_past_the_busy_timeout_is_a_busy_error() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        db.c().unwrap().busy_timeout(Duration::from_millis(100)).unwrap();
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let events = vec![json!({"id": 1, "kind": "task-progress", "mission_id": "m1", "ts": 1})];
+        let err = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 0,
+                through: 1,
+                events: &events,
+                mission_cursor: None,
+                missions: None,
+                max: 1000,
+            })
+            .err()
+            .expect("the lock is still held");
+        assert!(is_busy(&err), "{err:?}");
+        other.execute_batch("ROLLBACK").unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A batch that does not follow the stored cursor is refused without the write lock.
+    #[test]
+    fn a_nack_does_not_need_the_write_lock() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        db.c().unwrap().busy_timeout(Duration::from_millis(50)).unwrap();
+        let outcome = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 7,
+                through: 8,
+                events: &[],
+                mission_cursor: None,
+                missions: None,
+                max: 1000,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventsOutcome::Nack { expected: 0 }));
+        other.execute_batch("ROLLBACK").unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
