@@ -296,6 +296,15 @@ and is unchanged in `budget.json`.
 The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
+Addendum, 2026-11-13 (PRD-014): the gzip cap of the initial JavaScript rises from 31750 to 32000 bytes
+(the raw cap stays 91000). The Missions list needs group headings and a window of rows at 500 missions.
+Both are in a lazy module (`web/src/missions-window.ts`) that the page loads when the active list has
+60 or more missions, and that receives `h` and `reconcile` from the page so that esbuild does not split
+the shared modules into two chunks. The first load still grows: 31717 gzip before, 31911 after
+(+194, of which 142 is the page's own change and 111 a new 110-byte chunk for the route stylesheet
+names, less 62 from the re-split). A fully static version measured 32712. The next change to the
+first load has to remove code or raise the cap again.
+
 ## D18 Web route chunks and the separate routes budget (PRD-037 WP-0, UXR-039)
 
 The redesign adds a state model, shared components and several new pages, so the first load needs room.
@@ -408,6 +417,13 @@ with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until 
 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
+
+Addendum, 2026-11-13 (PRD-014, PRD-015, PRD-016): the routes caps rose to 114900 raw / 47000 gzip for
+JavaScript and 19800 / 5200 for route stylesheets, each the measured figure plus 5% (measured 109461 /
+43380 and 18893 / 4978; before: 93868 raw). The growth is the mission page and its lazy parts: the
+Session block with the turn history, scrollback search and copy, the rotation and settings block,
+and the priority, prerequisite, prompt, Finish and Force stop actions (about 15 KB raw), plus the
+Missions list window module (2.4 KB raw). Nothing of this is in the first load beyond the 250 gzip bytes of D17.
 
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 
@@ -881,7 +897,7 @@ A mission created through the coordinator may name only a verifier that the work
 
 ## D48 Faults of the UXR-040 critique are registered as UXR-053 to UXR-057 (UXR-040)
 
-The fresh-eyes critique of every console page at 1440 and 360 pixels, in both themes, found five faults: an incomplete quota pill at 360, a clipped worker filter at 360, an approval reason cut mid-word and a wrapping pill in the Inbox at 1440, a blank provider cell on failed mission rows, and no sideways-scroll cue on the phone terminal. UXR-040 requires every finding to be filed as a UXR row and closed with proof, so they become UXR-053 to UXR-057. They are fixed with the web console work (W4), which can regenerate the Pixel 4 screenshot baselines in the Playwright image. UXR-040 stays open until they are closed. The fixes added about 300 bytes to the initial stylesheet and about 600 bytes to the route stylesheets, so `web/budget.json` rises: initial `cssRaw` 34,000 to 34,300, routes `cssRaw` 18,400 to 19,000 and routes `cssGzip` 4,900 to 5,050. The compact capacity chip replaces the rule that showed only the limiting provider below 30 rem (web-design-spec section 7.1, T22).
+The fresh-eyes critique of every console page at 1440 and 360 pixels, in both themes, found five faults: an incomplete quota pill at 360, a clipped worker filter at 360, an approval reason cut mid-word and a wrapping pill in the Inbox at 1440, a blank provider cell on failed mission rows, and no sideways-scroll cue on the phone terminal. UXR-040 requires every finding to be filed as a UXR row and closed with proof, so they become UXR-053 to UXR-057. They are fixed with the web console work (W4), which can regenerate the Pixel 4 screenshot baselines in the Playwright image. UXR-040 stays open until they are closed.
 
 Addendum 2026-11-13: the routes JavaScript raw cap rose from 94000 to 99000 bytes (measured 94256 on main plus 5%), because merged changes had pushed main over the cap and failed the web budget test on every pull request.
 
@@ -918,3 +934,27 @@ The coordinator stores no provider usage, so placement reads the latest `usage.s
 
 `command_template` replaces the provider command on the worker, so it is refused for remote creation in the same way as a verifier command (D47).
 
+## D56 Capacity caps and what stays open (FIND-006, FIND-009, PRD-009)
+
+Measurements are in `capacity-plan.md`. Mission summaries: at most 10 000 per worker. On a hello or an events upsert above that, the coordinator drops the worker's oldest finished summaries first. If every remaining summary is active it does not index the newest excess and sets the diagnostics warning `missions-over-cap`. It never rejects a hello and never closes with 1008 for this. A first version refused the hello above a coordinator-wide 10 000; a refused worker reconnects with its normal backoff, so that cap caused a reconnect storm. `too-many-missions` is removed from the protocol.
+
+`/stream`: 128 sockets in total and 16 per login session or API token, answered with 503 `busy`. An upgraded WebSocket releases its TCP connection slot, so the TCP cap does not bound it. Enrolment: 256 workers, with the name check, count and insert in one transaction.
+
+The Python worker resets its reconnect backoff only after a `welcome`, and stops (exit status 1, status `refused`) on `worker-id-mismatch`, `unsupported-version` or a "worker revoked" close, because retrying cannot succeed.
+
+Deferred: F7 (events per second limit). No rate was found at which the coordinator fails (10 000 events/s on x86-64 at 38 MiB), and a limit needs a protocol error code and worker retry behaviour; revisit with physical-Pi figures. The rest of F8 (a bounded 503 reply instead of a silent drop above the 256 TCP slots) needs a change in the accept loop.
+
+FIND-009 stays open until a 24 h run on the physical Pi with `memory.events` sampled. The 96 MiB limit is kept: anonymous memory peaked at about 60 MiB on the emulated Pi and no kill occurred.
+
+Review follow-up. Eviction orders by `missions.touched_at`, a coordinator-side column set on insert and on every change of a summary (schema version 18, which also adds the refused count and time to `workers`); the worker's `updated_at` is not trusted. The worker sends a bounded hello (all active missions, then the newest finished, at most 2000 or 640 KiB) and the rest in `events` batches after the `welcome`, because the coordinator still rejects a hello above 5000 missions or 1 MiB. A refused summary is counted on the worker row and reported to the worker in a `notice` message. The worker's backoff starts over only after 30 s of uptime after a welcome. A per-user `/stream` quota is not planned: Bridge has one operator, so all sessions are the same person.
+
+Second review follow-up. Replayed summaries (`replay: true` on the deferred `events` batches, optional field, resent without it to an older coordinator) take `touched_at` values below the worker's minimum, decreasing in arrival order, so over the cap they are evicted before hello rows and live updates; the worker sends them newest first. Refused ids are stored as a set (`worker_refused_missions`) and counted once; the count falls only when an id is stored, deleted or replaced by a new hello. Migration 18 numbers existing rows by `updated_at` and adds the index `missions_worker_touched(worker, touched_at)`. The worker keeps the last `notice` in its state file.
+
+
+## D57 Scope decisions for the remaining 1.5.0 rows (2026-11-13)
+
+- The fifth split of the secapi branch (#64), the "Documents API", maps to no open 1.5.0 row. It is dropped from 1.5.0. The work-in-progress patch is kept outside the repository for a later release.
+- PRD-011: the coordinator gets an update-availability check. It is off by default, sends no identifying data, and is documented. It is built for 1.5.0, not waived.
+- PRD-013: restore is implemented as a guided console action with step-up (SEC2-008), as the spec requires. The register keeps PRD-013 at [~] until then, even if a diagnostics view merges earlier.
+- DOG-020: the remaining fixed write cost of about 32 KB per accepted batch is deferred to 1.6.0. Batching already bounds SD-card wear (see benchmarks.md). The rowid events-table rewrite is a large schema change with low benefit for one operator.
+- UX-001, UX-005, UX-010: the live persona observations are run once by an agent acting as each persona against the demo environment. The transcripts are kept as evidence instead of being waived.

@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,6 +68,34 @@ ATTENTION_MESSAGE_CHARS = 240
 ATTENTION_MAX_TASKS = 8
 
 
+# Coordinator error codes (and close reasons) after which reconnecting cannot succeed until the operator acts.
+FATAL_COORDINATOR_CODES: dict[str, str] = {
+    "worker-id-mismatch": "this worker name is bound to a different worker id; revoke and add the worker again on the coordinator, then run `llm-bridge worker enroll` again",
+    "unsupported-version": "no protocol version is shared with the coordinator; upgrade llm-tools on this host or the coordinator",
+    "worker-revoked": "the coordinator revoked this worker; add it again on the coordinator and run `llm-bridge worker enroll` with the new token",
+}
+_FATAL_CLOSE_REASONS = {"worker revoked": "worker-revoked", "worker id mismatch": "worker-id-mismatch", "unsupported version": "unsupported-version"}
+
+
+# A hello carries the missions that matter most and stays well under the coordinator's 1 MiB frame limit; the rest
+# follow in ordinary `events` batches after the `welcome`.
+HELLO_MAX_MISSIONS = 2000
+HELLO_FRAME_BUDGET = 640 * 1024
+DEFERRED_BATCH_MISSIONS = 1000
+DEFERRED_BATCH_BYTES = 384 * 1024
+# A connection must stay up this long after its welcome before the reconnect backoff starts over.
+BACKOFF_RESET_AFTER = 30.0
+
+
+class WorkerFatalError(RuntimeError):
+    """The coordinator refused this worker for a reason that retrying cannot fix."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        self.code = code
+        self.fix = FATAL_COORDINATOR_CODES.get(code, "see the coordinator log")
+        super().__init__(f"coordinator refused this worker ({code}{': ' + message if message else ''}): {self.fix}")
+
+
 class WorkerConfigError(ValueError):
     """The worker is not enrolled or its configuration is invalid."""
 
@@ -86,6 +114,7 @@ class WorkerConfig:
     allow_power: bool = False
     allow_restore: bool = False
     client_certificate: bool = False
+    coordinator_notice: dict[str, Any] = field(default_factory=dict)  # the last `notice` (refused missions), kept across restarts
 
     @property
     def terminal_view(self) -> bool:
@@ -266,12 +295,14 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
                 service_state = "unknown"
     connection_events = [
         entry for entry in read_audit(200, env)
-        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused"}
+        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused", "connection.fatal"}
     ]
     latest = connection_events[-1] if connection_events else None
     connected = bool(latest and latest.get("action") == "connection.accepted" and service_state == "active")
     last_connected = next((entry.get("ts") for entry in reversed(connection_events) if entry.get("action") == "connection.accepted"), None)
-    if connected:
+    if latest and latest.get("action") == "connection.fatal":
+        connection_state = "refused"
+    elif connected:
         connection_state = "connected"
     elif latest and latest.get("action") in {"connection.ended", "connection.refused"}:
         connection_state = "disconnected"
@@ -279,11 +310,15 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
         connection_state = "last-connected"
     else:
         connection_state = "not-connected"
+    notice = config.coordinator_notice
+    refused = int(notice.get("refused") or 0)
     return {
         **config.public(),
+        **({"missions_refused": refused, "missions_cap": notice.get("cap")} if refused else {}),
         "connection_state": connection_state,
         "last_connected_at": last_connected,
         "service_state": service_state,
+        **({"refused_code": latest.get("code"), "refused_fix": latest.get("fix")} if connection_state == "refused" and latest else {}),
     }
 
 
@@ -411,6 +446,7 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             allow_roots=_stored_roots(value.get("allow_roots", [])),
             allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
             client_certificate=bool(value.get("client_certificate", False)),
+            coordinator_notice=dict(value.get("coordinator_notice") or {}),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -560,6 +596,7 @@ class InFlightBatch:
     through: int
     message_id: str = ""
     tombstones: tuple[str, ...] = ()  # deleted mission IDs this batch carries; marked replicated once its pong arrives
+    replay: tuple[dict[str, Any], ...] = ()  # the replayed summaries this batch carries, offered again if the coordinator rejects `replay`
 
 
 class WorkerSession:
@@ -591,6 +628,9 @@ class WorkerSession:
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
+        self.fatal: WorkerFatalError | None = None  # set when the coordinator refused this worker for good
+        self.deferred_missions: list[dict[str, Any]] = []  # summaries that did not fit in the hello
+        self.replay_unsupported = False  # the coordinator rejected the optional `replay` marker on this connection
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
@@ -602,8 +642,11 @@ class WorkerSession:
 
     def hello(self) -> Message:
         with self.open_store() as store:
-            missions = [self._mission_summary(store, row) for row in store.list_missions()]
+            rows = store.list_missions()
+            summaries = [self._mission_summary(store, row) for row in rows]
             cursor = store.last_event_id()
+        missions: list[dict[str, Any]] = []
+        self.deferred_missions = []
         allowed = {
             spec["operation"] for spec in commands.operation_catalog()
             if (not spec["mutating"] or self.config.allow_control
@@ -630,7 +673,39 @@ class WorkerSession:
         host_name = platform.node().strip()
         if host_name and len(host_name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 for char in host_name):
             payload["host_name"] = host_name
-        return Message("hello", self.config.worker_id, 0, payload)
+        return self._bounded_hello(payload, summaries)
+
+    def _bounded_hello(self, payload: dict[str, Any], summaries: list[dict[str, Any]]) -> Message:
+        """The hello with all active missions first, then the newest finished ones, within a count and a frame budget.
+
+        The summaries that do not fit go to ``deferred_missions`` and are sent as ``events`` batches after the welcome.
+        """
+        def is_active(summary: dict[str, Any]) -> bool:
+            return summary.get("status") in LIVE_MISSION_STATUSES
+
+        newest_first = sorted(summaries, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        ordered = [item for item in newest_first if is_active(item)] + [item for item in newest_first if not is_active(item)]
+        payload["missions"] = []
+        base = len(Message("hello", self.config.worker_id, 0, payload).encode().encode("utf-8"))
+        used, taken = base, 0
+        for item in ordered:
+            size = len(json.dumps(item, separators=(",", ":"), ensure_ascii=True)) + 1
+            if taken >= HELLO_MAX_MISSIONS or used + size > HELLO_FRAME_BUDGET:
+                break
+            used += size
+            taken += 1
+        while True:
+            payload["missions"] = ordered[:taken]
+            message = Message("hello", self.config.worker_id, 0, payload)
+            if taken == 0 or len(message.encode().encode("utf-8")) <= HELLO_FRAME_BUDGET:
+                break
+            taken -= 1  # the estimate was low (escaping, separators): measure the encoded frame and shrink
+        rest = ordered[taken:]
+        # Newest first: the coordinator ranks replayed rows below everything stored, in arrival order, so the
+        # order sent is the order of importance.
+        self.deferred_missions = [item for item in rest if is_active(item)] + [item for item in rest if not is_active(item)]
+        self.replay_unsupported = False
+        return message
 
     def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
         """The bounded status projection of one mission (the default task page), or ``None`` when it cannot be read.
@@ -770,7 +845,27 @@ class WorkerSession:
             self.pending_pongs.clear()
             self.audit("connection.accepted", generation=generation)
             return []
+        if message.type == "notice":
+            refused = int(message.payload.get("refused", 0) or 0)
+            cap = int(message.payload.get("cap", 0) or 0)
+            self.audit("coordinator.notice", code=str(message.payload.get("code", ""))[:64], refused=refused, cap=cap)
+            notice = {"code": str(message.payload.get("code", ""))[:64], "refused": refused, "cap": cap} if refused else {}
+            if notice != self.config.coordinator_notice:
+                self.config = dataclasses.replace(self.config, coordinator_notice=notice)
+                self.save(self.config)  # `worker status` reads it from the state file, not from the audit log
+            return []
         if message.type == "error":
+            code = str(message.payload.get("code", ""))
+            if code in FATAL_COORDINATOR_CODES and self.generation == 0:
+                self.fatal = WorkerFatalError(code, str(message.payload.get("message", ""))[:200])
+                return []
+            if (self.inflight is not None and self.inflight.replay and code == "invalid-message" and not self.replay_unsupported
+                    and message.payload.get("in_reply_to") == self.inflight.message_id):
+                # A coordinator from before `replay` rejects the optional field: send the same summaries without it,
+                # once. Any other error, or the same error for the unmarked resend, is dropped like one for a live batch.
+                self.replay_unsupported = True
+                self.deferred_missions = list(self.inflight.replay) + self.deferred_missions
+                return []
             if self.inflight is not None and self.inflight.tombstones and message.payload.get("in_reply_to") == self.inflight.message_id:
                 # A coordinator from before PRD-038 rejects the unknown field. Keep the tombstones pending
                 # (the pong that follows only clears the batch) and stop offering them on this connection.
@@ -979,6 +1074,24 @@ class WorkerSession:
                 self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, tuple(pending))
                 self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
                 return batch
+            if self.deferred_missions:
+                chunk: list[dict[str, Any]] = []
+                size = 0
+                while self.deferred_missions and len(chunk) < DEFERRED_BATCH_MISSIONS:
+                    item_size = len(json.dumps(self.deferred_missions[0], separators=(",", ":"))) + 1
+                    if chunk and size + item_size > DEFERRED_BATCH_BYTES:
+                        break
+                    size += item_size
+                    chunk.append(self.deferred_missions.pop(0))
+                body: dict[str, Any] = {"after": self.cursor, "through": self.cursor, "events": [],
+                                        "mission_cursor": self.cursor, "missions": chunk}
+                if not self.replay_unsupported:
+                    body["replay"] = True  # optional marker; an older coordinator rejects it and gets the chunk again without it
+                batch = self.message("events", body)
+                self.batch_seq += 1
+                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, replay=tuple(chunk))
+                self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+                return batch
             events, through = self._replicable_events(store, self.cursor)
             refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
             if through == self.cursor and not refresh_questions:
@@ -1086,8 +1199,10 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
     """
     backoff = 1.0
     session.audit("worker.start", allow_control=session.config.allow_control)
+    fatal: WorkerFatalError | None = None
     while not stop.is_set():
         connection = None
+        welcomed_at: float | None = None
         try:
             connection = connect(session.config)
             session.generation, session.cursor, session.close_reason = 0, None, None
@@ -1099,11 +1214,14 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 now = time.monotonic()
                 if text is not None:
                     last_heard = now
-                    backoff = 1.0
                     try:
                         replies = session.handle(decode(text))
                     except ProtocolError as exc:
                         replies = [session.error(exc.code, str(exc))]
+                    if session.fatal is not None:
+                        raise session.fatal
+                    if session.generation and welcomed_at is None:
+                        welcomed_at = now  # the backoff starts over only if this connection then stays up
                     for reply in replies:
                         connection.send_text(reply.encode())
                     if session.close_reason:
@@ -1124,7 +1242,16 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 if now - last_ping > PING_INTERVAL and session.generation:
                     connection.send_text(session.ping().encode())
                     last_ping = now
+        except WorkerFatalError as exc:
+            fatal = exc
+            session.audit("connection.fatal", code=exc.code, fix=exc.fix)
+            log(f"worker stopped: {exc}")
         except Exception as exc:  # noqa: BLE001 - every failure leads to a bounded reconnect
+            reason = getattr(exc, "reason", "")
+            if not session.generation and reason in _FATAL_CLOSE_REASONS:
+                fatal = WorkerFatalError(_FATAL_CLOSE_REASONS[reason])
+                session.audit("connection.fatal", code=fatal.code, fix=fatal.fix)
+                log(f"worker stopped: {fatal}")
             log(f"worker connection ended: {type(exc).__name__}: {str(exc)[:200]}")
             if session.generation:  # only welcomed connections; failed attempts would flood the audit
                 session.audit("connection.ended", generation=session.generation, reason=type(exc).__name__)
@@ -1134,10 +1261,16 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                     connection.close()
                 except Exception:  # noqa: BLE001
                     pass
+        if fatal is not None:
+            break
+        if welcomed_at is not None and time.monotonic() - welcomed_at >= BACKOFF_RESET_AFTER:
+            backoff = 1.0
         if stop.wait(backoff * random.uniform(0.5, 1.0)):
             break
         backoff = min(max_backoff, backoff * 2)
     session.audit("worker.stop")
+    if fatal is not None:
+        raise fatal
 
 
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:

@@ -59,6 +59,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   const cue = (side: string, glyph: string): HTMLElement => h("span", { class: `pan-cue ${side}`, "aria-hidden": "true", hidden: true }, glyph);
   const [cueMore, cueBack] = [cue("more", "\u203A"), cue("back", "\u2039")];
   const transcript = h("pre", { class: "transcript", tabindex: "0", "aria-label": "Session transcript", hidden: true });
+  const tools = h("div", { class: "transcript-tools", hidden: true, role: "search", "aria-label": "Search the scrollback" });
   const jump = button("Jump to latest", () => toBottom(), { kind: "small", icon: "chevronDown" });
   jump.classList.add("jump");
   jump.hidden = true;
@@ -88,6 +89,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     "section",
     { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session", tabindex: "-1" },
     bar,
+    tools,
     h("div", { class: "session-main" }, host, cueBack, cueMore, transcript, waiting, jump),
     input.element,
     keybar,
@@ -105,6 +107,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   let timer = 0;
   let resizeTimer = 0;
   let transcriptTimer = 0;
+  let view: { show(text: string): void; focusSearch(): void } | null = null;
   let available = true;
   let disposed = false;
   /** Output has arrived since the terminal was last cleared; until then the pane says it is waiting. */
@@ -179,8 +182,9 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       { label: "Resize session to this screen", onSelect: () => void resizeToScreen(), disabled: !writer, reason: "Take control first" },
       { label: writer ? "Release control" : "Reconnect", onSelect: () => restart("view"), disabled: !available },
       { label: "Disconnect", id: "terminal-close", onSelect: () => stop("Closed by you."), disabled: state === "idle" || state === "ended" },
+      { label: "Search scrollback", id: "terminal-search", onSelect: searchScrollback, disabled: !term, reason: "Connect first" },
     ];
-    const key = `${writer}${available}${state === "idle" || state === "ended"}`;
+    const key = `${writer}${available}${state === "idle" || state === "ended"}${!!term}`;
     if (key === menuKey) return;
     menuKey = key;
     // One menu for the life of the pane (DOG-028). A closed menu reads the new items when it opens; the buttons of an open menu change
@@ -280,10 +284,14 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   function renderTranscript(): void {
     window.clearTimeout(transcriptTimer);
     transcriptTimer = 0;
-    if (term) void extras().then((m) => (transcript.textContent = m.transcriptText(term!)));
+    if (term) void extras().then((m) => (view ??= m.transcriptView(transcript, tools)).show(m.transcriptText(term!)));
+  }
+  function searchScrollback(): void {
+    showTranscript(true);
+    void extras().then((m) => (view ??= m.transcriptView(transcript, tools)).focusSearch());
   }
   function showTranscript(on: boolean): void {
-    transcript.hidden = !on;
+    transcript.hidden = tools.hidden = !on;
     host.hidden = on || !term;
     transcriptBtn.setAttribute("aria-pressed", String(on));
     if (on) renderTranscript();

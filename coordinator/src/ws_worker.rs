@@ -214,8 +214,12 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
     };
     drop(pending);
     let worker_id = hello.worker_id.clone();
-    let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps, &remote) {
-        Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
+    let (generation, cursor, hello_notice) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps, &remote) {
+        Ok(HelloOutcome::Ok {
+            generation,
+            cursor,
+            mission_notice,
+        }) => (generation, cursor, mission_notice),
         Ok(HelloOutcome::WorkerIdMismatch) => {
             let _ = send(
                 &st,
@@ -242,6 +246,9 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
             return;
         }
     };
+    // The parsed hello holds every mission summary (a few KiB each once parsed). Nothing reads it again, and it
+    // would otherwise stay allocated for as long as the connection lives.
+    drop((hello, caps));
     if pending_token {
         match st.db.worker_promote_token_rotation(&name, &token_hash, crate::now()) {
             Ok(true) => {}
@@ -286,6 +293,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
         json!({"generation": generation, "protocol_version": PROTOCOL_VERSION, "event_cursor": cursor}),
     );
     let mut alive = send(&st, &mut socket, welcome).await;
+    notify_refused(&st, &name, hello_notice);
 
     // ---- redeliver every unfinished write (reads were expired before registering, see above)
     if alive {
@@ -550,11 +558,17 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
                     events: &events,
                     mission_cursor,
                     missions: missions.as_deref(),
+                    replay: p.get("replay").and_then(Value::as_bool).unwrap_or(false),
                     max: st.cfg.max_events_per_worker,
                 })
                 .map_err(db)?
             {
-                EventsOutcome::Accepted { cursor, stored } => {
+                EventsOutcome::Accepted {
+                    cursor,
+                    stored,
+                    mission_notice,
+                } => {
+                    notify_refused(st, name, mission_notice);
                     if stored > 0 || missions.as_ref().is_some_and(|m| !m.is_empty()) {
                         st.hub.publish(event_notice(name, cursor, &events, missions.as_deref().unwrap_or(&[])));
                     }
@@ -602,5 +616,18 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             Ok(vec![])
         }
         other => reply("unsupported-message", &format!("the coordinator does not accept {other} here")),
+    }
+}
+
+/// Tell the worker how many of its mission summaries the per-worker cap refused (`notice`, protocol.md). `None` means
+/// the count did not change; 0 means the warning cleared.
+fn notify_refused(st: &St, name: &str, refused: Option<u64>) {
+    if let Some(refused) = refused {
+        st.hub.send_to_worker(
+            name,
+            "notice",
+            json!({"code": "missions-over-cap", "refused": refused, "cap": crate::db::MAX_MISSIONS_PER_WORKER,
+                   "message": format!("the coordinator keeps at most {} mission summaries per worker; {refused} were not indexed", crate::db::MAX_MISSIONS_PER_WORKER)}),
+        );
     }
 }

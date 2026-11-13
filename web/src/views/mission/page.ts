@@ -8,6 +8,10 @@ import { humanizeEvent } from "../../event-humanizer";
 import { hasDigest, listedNeeds, missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import { announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
+import type { Control } from "./control";
+import { turnsFromEvents } from "./facts";
+import type { SessionInfo } from "./session-info";
+import { hasLine, lastLine, loadLines, onDetails } from "../../rows";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
 import { approvalOrdinals, buildHeader, headerSubject, providerModel, type HeaderHandlers, type HeaderModel } from "./header";
@@ -16,7 +20,7 @@ import { sessionReserve } from "../../session-box";
 import { crumbs, finished, known, note, record, refused, since } from "./kit";
 import { loadSession, type SessionHandle } from "./session";
 import { tasksPanel, type TaskPanelData } from "./tasks";
-import { asOfText, type PageCtx, type Tab, type Task } from "./types";
+import { asOfText, type PageCtx, type Tab, type Task, type TaskVerb } from "./types";
 
 const EVENT_WINDOW = 300;
 const NEVER_STARTED = new Set(["CREATED", "QUEUED", "READY"]);
@@ -136,7 +140,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   const verifiers = new Map<number, string>();
   const ctx: PageCtx = {
-    workerName, missionId, blocked, needs, mutateTask, status,
+    workerName, missionId, blocked, needs, mutateTask, status, reload: reloadAll,
     subject: () => { const m = headerModel(); return m ? headerSubject(m) : undefined; },
     answer: () => handlers.takeControl(),
     verified: (ordinal, text) => {
@@ -149,11 +153,15 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const tasksP = tasksPanel(ctx, actions, addTask);
   const activityP = activityPanel(loadOlderEvents);
   const about = aboutBlock();
+  // The Session block and the rotation and settings block are built after the first paint (see `mountExtras`): they are not part of what the page shows first.
+  let info: SessionInfo | null = null;
+  let control: Control | null = null;
+  const aboutBox = h("div", { class: "mission-about" }, about.el);
   const panel = (id: Tab, el: HTMLElement) => h("div", { class: `mission-panel panel-${id}`, role: "tabpanel", id: `panel-${id}`, "aria-labelledby": `tab-${id}` }, el);
   const tasksWrap = panel("tasks", tasksP.el);
   const activityWrap = panel("activity", activityP.el);
   const side = h("div", { class: "mission-side" }, tasksWrap, activityWrap);
-  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, h("div", { class: "mission-about" }, about.el));
+  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, aboutBox);
   const wrap = h("div", { class: "mission-wrap" }, page);
   // The page is shown once what decides the header's height is known: the attention of the mission (carried by the list entry, else read with the status),
   // so a late "Needs approval" does not push the session pane down after the page was on screen. The wait is bounded.
@@ -208,6 +216,13 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
+  /** PAR-005: Stop with `force`, which ends the provider's session at once instead of after its current step. */
+  async function forceStop(): Promise<void> {
+    if (!(await confirmed("Force stop", "Force stop ends the provider's session at once, without waiting for its current step. Work in that step can be lost."))) return;
+    reportOutcome(await api.mutateMission(workerName, "mission.stop", missionId, { force: true }), "Mission force-stopped", "force-stop the mission");
+    await reloadAll();
+  }
+
   // ---- header
   /** A handler for a mission change: `op` is the operation suffix, `action` the words of the failure message. Stop and Cancel ask first (`ask`: the button and dialog word, the sentence under it). */
   const change = (did: string, action: string, op: string, optimisticStatus: string | null, ask?: [string, string], undo?: ToastAction) => async (): Promise<void> => {
@@ -219,6 +234,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     start: change("Mission started", "start the mission", "start", "RUNNING"),
     runNext: change("Next task started", "run the next task now", "continue", null),
     stop: change("Mission stopped", "stop the mission", "stop", "STOPPING", ["Stop", "Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open."]),
+    forceStop,
+    finish: change("The provider was asked to exit", "ask the provider to exit", "finish", null, ["Finish", "The provider is asked to exit through its own exit command, and the mission stays as it is. Stop ends the mission's session instead."]),
     cancel: change("Mission cancelled", "cancel the mission", "cancel", null, ["Cancel", "This cannot be undone from the browser."]),
     remove,
     approve: actions.approve,
@@ -348,9 +365,38 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   function renderActivity(): void {
     const all = [...events, ...liveEvents].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id);
     activityP.update({ events: all, error: eventError, loaded: eventsLoaded, more: eventStart > 0 });
+    renderInfo();
   }
 
+  /** The provider runs come from the events already read from the coordinator, and the last line from `mission.activity_line`: nothing here asks the worker for the status. */
+  function renderInfo(): void {
+    if (!info) return;
+    const e = entry();
+    const ordinalOf = (id: number | null): number | null => tasks.find((t) => t.id === id)?.ordinal ?? null;
+    info.update({ snapshot, turns: turnsFromEvents([...events, ...liveEvents], ordinalOf), lastLine: e && status() === "RUNNING" ? lastLine(e) : "", nowMs: Date.now() });
+  }
+  /** Load and add the two blocks once the page has been painted. */
+  async function mountExtras(): Promise<void> {
+    await afterPaint();
+    const [a, c] = await Promise.all([import("./session-info"), import("./control")]);
+    if (disposed) return;
+    info = a.sessionInfo();
+    control = c.controlBlock({ workerName, missionId, blocked });
+    aboutBox.prepend(info.el, control.el);
+    renderInfo();
+    control.sync();
+  }
+  const offDetails = onDetails(renderInfo);
+  const infoClock = window.setInterval(() => {
+    if (document.visibilityState !== "visible" || disposed) return;
+    const e = entry();
+    if (e && status() === "RUNNING" && online()) void loadLines([e], () => disposed);
+    renderInfo();
+  }, 15000);
+
   function renderAbout(): void {
+    renderInfo();
+    control?.sync();
     const created = record(snapshot?.["mission"])["created_at"];
     about.update({ missionId, folder: folder(), workerName, worker: worker(workerName), createdAt: typeof created === "string" ? created : null });
   }
@@ -373,6 +419,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     headSignature = "";
     renderAll();
     reveal();
+    const e = entry();
+    if (e && status() === "RUNNING" && !hasLine(e)) void loadLines([e], () => disposed);
   }
 
   async function loadTasks(): Promise<void> {
@@ -468,9 +516,10 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   // ---- mutations
-  const DID = { approve: "Approved", reject: "Rejected", retry: "Retry queued for", resume: "Resumed", pause: "Paused", cancel: "Cancelled" };
-  async function mutateTask(verb: keyof typeof DID, operation: string, task: Task, params: Record<string, unknown> = {}): Promise<void> {
-    reportOutcome(await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params }), `${DID[verb]} task ${task.ordinal}`, `${verb} task ${task.ordinal}`);
+  const DID: Record<TaskVerb, string> = { approve: "Approved", reject: "Rejected", retry: "Retry queued for", resume: "Resumed", pause: "Paused", cancel: "Cancelled", priority: "Changed the priority of", depend: "Added a prerequisite to", amend: "Amended" };
+  const DOING: Record<TaskVerb, string> = { approve: "approve", reject: "reject", retry: "retry", resume: "resume", pause: "pause", cancel: "cancel", priority: "change the priority of", depend: "add a prerequisite to", amend: "amend" };
+  async function mutateTask(verb: TaskVerb, operation: string, task: Task, params: Record<string, unknown> = {}, undo?: ToastAction): Promise<void> {
+    reportOutcome(await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params }), `${DID[verb]} task ${task.ordinal}`, `${DOING[verb]} task ${task.ordinal}`, undo);
     await reloadAll();
   }
 
@@ -581,6 +630,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   document.addEventListener(SHORTCUT_EVENT, onShortcut);
 
   setTab(tab, false);
+  void mountExtras();
   renderAll();
   renderActivity();
   stamp();
@@ -590,6 +640,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   return () => {
     disposed = true;
     resizeObserver?.disconnect();
+    offDetails();
+    window.clearInterval(infoClock);
     window.clearTimeout(revealTimer);
     document.removeEventListener(SHORTCUT_EVENT, onShortcut);
     offStream();

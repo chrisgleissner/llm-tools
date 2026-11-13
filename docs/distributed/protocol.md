@@ -63,6 +63,47 @@ whole numbers with `invalid-message`.
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
+The coordinator rejects a `hello` with more than 5000 missions (`invalid-message`; the connection stays open until
+the hello deadline), and a frame above 1 MiB closes the connection with 1009. A worker therefore sends a bounded
+hello: all active missions first, then the newest finished ones, until 2000 missions or a frame budget of 640 KiB
+(measured on the encoded frame) is reached. It sends the remaining summaries after the `welcome` in `events`
+messages with no events (`through == after`, `mission_cursor` equal to the cursor), at most 1000 summaries and
+about 384 KiB each, active ones first and then finished ones newest first. These batches carry the optional field
+`replay: true`. A coordinator from before this field rejects it with `invalid-message` (`in_reply_to` the batch);
+the worker then sends the same summaries without the field for the rest of that connection.
+
+The coordinator keeps at most 10 000 mission summaries per worker. The coordinator never answers a `hello` or
+an `events` message with an error for this limit, but it does not index every summary in it: finished summaries are
+dropped and, when all stored summaries are active, new ids are refused (see below). When a worker exceeds the limit, the coordinator drops the finished summaries it touched longest
+ago first (`missions.touched_at`, set by the coordinator; the worker's `updated_at` is not used). In a `hello`
+the first mission listed counts as the newest. A live update, with or without a change of a stored row, is
+touched now. For a `replay` batch, a new row gets a value below every stored row of the worker, decreasing in
+arrival order, and a stored row keeps its place, so replayed old rows always rank older than the hello rows and
+than live updates, and the order the worker sent them in is kept. A summary of a mission that is already stored is updated and is not refused for this limit.
+If the remaining summaries are all active, the newest excess ids are not indexed. The coordinator remembers each
+refused id once (table `worker_refused_missions`, at most 10 000 per worker), however often it is sent again; a refusal
+beyond those 10 000 is counted in `worker_refused_overflow` each time it happens (so the count is never below the number of
+distinct refused ids, and may count a resent id again), and that counter is cleared when the worker has room again,
+sends a new `hello` or is revoked; and
+forgets it when the mission is stored later, deleted (tombstone) or the worker sends a new `hello`. The count of
+remembered ids, with the last refusal time, is the `missions-over-cap` warning in `GET /api/v1/diagnostics`; it
+survives a restart and is gone only when the set is empty. The coordinator sends the worker a `notice` message
+when the count changes.
+
+| Type | Direction | Payload |
+|---|---|---|
+| `notice` | coordinator to worker | `code` (`missions-over-cap`), `refused` (distinct mission ids refused now; 0 when the warning cleared), `cap`, `message`. Sent only when the count changes. |
+
+A worker that does not know `notice` answers with an `error` `unsupported-message`, which the coordinator ignores.
+The Python worker keeps the last notice in its state file (not only in the audit log), and `llm-bridge worker status` shows "N missions refused by coordinator cap".
+
+Fatal refusals. After the error codes `worker-id-mismatch` and `unsupported-version`, or the close reason
+`worker revoked`, reconnecting cannot succeed until the operator acts. The Python worker stops, logs one error
+that names the fix and exits with status 1; `llm-bridge worker status` then shows the connection as `refused`
+with the code and the fix. Every other close or error leads to a reconnect with jittered exponential
+backoff. The backoff returns to its start value only after a connection has stayed up for 30 s after its
+`welcome`; a welcome followed by an immediate close keeps backing off.
+
 ## Mission summaries
 
 A mission summary is a small object the worker sends in `hello` and in the `missions` list of

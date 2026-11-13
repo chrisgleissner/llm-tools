@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from llm_tools.bridge_runtime import mission_socket_path
-from llm_tools.bridge_store import BridgeStore
+from llm_tools.bridge_store import BridgeStore, MissionLock
 from llm_tools.terminal import TmuxTerminalBackend
 from tests.conftest import scaled, wait_for as _shared_wait_for
 
@@ -214,6 +214,16 @@ def teardown(env: dict[str, str], mission_ids: list[str], clients: list[Client])
                 TmuxTerminalBackend().stop(handle_of(mission_id, env))
             except (OSError, RuntimeError, PermissionError):
                 pass
+    # `stop --force` returns once the controller was signalled. The controller and the processes of its
+    # station (providers, popup pickers) exit a little later, and the process-hygiene check at fixture
+    # teardown allows them 2 s, which a loaded CI host does not always give. The mission lock is held for
+    # the controller's whole life, so waiting for it to be free waits for the controller to be gone.
+    locks = Path(env["LLM_BRIDGE_STATE_DIR"]) / "locks"
+    for mission_id in mission_ids:
+        try:
+            wait_for(lambda m=mission_id: not MissionLock.is_held(locks, m), timeout=15, message="controller still running")
+        except AssertionError:
+            pass  # the hygiene check reports what is left
 
 
 @pytest.fixture()

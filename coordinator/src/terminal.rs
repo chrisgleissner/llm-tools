@@ -347,7 +347,9 @@ async fn relay(
                 match incoming {
                 Some(Ok(Ws::Text(t))) => {
                     if let Some(frame) = checked_browser_frame(t.as_str()) {
-                        let _ = queue_worker_frame(&w_tx, &worker_queue_bytes, frame);
+                        if !queue_worker_frame(&w_tx, &worker_queue_bytes, frame) {
+                            reg.dropped_input();
+                        }
                     }
                 }
                 Some(Ok(Ws::Close(_))) | None | Some(Err(_)) => break End::Browser,

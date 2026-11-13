@@ -146,7 +146,13 @@ macro_rules! offload_impl {
 }
 pub(crate) use offload_impl;
 
-/// Longest a caller waits for the connection before getting a busy error.
+/// How long the writer connection waits inside SQLite for a lock that another connection or process
+/// holds (a backup, for example) before it returns `SQLITE_BUSY`. It is applied while a caller holds
+/// the writer connection, so every caller queued behind it waits that long as well. It must stay below
+/// [`lock_wait`] (the 3 s a caller waits for the connection, the budget of a worker message): a queued
+/// caller then sees at most one such wait plus the commit of its predecessor before its own turn.
+const WRITER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Longest a caller waits for the connection before getting a busy error. See [`WRITER_BUSY_TIMEOUT`].
 static LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(3_000);
 /// Callers allowed to wait for the connection at once when the server has not set its own limit. Every
 /// connection has at most one request or worker message in flight, and the default `max_connections`
@@ -385,6 +391,8 @@ pub struct Db {
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
     /// which only makes the next retention pass run early and correct the figure.
     event_counts: Mutex<HashMap<String, u64>>,
+    /// Last value handed out by [`Db::touch_n`]: a strictly increasing, coordinator-side ordering of mission rows.
+    last_touch: std::sync::atomic::AtomicI64,
     /// FIND-004: the last audit write failed and none has succeeded since. Reported by `/healthz`.
     audit_failed: std::sync::atomic::AtomicBool,
     audit_failures: AtomicU64,
@@ -488,7 +496,7 @@ pub enum InsertOutcome {
 }
 
 pub enum EventsOutcome {
-    Accepted { cursor: u64, stored: usize },
+    Accepted { cursor: u64, stored: usize, mission_notice: Option<u64> },
     Nack { expected: u64 },
 }
 
@@ -499,14 +507,106 @@ pub struct EventBatch<'a> {
     pub events: &'a [Value],
     pub mission_cursor: Option<u64>,
     pub missions: Option<&'a [Value]>,
+    /// The `missions` are old summaries replayed after a hello: they rank older than every stored row of the worker.
+    pub replay: bool,
     pub max: u64,
 }
 
+/// Number of refused ids of `worker` kept in the set.
+fn refused_set_count(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+    Ok(
+        tx.query_row("SELECT COUNT(*) FROM worker_refused_missions WHERE worker=?", params![worker], |r| {
+            r.get::<_, i64>(0)
+        })? as u64,
+    )
+}
+
+/// Refusals beyond `MAX_REFUSED_TRACKED` that the set could not hold. Each one is counted when it happens, so a resend of
+/// such an id counts again: the total is an upper bound of the distinct ids and never below the true number.
+fn refused_overflow(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+    Ok(tx.query_row(
+        "SELECT COALESCE(SUM(extra), 0) FROM worker_refused_overflow WHERE worker=?",
+        params![worker],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
+/// Number of mission ids of `worker` that the cap refused and that are still absent (the set plus the overflow).
+fn refused_count(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+    Ok(refused_set_count(tx, worker)? + refused_overflow(tx, worker)?)
+}
+
+/// Keep at most `cap` mission summaries of `worker`. The finished summaries that the coordinator touched longest
+/// ago (`touched_at`, not the worker's `updated_at`) go first. When every remaining summary is active, the rows that
+/// `inserted` names (least important last) are refused until the count fits. A refused id is remembered once, however
+/// often the worker sends it again, and forgotten when it is stored later or its mission is deleted. `before` is the
+/// refused count before this change. Returns the new count when it differs (to tell the worker).
+fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &[String], cap: u64, before: u64) -> R<Option<u64>> {
+    let count = |tx: &rusqlite::Transaction<'_>| -> R<u64> {
+        Ok(tx.query_row("SELECT COUNT(*) FROM missions WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64)
+    };
+    let total = count(tx)?;
+    if total > cap {
+        tx.execute(
+            &format!("DELETE FROM missions WHERE worker=?1 AND mission_id IN ({EVICT_SELECT})"),
+            params![worker, (total - cap) as i64],
+        )?;
+        let mut remaining = count(tx)?;
+        for id in inserted.iter().rev() {
+            if remaining <= cap {
+                break;
+            }
+            remaining -= tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])? as u64;
+            if refused_set_count(tx, worker)? < MAX_REFUSED_TRACKED as u64 {
+                tx.execute(
+                    "INSERT OR IGNORE INTO worker_refused_missions(worker, mission_id, refused_at) VALUES(?,?,?)",
+                    params![worker, id, crate::now()],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO worker_refused_overflow(worker, extra, refused_at) VALUES(?1, 1, ?2) \
+                     ON CONFLICT(worker) DO UPDATE SET extra=extra+1, refused_at=excluded.refused_at",
+                    params![worker, crate::now()],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM worker_refused_missions WHERE worker=?1 AND (mission_id IN (SELECT mission_id FROM missions WHERE worker=?1) \
+         OR mission_id IN (SELECT mission_id FROM mission_tombstones WHERE worker=?1))",
+        params![worker],
+    )?;
+    if count(tx)? < cap {
+        // Room again: nothing is refused now, so the overflow count no longer describes anything.
+        tx.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![worker])?;
+    }
+    let after = refused_count(tx, worker)?;
+    Ok((after != before).then_some(after))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnrolOutcome {
+    Added,
+    Exists,
+    Full,
+}
+
 pub enum HelloOutcome {
-    Ok { generation: u64, cursor: u64 },
+    /// `mission_notice` is the worker's refused-summary count when it changed (to tell the worker), else `None`.
+    Ok {
+        generation: u64,
+        cursor: u64,
+        mission_notice: Option<u64>,
+    },
     WorkerIdMismatch,
     Unknown,
 }
+
+/// Most mission summaries kept per worker (capacity plan F6). Above it the oldest finished summaries are dropped
+/// first; a worker whose missions are all active has its new excess rows refused, with a diagnostics warning.
+pub const MAX_MISSIONS_PER_WORKER: u64 = 10_000;
+/// Most enrolled workers (capacity plan F5).
+pub const MAX_ENROLLED_WORKERS: u64 = 256;
 
 pub struct Session {
     pub principal_id: String,
@@ -598,7 +698,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -668,6 +768,16 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// Version 17: durable principal ownership for security records and reserved sender-binding
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
+/// Version 18: `missions.touched_at` is the coordinator's own ordering of mission rows (set when a row is inserted
+/// or its summary changes; replayed old rows get values below the worker's minimum), used to drop the oldest
+/// finished summaries over the per-worker cap. Existing rows are numbered in `updated_at` order. The index serves
+/// that eviction. `worker_refused_missions` holds the ids the cap refused, so the warning survives a restart and
+/// counts each id once.
+const MIGRATE_V18: &str = "CREATE TABLE IF NOT EXISTS worker_refused_missions(worker TEXT NOT NULL, mission_id TEXT NOT NULL, refused_at INTEGER NOT NULL, PRIMARY KEY(worker, mission_id)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS worker_refused_overflow(worker TEXT PRIMARY KEY, extra INTEGER NOT NULL, refused_at INTEGER NOT NULL) WITHOUT ROWID;";
+/// Most refused ids remembered per worker.
+const MAX_REFUSED_TRACKED: i64 = 10_000;
+/// The finished summaries to drop first: the least recently touched. The index `missions_worker_touched` serves it.
+const EVICT_SELECT: &str = "SELECT mission_id FROM missions WHERE worker=?1 AND upper(COALESCE(json_extract(info,'$.status'),'')) NOT IN ('CREATED','RUNNING','PAUSED','STOPPING') ORDER BY touched_at ASC, mission_id ASC LIMIT ?2";
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -692,8 +802,12 @@ type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, Str
 impl Db {
     offload_impl! {
     pub fn open(path: &Path) -> R<Db> {
-        let conn = Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(WRITER_BUSY_TIMEOUT)?;
+        // A transaction that reads first and writes later fails with SQLITE_BUSY at once, without waiting
+        // for the busy timeout, when another process holds the write lock at the upgrade. IMMEDIATE takes
+        // the lock at BEGIN, where the busy timeout applies.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
         // Incremental auto-vacuum has to be chosen before the first table exists; an existing
         // database keeps its mode until `bridge-coordinator compact` (or a restore of a backup,
         // which is written compacted with the mode set) rebuilds it.
@@ -865,7 +979,37 @@ impl Db {
             }
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
         }
+        if version < 18 {
+            let has_table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='missions')", [], |r| r.get(0))?;
+            let has_column: bool = !has_table || {
+                let mut stmt = conn.prepare("PRAGMA table_info(missions)")?;
+                let found = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(Result::ok).any(|name| name == "touched_at");
+                found
+            };
+            let alter = if has_column { "" } else { "ALTER TABLE missions ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;" };
+            // Number the existing rows per worker in `updated_at` order (the oldest are evicted first) with one statement,
+            // inside the transaction that sets the version, so a crash cannot leave version 18 with every value 0.
+            let backfill = if has_column {
+                ""
+            } else {
+                "UPDATE missions SET touched_at = r.rn FROM (SELECT worker AS w, mission_id AS m, \
+                 ROW_NUMBER() OVER (PARTITION BY worker ORDER BY COALESCE(json_extract(info,'$.updated_at'),''), mission_id) AS rn \
+                 FROM missions) AS r WHERE missions.worker = r.w AND missions.mission_id = r.m;"
+            };
+            conn.execute_batch(&format!("BEGIN; {alter} {MIGRATE_V18} {backfill} PRAGMA user_version = 18; COMMIT;"))?;
+        }
+        let has_missions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='missions')", [], |r| r.get(0))?;
+        if has_missions {
+            conn.execute_batch("CREATE INDEX IF NOT EXISTS missions_worker_touched ON missions(worker, touched_at);")?;
+        }
         conn.execute_batch(MISSION_TOMBSTONES)?;
+        conn.execute_batch(MIGRATE_V18)?; // idempotent: a database that an earlier build of version 18 created lacks the overflow table
+        // Later touches must stay above every stored one, also when this host's clock is behind the one that wrote them.
+        let newest_touch: i64 = if has_missions {
+            conn.query_row("SELECT COALESCE(MAX(touched_at), 0) FROM missions", [], |r| r.get(0))?
+        } else {
+            0
+        };
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -875,6 +1019,7 @@ impl Db {
             stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
+            last_touch: std::sync::atomic::AtomicI64::new(newest_touch),
             audit_failed: std::sync::atomic::AtomicBool::new(false),
             audit_failures: AtomicU64::new(0),
             audit_last_attempt: std::sync::atomic::AtomicI64::new(0),
@@ -1587,6 +1732,29 @@ impl Db {
     }
 
     // ---- workers ----
+    pub fn workers_count(&self) -> R<u64> {
+        Ok(self.r()?.query_row("SELECT COUNT(*) FROM workers", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+    /// Enrol a worker unless the name exists (`Exists`) or `cap` workers are enrolled (`Full`). The existing-name check,
+    /// the count and the insert run in one transaction on the single writer connection, so concurrent enrolments
+    /// cannot exceed the cap.
+    pub fn worker_add_capped(&self, name: &str, hash: &str, fingerprint: Option<&str>, cap: u64) -> R<EnrolOutcome> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        if tx.query_row("SELECT COUNT(*) FROM workers WHERE name=?", params![name], |r| r.get::<_, i64>(0))? > 0 {
+            return Ok(EnrolOutcome::Exists);
+        }
+        if tx.query_row("SELECT COUNT(*) FROM workers", [], |r| r.get::<_, i64>(0))? as u64 >= cap {
+            return Ok(EnrolOutcome::Full);
+        }
+        tx.execute(
+            "INSERT INTO workers(name, token_hash, created_at, client_cert_fingerprint) VALUES(?,?,?,?)",
+            params![name, hash, crate::now(), fingerprint],
+        )?;
+        tx.commit()?;
+        Ok(EnrolOutcome::Added)
+    }
+
     pub fn worker_add(&self, name: &str, hash: &str) -> R<bool> {
         Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO workers(name, token_hash, created_at) VALUES(?,?,?)",
@@ -1600,7 +1768,10 @@ impl Db {
         )? == 1)
     }
     pub fn worker_revoke(&self, name: &str) -> R<bool> {
-        let revoked = self.c()?.execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
+        let c = self.c()?;
+        c.execute("DELETE FROM worker_refused_missions WHERE worker=?", params![name])?;
+        c.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![name])?;
+        let revoked = c.execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         Ok(revoked)
     }
@@ -1738,24 +1909,69 @@ impl Db {
         tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=?, worker_policy=? WHERE name=?",
             params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, text("worker_policy"), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
+        let refused_before = refused_count(&tx, name)?;
+        // A hello is the worker's whole list: ids it refused earlier are decided again below.
+        tx.execute("DELETE FROM worker_refused_missions WHERE worker=?", params![name])?;
+        tx.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![name])?;
+        let mut inserted = Vec::new();
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
-            for m in missions {
+            // The worker lists the missions that matter most first, so the first one gets the newest touch.
+            let touch = self.touch_n(missions.len() as i64) + missions.len() as i64 - 1;
+            for (position, m) in missions.iter().enumerate() {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
                     // The hello is the worker's own list: a mission it still has is not deleted, whatever an
                     // older tombstone says (for example after the worker restored an earlier backup).
                     tx.execute("DELETE FROM mission_tombstones WHERE worker=? AND mission_id=?", params![name, id])?;
                     tx.execute(
-                        "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
-                        params![name, id, m.to_string()],
+                        "INSERT OR REPLACE INTO missions(worker, mission_id, info, touched_at) VALUES(?,?,?,?)",
+                        params![name, id, m.to_string(), touch - position as i64],
                     )?;
+                    inserted.push(id.to_string());
                 }
             }
         }
+        let mission_notice = enforce_mission_cap(&tx, name, &inserted, MAX_MISSIONS_PER_WORKER, refused_before)?;
         tx.commit()?;
         Ok(HelloOutcome::Ok {
             generation: generation as u64,
             cursor: cursor as u64,
+            mission_notice,
         })
+    }
+
+    /// The next touch value (tests check that it is above every stored `touched_at`).
+    pub fn next_touch(&self) -> i64 {
+        self.touch_n(1)
+    }
+
+    /// The query plan of the eviction select (tests check that it uses `missions_worker_touched`).
+    pub fn eviction_plan(&self) -> R<String> {
+        let c = self.r()?;
+        let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {EVICT_SELECT}"))?;
+        let rows = st.query_map(params!["w", 1], |r| r.get::<_, String>(3))?.collect::<R<Vec<_>>>()?;
+        Ok(rows.join("; "))
+    }
+
+    /// `count` consecutive values, each above every earlier one, from the clock. Returns the first.
+    fn touch_n(&self, count: i64) -> i64 {
+        use std::sync::atomic::Ordering;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64);
+        let mut previous = self.last_touch.load(Ordering::SeqCst);
+        loop {
+            let start = now.max(previous + 1);
+            match self.last_touch.compare_exchange(previous, start + count.max(1) - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return start,
+                Err(actual) => previous = actual,
+            }
+        }
+    }
+
+    /// Every mission row as `(worker, info JSON text)`, without parsing the summaries.
+    pub fn missions_list_raw(&self) -> R<Vec<(String, String)>> {
+        let c = self.r()?;
+        let mut st = c.prepare("SELECT worker, info FROM missions ORDER BY worker, mission_id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect()
     }
 
     pub fn missions_list(&self) -> R<Vec<(String, Value)>> {
@@ -1774,8 +1990,18 @@ impl Db {
             events,
             mission_cursor,
             missions,
+            replay,
             max,
         } = batch;
+        // A batch that does not follow the stored cursor is refused without the write lock. The check is
+        // repeated inside the transaction, which is the one that counts.
+        let stored: Option<i64> = self
+            .r()?
+            .query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))
+            .optional()?;
+        if let Some(cursor) = stored.filter(|cursor| after != *cursor as u64) {
+            return Ok(EventsOutcome::Nack { expected: cursor as u64 });
+        }
         let mut c = self.c()?;
         let tx = c.transaction()?;
         let (cursor, previous_mission_cursor): (i64, i64) =
@@ -1806,22 +2032,43 @@ impl Db {
                 insert.execute(params![worker, id, e.to_string()])?;
             }
         }
+        let mut inserted_missions: Vec<String> = Vec::new();
+        let refused_before = if missions.is_some() { refused_count(&tx, worker)? } else { 0 };
         if let Some(missions) = missions {
             // A mission row is written only when its summary differs from the stored one: an unchanged
             // summary would otherwise dirty (and write to the log) its page on every batch.
-            let mut upsert = tx.prepare_cached(
-                "INSERT INTO missions(worker, mission_id, info) VALUES(?1, ?2, ?3) \
-                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info WHERE info IS NOT excluded.info",
-            )?;
+            // A live summary is touched now. A replayed one (old, sent after a hello) is only stored: a new row takes a
+            // value below every stored one, decreasing in arrival order, and a stored row keeps its place.
+            let mut upsert = tx.prepare_cached(if replay {
+                "INSERT INTO missions(worker, mission_id, info, touched_at) VALUES(?1, ?2, ?3, ?4) \
+                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info WHERE info IS NOT excluded.info"
+            } else {
+                "INSERT INTO missions(worker, mission_id, info, touched_at) VALUES(?1, ?2, ?3, ?4) \
+                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info, touched_at=excluded.touched_at WHERE info IS NOT excluded.info"
+            })?;
+            let mut replay_floor: i64 = tx.query_row("SELECT COALESCE(MIN(touched_at), 0) FROM missions WHERE worker=?", params![worker], |r| r.get(0))?;
+            let mut known = tx.prepare_cached("SELECT 1 FROM missions WHERE worker=?1 AND mission_id=?2")?;
             for mission in missions {
                 if let Some(id) = mission.get("id").and_then(Value::as_str) {
                     if tombstoned.contains(id) {
                         continue;
                     }
-                    upsert.execute(params![worker, id, mission.to_string()])?;
+                    // Only an id that was absent before this batch is new. An update of a stored mission is never refused.
+                    let is_new = !known.exists(params![worker, id])? && !inserted_missions.iter().any(|i| i == id);
+                    let touch = if replay {
+                        replay_floor -= 1;
+                        replay_floor
+                    } else {
+                        self.touch_n(1)
+                    };
+                    upsert.execute(params![worker, id, mission.to_string(), touch])?;
+                    if is_new {
+                        inserted_missions.push(id.to_string());
+                    }
                 }
             }
         }
+        let mission_notice = if missions.is_some() { enforce_mission_cap(&tx, worker, &inserted_missions, MAX_MISSIONS_PER_WORKER, refused_before)? } else { None };
         // `stale` compares the two cursors, so it must mean that mission data is really behind. A
         // batch of heartbeats from a worker that predates `mission_cursor` cannot change a mission
         // summary: when the copy was current before the batch, it stays current.
@@ -1846,7 +2093,7 @@ impl Db {
         }
         tx.commit()?;
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(worker.to_string(), count);
-        Ok(EventsOutcome::Accepted { cursor: through, stored })
+        Ok(EventsOutcome::Accepted { cursor: through, stored, mission_notice })
     }
 
     /// Record that `worker` deleted these missions: remove the coordinator's copy (summary and stored events)
@@ -1864,6 +2111,7 @@ impl Db {
                 params![worker, id, now],
             )?;
             tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])?;
+            tx.execute("DELETE FROM worker_refused_missions WHERE worker=? AND mission_id=?", params![worker, id])?;
             removed_events += tx.execute(
                 "DELETE FROM events WHERE worker=? AND json_extract(body, '$.mission_id')=?",
                 params![worker, id],
@@ -2384,7 +2632,27 @@ impl Db {
             let (w, s, n) = r?;
             depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
         }
-        Ok(json!({"db_bytes": pages * size + wal as i64, "command_queue_depths": depths}))
+        let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
+        let mut warnings = Vec::new();
+        let mut refused = c.prepare("SELECT worker, SUM(n), MAX(at) FROM (SELECT worker, 1 AS n, refused_at AS at FROM worker_refused_missions UNION ALL SELECT worker, extra, refused_at FROM worker_refused_overflow) GROUP BY worker ORDER BY worker")?;
+        for r in refused.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))? {
+            let (w, n, at) = r?;
+            warnings.push(json!({
+                "code": "missions-over-cap",
+                "worker": w,
+                "missions_refused": n,
+                "last_refused_at": at,
+                "message": format!("worker {w} has more than {MAX_MISSIONS_PER_WORKER} active missions; {n} newest summaries were not indexed"),
+                "fix": "finish or delete missions on that worker (llm-bridge mission delete), then reconnect it",
+            }));
+        }
+        Ok(json!({
+            "db_bytes": pages * size + wal as i64,
+            "command_queue_depths": depths,
+            "enrolled_workers": count("SELECT COUNT(*) FROM workers")?,
+            "missions_indexed": count("SELECT COUNT(*) FROM missions")?,
+            "warnings": warnings,
+        }))
     }
     }
 }
@@ -2452,6 +2720,7 @@ mod batch_write_cost {
                     events: &events,
                     mission_cursor: Some(self.next_id - 1),
                     missions,
+                    replay: false,
                     max,
                 })
                 .unwrap();
@@ -2582,6 +2851,90 @@ mod lock_wait_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("test.sqlite3")).unwrap();
         (dir, db)
+    }
+
+    /// Another process (a backup run from the command line, for example) can hold the write lock of the
+    /// database for a moment. A batch of events reads the worker row and then writes; it must wait for
+    /// the lock as the busy timeout allows and not fail at the first write with `SQLITE_BUSY`.
+    #[test]
+    fn a_batch_waits_for_a_write_lock_held_by_another_connection() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        let events = vec![json!({"id": 1, "kind": "task-progress", "mission_id": "m1", "ts": 1})];
+        let outcome = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 0,
+                through: 1,
+                events: &events,
+                mission_cursor: None,
+                missions: None,
+                replay: false,
+                max: 1000,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventsOutcome::Accepted { .. }));
+        release.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A lock held by another connection for longer than the busy timeout ends the wait with the typed
+    /// busy error (HTTP 503 `database-busy`, which `is_busy` recognises), not with some other failure.
+    #[test]
+    fn a_lock_held_past_the_busy_timeout_is_a_busy_error() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        db.c().unwrap().busy_timeout(Duration::from_millis(100)).unwrap();
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let events = vec![json!({"id": 1, "kind": "task-progress", "mission_id": "m1", "ts": 1})];
+        let err = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 0,
+                through: 1,
+                events: &events,
+                mission_cursor: None,
+                missions: None,
+                replay: false,
+                max: 1000,
+            })
+            .err()
+            .expect("the lock is still held");
+        assert!(is_busy(&err), "{err:?}");
+        other.execute_batch("ROLLBACK").unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A batch that does not follow the stored cursor is refused without the write lock.
+    #[test]
+    fn a_nack_does_not_need_the_write_lock() {
+        let (dir, db) = open();
+        assert!(db.worker_add("w", "hash").unwrap());
+        let other = Connection::open(dir.join("test.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        db.c().unwrap().busy_timeout(Duration::from_millis(50)).unwrap();
+        let outcome = db
+            .events_store(EventBatch {
+                worker: "w",
+                after: 7,
+                through: 8,
+                events: &[],
+                mission_cursor: None,
+                missions: None,
+                replay: false,
+                max: 1000,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventsOutcome::Nack { expected: 0 }));
+        other.execute_batch("ROLLBACK").unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// One test changes the process-wide wait, so the cases run in sequence inside it.
