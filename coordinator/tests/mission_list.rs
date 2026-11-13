@@ -91,7 +91,17 @@ async fn the_light_mission_list_matches_a_full_parse() {
             .iter()
             .map(|m| (m["worker"].as_str().unwrap().to_string(), m["mission"].clone()))
             .collect();
-        let want: Vec<(String, Value)> = reference.iter().map(|r| (r.0.clone(), r.1.clone())).collect();
+        // Public timestamp fields are served as RFC 3339 UTC (API-004), so the numeric epoch fixture appears as text.
+        let want: Vec<(String, Value)> = reference
+            .iter()
+            .map(|r| {
+                let mut mission = r.1.clone();
+                if mission["updated_at"] == json!(7) {
+                    mission["updated_at"] = json!("1970-01-01T00:00:07Z");
+                }
+                (r.0.clone(), mission)
+            })
+            .collect();
         assert_eq!(got, want, "{url}");
         assert_eq!(body["total"].as_u64().unwrap() as usize, want.len(), "{url}");
         let counts: std::collections::BTreeMap<String, u64> = serde_json::from_value(body["statuses"].clone()).unwrap();
