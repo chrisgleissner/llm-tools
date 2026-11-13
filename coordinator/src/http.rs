@@ -76,6 +76,7 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     retry_after: Option<u64>,
+    details: Option<Value>,
 }
 
 pub fn err(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
@@ -84,6 +85,7 @@ pub fn err(status: StatusCode, code: &'static str, message: impl Into<String>) -
         code,
         message: message.into(),
         retry_after: None,
+        details: None,
     }
 }
 
@@ -106,18 +108,18 @@ impl From<rusqlite::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status;
-        let mut r = (
-            status,
-            axum::Json(json!({
-                "type": format!("https://llm-tools.dev/problems/{}", self.code),
-                "title": "Coordinator request failed",
-                "status": status.as_u16(),
-                "detail": self.message,
-                "code": self.code,
-                "error": {"code": self.code, "message": self.message}
-            })),
-        )
-            .into_response();
+        let mut body = json!({
+            "type": format!("https://llm-tools.dev/problems/{}", self.code),
+            "title": "Coordinator request failed",
+            "status": status.as_u16(),
+            "detail": self.message,
+            "code": self.code,
+            "error": {"code": self.code, "message": self.message}
+        });
+        if let Some(details) = self.details {
+            body["error"]["details"] = details;
+        }
+        let mut r = (status, axum::Json(body)).into_response();
         r.headers_mut()
             .insert(header::CONTENT_TYPE, "application/problem+json".parse().expect("static content type"));
         if let Some(s) = self.retry_after {
@@ -2009,36 +2011,28 @@ async fn mission_status_resource(
     .await
 }
 
+/// Options that stay local because they would let a control-token holder run a command of their
+/// choosing on the worker: a launch command template and every form of verifier command or file.
+/// A remote request names a verifier declared in the worker's own configuration (`verifier_name`).
+const REMOTE_CREATE_REFUSED: [&str; 8] = [
+    "command_template",
+    "verifier",
+    "verifier_command",
+    "verifier_after_dashes",
+    "verifier_arg",
+    "verifier_argv",
+    "verifier_file",
+    "verifier_files",
+];
+
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let mut params = parse_body(&body.bytes)?;
-    let worker = str_field(&params, "worker")?.to_string();
-    if !p.allows_worker(&worker) {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "token-worker-denied",
-            "request is outside this token's allowed workers",
-        ));
-    }
-    let local_only = [
-        "auto_continue",
-        "command_template",
-        "verifier_arg",
-        "verifier_argv",
-        "verifier_file",
-        "verifier_files",
-        "verifier_timeout",
-        "include_config",
-        "log_max_bytes",
-        "log_rotations",
-        "log_retained_runs",
-        "capacity_refresh_seconds",
-    ];
-    let unsupported: Vec<&str> = local_only.iter().copied().filter(|name| params.contains_key(*name)).collect();
-    if !unsupported.is_empty() {
+    let refused: Vec<&str> = REMOTE_CREATE_REFUSED.iter().copied().filter(|name| params.contains_key(*name)).collect();
+    if !refused.is_empty() {
         return Err(err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported-remote-option",
-            format!("mission.create does not support remote option(s): {}", unsupported.join(", ")),
+            format!("mission.create does not support remote option(s): {}", refused.join(", ")),
         ));
     }
     no_extra(
@@ -2058,8 +2052,33 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
             "trust_folder",
             "unsupported_options",
             "wait_ms",
+            "auto_continue",
+            "include_config",
+            "verifier_name",
+            "verifier_timeout",
+            "log_max_bytes",
+            "log_rotations",
+            "log_retained_runs",
+            "capacity_refresh_seconds",
         ],
     )?;
+    let (worker, placement) = match params.get("worker") {
+        None | Some(Value::Null) => {
+            let (name, placement) = place_worker(&st, &p, &params).await?;
+            (name, Some(("placement", placement)))
+        }
+        Some(Value::String(name)) => {
+            if !p.allows_worker(name) {
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "token-worker-denied",
+                    "request is outside this token's allowed workers",
+                ));
+            }
+            (name.clone(), None)
+        }
+        Some(_) => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "worker must be a string")),
+    };
     let wait_ms = resource_wait_ms(&params)?;
     params.remove("worker");
     params.remove("wait_ms");
@@ -2069,14 +2088,155 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
         ip,
         ResourceCommand {
             headers,
-            worker: worker.clone(),
+            worker,
             mission_id: None,
             operation: "mission.create".into(),
             params,
             wait_ms,
+            extra: placement,
         },
     )
     .await
+}
+
+/// A usage snapshot younger than this is used as it is; an older one is fetched again.
+const PLACEMENT_USAGE_MAX_AGE_SECS: i64 = 300;
+const PLACEMENT_USAGE_WAIT_MS: u64 = 5_000;
+const ACTIVE_MISSION_STATUSES: [&str; 4] = ["CREATED", "RUNNING", "PAUSED", "STOPPING"];
+
+fn requested_providers(params: &Map<String, Value>) -> Vec<String> {
+    params
+        .get("providers")
+        .and_then(Value::as_str)
+        .map(|text| {
+            text.split(',')
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The providers that the worker's latest usage snapshot reports as ready, or `None` when it has
+/// no snapshot younger than [`PLACEMENT_USAGE_MAX_AGE_SECS`] and one could not be fetched in time.
+async fn ready_providers(st: &St, worker: &crate::db::WorkerRow) -> Result<Option<Vec<String>>, ApiError> {
+    let now = crate::now();
+    let mut row = st
+        .db
+        .latest_done_command(&worker.name, "usage.snapshot")?
+        .filter(|row| now - row.updated_at <= PLACEMENT_USAGE_MAX_AGE_SECS);
+    if row.is_none() && worker.capability("usage.snapshot").is_some() {
+        let request_id = format!("placement-{}", auth::random_token());
+        let request = json!({
+            "schema_version": protocol::COMMAND_SCHEMA_VERSION, "operation": "usage.snapshot", "params": {},
+            "mission_id": null, "target": worker.name, "request_id": request_id
+        });
+        if let InsertOutcome::New(new) = st.db.command_insert(&worker.name, "usage.snapshot", false, &request)? {
+            st.hub.publish(json!({"type": "command", "command": new.to_notice()}));
+            let mut payload = request.as_object().cloned().unwrap_or_default();
+            payload.insert("target".into(), json!("local"));
+            let _ = st.hub.send_command(&worker.name, Value::Object(payload), &request_id);
+            let deadline = Instant::now() + Duration::from_millis(PLACEMENT_USAGE_WAIT_MS);
+            while Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                if let Some(found) = st.db.command_get(&request_id)?.filter(|found| found.state == "done") {
+                    row = Some(found);
+                    break;
+                }
+            }
+        }
+    }
+    let Some(row) = row else { return Ok(None) };
+    let providers = row
+        .result
+        .as_ref()
+        .and_then(|result| result.pointer("/result/providers"))
+        .and_then(Value::as_array);
+    Ok(providers.map(|list| {
+        list.iter()
+            .filter(|entry| entry.get("ready").and_then(Value::as_bool) == Some(true))
+            .filter_map(|entry| entry.get("provider").and_then(Value::as_str).map(str::to_ascii_lowercase))
+            .collect()
+    }))
+}
+
+/// Choose the worker for a `mission create` that names none.
+///
+/// A worker is eligible when it is online, the token may use it, it allows control and mission
+/// creation, and, when the request names providers, its latest usage snapshot reports one of them
+/// ready. Among the eligible workers the one with the fewest active missions wins, ties going to
+/// the lowest worker name. When no worker is eligible the answer is 409 with one reason per worker.
+async fn place_worker(st: &St, p: &Principal, params: &Map<String, Value>) -> Result<(String, Value), ApiError> {
+    let wanted = requested_providers(params);
+    let missions = st.db.missions_list()?;
+    let mut active: HashMap<String, usize> = HashMap::new();
+    for (worker, info) in &missions {
+        if info
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| ACTIVE_MISSION_STATUSES.contains(&status))
+        {
+            *active.entry(worker.clone()).or_default() += 1;
+        }
+    }
+    let mut eligible: Vec<(usize, String, String)> = Vec::new();
+    let mut reasons = Map::new();
+    for worker in st.db.workers_list()? {
+        if !p.allows_worker(&worker.name) {
+            continue;
+        }
+        let name = worker.name.clone();
+        let policy = worker.worker_policy.as_ref();
+        let flag = |key: &str| policy.and_then(|value| value.get(key)).and_then(Value::as_bool).unwrap_or(false);
+        let refusal = if !st.hub.online(&name) {
+            Some("offline")
+        } else if !flag("allow_control") {
+            Some("does not allow control")
+        } else if !flag("allow_create") || worker.capability("mission.create").is_none() {
+            Some("does not allow mission creation")
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            reasons.insert(name, json!(refusal));
+            continue;
+        }
+        let mut ready_note = "no provider requested".to_string();
+        if !wanted.is_empty() {
+            match ready_providers(st, &worker).await? {
+                None => {
+                    reasons.insert(name, json!("no usage snapshot available"));
+                    continue;
+                }
+                Some(ready) => match wanted.iter().find(|provider| ready.contains(provider)) {
+                    None => {
+                        reasons.insert(name, json!(format!("none of {} is ready", wanted.join(", "))));
+                        continue;
+                    }
+                    Some(provider) => ready_note = format!("{provider} ready"),
+                },
+            }
+        }
+        let count = active.get(&name).copied().unwrap_or(0);
+        eligible.push((count, name, ready_note));
+    }
+    eligible.sort();
+    let Some((count, name, ready_note)) = eligible.first().cloned() else {
+        let mut error = err(
+            StatusCode::CONFLICT,
+            "no-eligible-worker",
+            "no online worker allows control and has a requested provider ready; name a worker or see the reasons",
+        );
+        error.details = Some(json!({"workers": reasons}));
+        return Err(error);
+    };
+    let reason = format!(
+        "{ready_note}; {count} active mission{}; fewest of {} eligible worker{}",
+        if count == 1 { "" } else { "s" },
+        eligible.len(),
+        if eligible.len() == 1 { "" } else { "s" }
+    );
+    Ok((name.clone(), json!({"worker": name, "reason": reason})))
 }
 
 async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Path(worker): Path<String>, headers: HeaderMap, body: Buffered) -> ApiResult {
@@ -2095,6 +2255,7 @@ async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Pa
             operation: "worker.restore".into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2143,6 +2304,7 @@ async fn mission_settings_resource(
             .into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2188,6 +2350,7 @@ async fn mission_rotation_resource(
             .into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2251,6 +2414,7 @@ async fn mission_proposals_resource(
             operation: if method == Method::GET { "proposal.list" } else { "proposal.create" }.into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2287,6 +2451,7 @@ async fn mission_agents_resource(
             operation: "mission.agents".into(),
             params: Map::new(),
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2322,6 +2487,7 @@ async fn mission_steer_resource(
             operation: "mission.steer".into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2357,6 +2523,7 @@ async fn mission_finish_resource(
             operation: "mission.finish".into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2398,6 +2565,7 @@ async fn proposal_decision_resource(
             operation: operation.into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2476,6 +2644,7 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
             operation: operation.into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -2654,6 +2823,7 @@ async fn mission_task_show(
             operation: "task.show".into(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await?;
@@ -2690,6 +2860,10 @@ async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<S
 
 async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
+    submit_command(st, p, ip, headers, m, None).await
+}
+
+async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m: Map<String, Value>, extra: Option<(&'static str, Value)>) -> ApiResult {
     no_extra(&m, &["target", "request", "wait_ms"])?;
     let target = str_field(&m, "target")?;
     let Some(Value::Object(request)) = m.get("request") else {
@@ -2817,6 +2991,9 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
     if status == StatusCode::OK {
         add_next_page_cursor(&st, &row, &mut value);
     }
+    if let Some((key, extra)) = extra {
+        value[key] = extra;
+    }
     let mut response = json_ok(status, value);
     if status == StatusCode::ACCEPTED {
         response.headers_mut().insert(
@@ -2888,6 +3065,8 @@ struct ResourceCommand {
     operation: String,
     params: Map<String, Value>,
     wait_ms: u64,
+    /// A key and value added to the top level of the response, such as the placement of a mission.
+    extra: Option<(&'static str, Value)>,
 }
 
 async fn resource_command(st: St, principal: Principal, ip: String, command: ResourceCommand) -> ApiResult {
@@ -2904,8 +3083,10 @@ async fn resource_command(st: St, principal: Principal, ip: String, command: Res
             "request_id": format!("resource-{}", auth::random_token())
         }
     });
-    let bytes = Bytes::from(serde_json::to_vec(&envelope).expect("command JSON serializes"));
-    post_command(State(st), Authed(principal, ip), headers, Buffered { bytes, _permit: None }).await
+    let Value::Object(envelope) = envelope else {
+        unreachable!("the envelope is an object")
+    };
+    submit_command(st, principal, ip, headers, envelope, command.extra).await
 }
 
 fn resource_wait_ms(m: &Map<String, Value>) -> Result<u64, ApiError> {
@@ -2982,6 +3163,7 @@ async fn mission_action(
             operation: operation.to_string(),
             params,
             wait_ms: resource_wait_ms(&m)?,
+            extra: None,
         },
     )
     .await
@@ -3026,6 +3208,7 @@ async fn mission_delete_resource(
             operation: "mission.delete".into(),
             params: Map::from_iter([("confirm".to_string(), Value::Bool(true))]),
             wait_ms: resource_wait_ms(&m)?,
+            extra: None,
         },
     )
     .await
@@ -3058,6 +3241,7 @@ async fn suspend_until_credits_resource(
             operation: "mission.suspend_until_credits".into(),
             params: Map::new(),
             wait_ms: resource_wait_ms(&params)?,
+            extra: None,
         },
     )
     .await
@@ -3095,6 +3279,7 @@ async fn add_mission_task(
             operation: "task.add".to_string(),
             params: m,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -3156,6 +3341,7 @@ async fn amend_mission_task(
             operation: operation.to_string(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -3212,6 +3398,7 @@ async fn verify_mission_task(
             operation: operation.to_string(),
             params,
             wait_ms,
+            extra: None,
         },
     )
     .await
@@ -3255,6 +3442,7 @@ async fn task_action(
             operation: operation.to_string(),
             params: m,
             wait_ms,
+            extra: None,
         },
     )
     .await

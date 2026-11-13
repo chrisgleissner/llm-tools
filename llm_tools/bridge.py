@@ -1377,8 +1377,16 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
     argv = list(getattr(args, "verifier_argv", []) or [])
     command = getattr(args, "verifier_command", None)
     after_dashes = list(getattr(args, "verifier_after_dashes", []) or [])
-    if sum(bool(form) for form in (argv, command is not None, after_dashes)) > 1:
-        raise ValueError("give one verifier form: --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    name = getattr(args, "verifier_name", None)
+    if sum(bool(form) for form in (argv, command is not None, after_dashes, name)) > 1:
+        raise ValueError("give one verifier form: --verifier-name NAME, --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    named_timeout: float | None = None
+    if name:
+        from . import config as toolconfig
+
+        declared = toolconfig.named_verifier(toolconfig.load_config(), name)
+        argv, named_timeout = declared["argv"], declared["timeout_seconds"]
+        args.verifier_files = list(declared["files"])
     if command is not None:
         try:
             argv = shlex.split(command)
@@ -1391,6 +1399,8 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
     if not argv:
         return None
     timeout = float(getattr(args, "verifier_timeout", 300))
+    if named_timeout is not None and timeout == 300:
+        timeout = named_timeout  # the declared timeout applies unless the request names its own
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
     if any("\x00" in arg for arg in argv):
@@ -1473,6 +1483,7 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--native", dest="native_tui", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--verifier", dest="verifier_command", metavar="COMMAND", default=None, help="command that checks a finished task, split into words like a shell would (not run through a shell), for example 'python -m pytest -q'; or write the command last after --, as in -- python -m pytest -q; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
+    create.add_argument("--verifier-name", dest="verifier_name", metavar="NAME", default=None, help="a verifier declared as [bridge.verifiers.NAME] in the llm-tools config of the machine that runs the mission (the only verifier form a remote request may use)")
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the verifier command, for exact control of quoting; repeat per argument (--verifier-arg=-m for one that starts with a dash)")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
     create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")

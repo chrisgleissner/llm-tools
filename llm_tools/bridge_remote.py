@@ -393,33 +393,26 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):
             unsupported_options.append("-- COMMAND")
-        if bool(args.auto_continue):
-            unsupported_options.append("--auto-continue")
         if args.command_template:
             unsupported_options.append("--command-template")
-        if args.include_config:
-            unsupported_options.append("--include-config")
         if args.verifier_argv:
             unsupported_options.append("--verifier-arg")
         if args.verifier_files:
             unsupported_options.append("--verifier-file")
-        if args.verifier_timeout != 300:
-            unsupported_options.append("--verifier-timeout")
-        if args.log_max_bytes != 4 * 1024 * 1024:
-            unsupported_options.append("--log-max-bytes")
-        if args.log_rotations != 3:
-            unsupported_options.append("--log-rotations")
-        if args.log_retained_runs != 20:
-            unsupported_options.append("--log-retained-runs")
-        if args.capacity_refresh_seconds != 60:
-            unsupported_options.append("--capacity-refresh-seconds")
         params = {
             "prompt": _read_text(args), "cwd": args.cwd, "name": args.name or "",
             "acceptance": list(args.acceptance), "providers": args.providers, "routes": args.routes,
             "headless": bool(args.headless), "native_tui": bool(args.native_tui),
             "teams": args.teams, "token_spend": args.token_spend, "trust_folder": bool(args.trust_folder),
             "unsupported_options": unsupported_options,
+            "auto_continue": bool(args.auto_continue), "include_config": bool(args.include_config),
         }
+        if args.verifier_name:
+            params["verifier_name"] = args.verifier_name
+        for option, default in (("verifier_timeout", 300), ("log_max_bytes", 4 * 1024 * 1024), ("log_rotations", 3),
+                                ("log_retained_runs", 20), ("capacity_refresh_seconds", 60)):
+            if getattr(args, option) != default:
+                params[option] = getattr(args, option)
         return make("mission.create", params, with_mission=False), fmt.format_mission_created
     if command == "mission" and args.mission_action == "delete":
         request = make("mission.delete", {"confirm": True})

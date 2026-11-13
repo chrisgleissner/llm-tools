@@ -1910,6 +1910,17 @@ impl Db {
             .optional()
     }
 
+    /// The most recently finished command of `operation` for `worker`, if its result body is still kept.
+    pub fn latest_done_command(&self, worker: &str, operation: &str) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state='done' AND result IS NOT NULL ORDER BY updated_at DESC LIMIT 1"),
+                params![worker, operation],
+                command_row,
+            )
+            .optional()
+    }
+
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
         let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let request_json = request.to_string();

@@ -233,6 +233,10 @@ not mark them replicated and stops offering them for the rest of that connection
 the tombstone message carries no events. Upgrade the coordinator before the workers; until then the coordinator keeps
 listing the deleted mission as stale.
 
+## Mission creation options and verifiers (ORCH-008, D47)
+
+`mission.create` accepts `auto_continue`, `include_config`, `verifier_name`, `verifier_timeout`, `log_max_bytes`, `log_rotations`, `log_retained_runs` and `capacity_refresh_seconds` in addition to its earlier parameters. The worker validates the numeric ranges as `mission create` does locally. `verifier_name` selects `[bridge.verifiers.<name>]` (`argv`, optional `files`, `timeout_seconds`) from the worker's own llm-tools configuration; the worker records its hashes in the verifier guard at creation. A name that is not valid or not declared returns the error code `unknown-verifier`. A command template, a verifier command line and verifier files are not parameters of the operation and return `unsupported-remote-option`.
+
 ## Generation fencing (PROTO-010)
 
 The coordinator increments and persists a per-worker generation for every

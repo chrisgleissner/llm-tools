@@ -799,3 +799,79 @@ def test_hello_offers_every_supported_version_and_a_welcome_must_pick_one_of_the
     with pytest.raises(bridge_protocol.ProtocolError, match="protocol version 3 is not supported") as caught:
         decode(Message("welcome", "c", 1, {"generation": 1, "protocol_version": 3, "event_cursor": 0}).encode())
     assert caught.value.code == "unsupported-version"
+
+
+def _create_session(tmp_path, directory):
+    root = tmp_path / "approved"
+    root.mkdir(exist_ok=True)
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(root)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    session.hello()
+    _welcome(session)
+    return session, root
+
+
+def _write_config(tmp_path, monkeypatch, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(path))
+
+
+def test_remote_create_resolves_a_verifier_declared_in_the_worker_config(state, tmp_path, monkeypatch):
+    directory, _ = state
+    session, root = _create_session(tmp_path, directory)
+    (root / "check.sh").write_text("#!/bin/sh\nexit 0\n")
+    _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["sh", "check.sh"]\nfiles = ["check.sh"]\ntimeout_seconds = 90\n')
+    _, created = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "providers": "codex", "verifier_name": "unit"}))
+    assert created.payload["outcome"] == "applied", created.payload
+    mission_config = created.payload["result"]["mission"]["config"]
+    verifier = mission_config["verifier"]
+    assert verifier["argv"] == ["sh", "check.sh"] and verifier["timeout_seconds"] == 90.0
+    assert "check.sh" in verifier["fingerprints"]  # the verifier guard hashes the declared files as for a local mission
+    assert "frozen_tool_config" not in mission_config
+    _, overridden = _command(session, CommandRequest("mission.create", {"prompt": "again", "cwd": str(root), "providers": "codex", "verifier_name": "unit", "verifier_timeout": 30}))
+    assert overridden.payload["result"]["mission"]["config"]["verifier"]["timeout_seconds"] == 30.0
+
+
+def test_remote_create_refuses_unknown_and_malformed_verifier_names(state, tmp_path, monkeypatch):
+    directory, _ = state
+    session, root = _create_session(tmp_path, directory)
+    _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["true"]\n')
+    for name in ("missing", "../etc/passwd", "Bad Name"):
+        _, refused = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "verifier_name": name}))
+        assert refused.payload["error"]["code"] == "unknown-verifier", name
+    _, too_long = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "verifier_name": "unit", "verifier_timeout": 99999}))
+    assert too_long.payload["error"]["code"] == "invalid-argument"
+
+
+@pytest.mark.parametrize("option", ["command_template", "verifier_argv", "verifier_files", "verifier", "verifier_command"])
+def test_remote_create_still_refuses_commands_and_files(state, tmp_path, option):
+    directory, _ = state
+    session, root = _create_session(tmp_path, directory)
+    value = ["true"] if option.endswith(("argv", "files")) else "true"
+    _, refused = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), option: value}))
+    assert refused.payload["error"]["code"] == "unsupported-remote-option"
+
+
+def test_remote_create_accepts_the_retention_and_continue_options(state, tmp_path):
+    directory, _ = state
+    session, root = _create_session(tmp_path, directory)
+    _, created = _command(session, CommandRequest("mission.create", {
+        "prompt": "x", "cwd": str(root), "providers": "codex", "auto_continue": True, "include_config": True,
+        "log_max_bytes": 2048, "log_rotations": 1, "log_retained_runs": 5, "capacity_refresh_seconds": 30}))
+    config = created.payload["result"]["mission"]["config"]
+    assert (config["auto_continue"], config["log_max_bytes"], config["log_rotations"], config["log_retained_runs"], config["capacity_refresh_seconds"]) == (True, 2048, 1, 5, 30)
+    assert "frozen_tool_config" in config
+    _, bad = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "log_rotations": 99}))
+    assert bad.payload["error"]["code"] == "invalid-argument"
+
+
+def test_worker_config_validates_verifier_declarations(tmp_path, monkeypatch):
+    from llm_tools import config as toolconfig
+
+    for text in ('[bridge.verifiers.Bad]\nargv = ["x"]\n', '[bridge.verifiers.ok]\nargv = []\n', '[bridge.verifiers.ok]\nargv = ["x"]\nrun = 1\n',
+                 '[bridge.verifiers.ok]\nargv = ["x"]\ntimeout_seconds = 0\n', '[bridge.verifiers.ok]\nargv = ["x"]\nfiles = [1]\n'):
+        _write_config(tmp_path, monkeypatch, text)
+        with pytest.raises(SystemExit):
+            toolconfig.load_config()

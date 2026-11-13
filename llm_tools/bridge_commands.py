@@ -156,6 +156,8 @@ def validate_target(name: str) -> str:
 
 def _is_kind(value: Any, kind: type) -> bool:
     # bool is an int subclass; never accept True where a number is expected.
+    if kind is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     return isinstance(value, kind) and not (kind is int and isinstance(value, bool))
 
 
@@ -397,6 +399,8 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
     """Create a mission and its first task on this worker without starting it."""
     import argparse
 
+    from . import config as config_module
+
     unsupported = params["unsupported_options"]
     if unsupported:
         raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(unsupported),
@@ -407,12 +411,21 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
         acceptance=params["acceptance"], providers=params["providers"], routes=params["routes"],
         headless=params["headless"], native_tui=params["native_tui"], teams=params["teams"],
         token_spend=params["token_spend"], command_template=None, trust_folder=params["trust_folder"],
-        verifier_argv=[], verifier_files=[], log_max_bytes=4 * 1024 * 1024, log_rotations=3,
-        log_retained_runs=20, capacity_refresh_seconds=60,
+        verifier_argv=[], verifier_files=[], verifier_name=params["verifier_name"], verifier_timeout=params["verifier_timeout"],
+        log_max_bytes=params["log_max_bytes"], log_rotations=params["log_rotations"],
+        log_retained_runs=params["log_retained_runs"], capacity_refresh_seconds=params["capacity_refresh_seconds"],
     )
-    prompt, config = cli._mission_creation_inputs(args, auto_continue=False)
+    if params["verifier_name"] is not None and not config_module.VERIFIER_NAME_PATTERN.fullmatch(params["verifier_name"]):
+        raise CommandFailure("unknown-verifier", "verifier_name is not a valid verifier name", details={"verifier_name": params["verifier_name"][:64]})
+    try:
+        prompt, config = cli._mission_creation_inputs(args, auto_continue=params["auto_continue"])
+    except config_module.UnknownVerifier as exc:
+        raise CommandFailure("unknown-verifier", str(exc), details={"verifier_name": params["verifier_name"]}) from None
+    except ValueError as exc:
+        raise CommandFailure("invalid-argument", str(exc)) from None
     with cli.open_store() as writer:
-        return cli._create_mission_with_task(writer, args, prompt, config)
+        result = cli._create_mission_with_task(writer, args, prompt, config)
+    return result if params["include_config"] else cli.strip_frozen_config(result)
 
 
 def _mission_suspend_until_credits(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -726,7 +739,11 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "acceptance": Param(list, default=[], item=str), "providers": Param(str), "routes": Param(str),
                        "headless": Param(bool, default=False), "native_tui": Param(bool, default=False),
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
-                       "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
+                       "unsupported_options": Param(list, default=[], item=str),
+                       "auto_continue": Param(bool, default=False), "include_config": Param(bool, default=False),
+                       "verifier_name": Param(str), "verifier_timeout": Param(float, default=300.0),
+                       "log_max_bytes": Param(int, default=4 * 1024 * 1024), "log_rotations": Param(int, default=3),
+                       "log_retained_runs": Param(int, default=20), "capacity_refresh_seconds": Param(int, default=60)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
                       {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
                        "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
