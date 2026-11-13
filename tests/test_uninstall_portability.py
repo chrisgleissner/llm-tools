@@ -328,3 +328,111 @@ def test_backup_file_format_does_not_depend_on_the_architecture(tmp_path, monkey
     assert not Path(str(backup) + "-wal").exists() and not Path(str(backup) + "-shm").exists()
     guide = GUIDE.read_text(encoding="utf-8")
     assert "https://www.sqlite.org/onefile.html" in guide and "https://www.sqlite.org/lts.html" in guide
+
+
+# --------------------------------------------------------------------------- coordinator install methods (PRD-005)
+
+COORDINATOR_INSTALL = ROOT / "docs" / "distributed" / "install.md"
+COORDINATOR_UNINSTALL = ROOT / "docs" / "distributed" / "uninstall.md"
+# Each documented coordinator install method (a heading of install.md) and the heading that removes it.
+COORDINATOR_METHODS = {
+    "Container deployment (recommended)": "Container deployment",
+    "Windows": "Windows",
+    "Native install with systemd (alternative)": "Native install with systemd",
+}
+
+
+def _headings(path: Path) -> set[str]:
+    return {line[3:].strip() for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("## ")}
+
+
+def test_every_coordinator_install_method_has_an_uninstall_section():
+    install_headings = _headings(COORDINATOR_INSTALL)
+    uninstall_headings = _headings(COORDINATOR_UNINSTALL)
+    for install_heading, uninstall_heading in COORDINATOR_METHODS.items():
+        assert install_heading in install_headings, f"install.md lost the method {install_heading!r}; update COORDINATOR_METHODS"
+        assert uninstall_heading in uninstall_headings, f"uninstall.md has no section for {install_heading!r}"
+    assert "uninstall.md" in COORDINATOR_INSTALL.read_text(encoding="utf-8")
+
+
+def test_coordinator_uninstall_names_what_the_installers_create():
+    guide = COORDINATOR_UNINSTALL.read_text(encoding="utf-8")
+    script = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    for path in ("/usr/local/bin/bridge-coordinator", "/usr/local/bin/llm-bridge-coordinator", "/usr/share/bridge-coordinator",
+                 "/var/lib/bridge-coordinator", "/etc/systemd/system/bridge-coordinator.service"):
+        assert path in guide, path
+        assert Path(path).name in script, path  # the installer creates it (names appear in deploy/install.sh)
+    assert "user=bridge" in script and "userdel bridge" in guide
+    compose = (ROOT / "container" / "compose.yaml").read_text(encoding="utf-8")
+    volumes = re.findall(r"^  ([a-z-]+):$", compose[compose.index("\nvolumes:"):], re.M)
+    assert "bridge-data" in volumes and "bridge-data" in guide
+    assert "--profile tailscale down --volumes" in guide and "profiles: [\"tailscale\"]" in compose
+    assert 'bridge-coordinator backup' in guide and "unenroll" in guide
+
+
+def test_systemd_uninstall_matches_the_unit_file():
+    unit = (ROOT / "deploy" / "bridge-coordinator.service").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "distributed" / "uninstall.md").read_text(encoding="utf-8")
+    values = dict(re.findall(r"^(User|ExecStart|Environment|StateDirectory)=(.*)$", unit, re.M))
+    binary = values["ExecStart"].split()[0]
+    data_dir = re.search(r"(?:^|\s)BRIDGE_COORDINATOR_DATA_DIR=([^\s]+)", values["Environment"])[1]
+    state_directory = values["StateDirectory"]
+    assert binary in guide
+    assert data_dir in guide
+    assert f"bridge-coordinator.service" in guide
+    assert f"userdel {values['User']}" in guide
+    assert state_directory in guide
+
+
+def test_staged_install_creates_only_paths_the_uninstall_guide_names(tmp_path):
+    fake = tmp_path / "fake-coordinator"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    webdir = tmp_path / "web"
+    webdir.mkdir()
+    (webdir / "index.html").write_text("ok", encoding="utf-8")
+    stage = tmp_path / "stage"
+    result = subprocess.run(
+        ["sh", str(ROOT / "deploy" / "install.sh"), "--binary", str(fake), "--web-dir", str(webdir), "--prefix", str(stage)],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    guide = (ROOT / "docs" / "distributed" / "uninstall.md").read_text(encoding="utf-8")
+    unnamed = []
+    for created in stage.rglob("*"):
+        if not created.is_file():
+            continue
+        relative = created.relative_to(stage)
+        path = "/" + relative.as_posix()
+        ancestors = ["/" + parent.as_posix() for parent in relative.parents if parent.as_posix() != "."]
+        if not any(candidate in guide for candidate in [path, *ancestors]):
+            unnamed.append(path)
+    assert not unnamed, f"uninstall.md does not name staged install paths: {unnamed}"
+
+
+def test_container_uninstall_matches_the_compose_file():
+    compose = (ROOT / "container" / "compose.yaml").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "distributed" / "uninstall.md").read_text(encoding="utf-8")
+    volumes_block = compose.split("\nvolumes:\n", 1)[1]
+    volume_names = set(re.findall(r"^  ([\w-]+):$", volumes_block, re.M))
+    service_blocks = re.split(r"^  ([\w-]+):\s*$", compose.split("\nservices:\n", 1)[1].split("\nvolumes:\n", 1)[0], flags=re.M)
+    services = {service_blocks[i]: service_blocks[i + 1] for i in range(1, len(service_blocks), 2)}
+    tailscale_services = [body for body in services.values() if re.search(r"^    profiles:\s*\[.*tailscale", body, re.M)]
+    tailscale_volumes = {volume for body in tailscale_services for volume in re.findall(r"^\s+- ([\w-]+):", body, re.M)} & volume_names
+    default_volumes = (set(re.findall(r"^\s+- ([\w-]+):", services["coordinator"], re.M)) & volume_names) - tailscale_volumes
+    assert "bridge-data" in default_volumes
+    missing = sorted(name for name in default_volumes if name not in guide)
+    assert not missing, f"uninstall.md omits default coordinator volumes: {missing}"
+    assert "--volumes" in guide
+    tailscale_text = guide.split("If you started the Tailscale profile", 1)[-1].split("## ", 1)[0]
+    missing_tailscale = sorted(name for name in tailscale_volumes if name not in tailscale_text and "--volumes" not in guide)
+    assert not missing_tailscale, f"uninstall.md omits Tailscale volumes: {missing_tailscale}"
+
+
+def test_windows_uninstall_matches_the_install_guide():
+    install = (ROOT / "docs" / "distributed" / "install.md").read_text(encoding="utf-8")
+    uninstall = (ROOT / "docs" / "distributed" / "uninstall.md").read_text(encoding="utf-8")
+    install_windows = re.search(r"^## Windows\s*$([\s\S]*?)(?=^## |\Z)", install, re.M)[1]
+    uninstall_windows = re.search(r"^## Windows\s*$([\s\S]*?)(?=^## |\Z)", uninstall, re.M)[1]
+    data_dir = re.search(r"--data-dir\s+([^\s`]+)", install_windows)[1]
+    assert data_dir in uninstall_windows

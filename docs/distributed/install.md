@@ -16,6 +16,8 @@ worker, the audit log, day-to-day checks and troubleshooting are in
 measurements are in `benchmarks.md`. This file covers installation, certificate
 trust, backup of the coordinator, recovery and upgrades.
 
+To remove an installation, see [uninstall.md](uninstall.md).
+
 ## Container deployment (recommended)
 
 The image contains only the static `bridge-coordinator` binary and the web files

@@ -374,6 +374,45 @@ jobs:
 
   # Native ARM64 (GitHub-hosted ubuntu-24.04-arm, Cobalt 100). This is not a Raspberry Pi: the
   # figures show behaviour on the arm64 architecture and under Pi-like limits, not Pi speed.
+  first-success:
+    name: First success (wheel and image install, under 5 minutes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the release coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build cargo-zigbuild==0.24.1 ziglang==0.17.1
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y tmux
+      - name: Build the wheel
+        run: python -m build --wheel --outdir dist
+      - name: Build the coordinator image
+        run: container/build.sh --load --tag llm-bridge-coordinator:first-success
+      # Each walkthrough step is timed; the script fails past 300 seconds, and a failed step is timed too.
+      - name: "Walkthrough: wheel and coordinator binary"
+        run: python scripts/first_success_walkthrough.py --coordinator-bin coordinator/target/release/bridge-coordinator --wheel dist | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: "Walkthrough: wheel and coordinator container image"
+        run: python scripts/first_success_walkthrough.py --coordinator-image llm-bridge-coordinator:first-success --wheel dist | tee -a "$GITHUB_STEP_SUMMARY"
+
   arm64-coordinator:
     name: ARM64 coordinator (lint, tests, Python integration)
     runs-on: ubuntu-24.04-arm
@@ -574,6 +613,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e . pytest
+      - name: Build the wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist
+      - name: First-success walkthrough (full)
+        if: runner.os == 'macOS'
+        env:
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+        run: python scripts/first_success_walkthrough.py --coordinator-bin "$BRIDGE_COORDINATOR_BIN" --wheel dist | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: "First-success walkthrough (coordinator only: workers are not supported on Windows)"
+        if: runner.os == 'Windows'
+        env:
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+        run: python scripts/first_success_walkthrough.py --coordinator-bin "$BRIDGE_COORDINATOR_BIN" --wheel dist --coordinator-only | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Python suite against the native coordinator
         if: runner.os != 'Windows'
         env:

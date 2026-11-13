@@ -21,6 +21,11 @@ test.describe("workers page", () => {
     await setupViaUi(page, coord);
     await navTo(page, "Workers");
     await expect(page.getByRole("heading", { name: "No workers enrolled" })).toBeVisible();
+    const coordinatorHost = new URL(page.url()).host;
+    await expect(page.getByText(`llm-bridge worker enroll --name NAME --coordinator wss://${coordinatorHost}`)).toBeVisible();
+    await expect(page.getByRole("link", { name: "Installation and operations guide" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Installation and operations guide" })).toHaveAttribute("href", /operations\.md#worker-service$/);
+    await expect(page.getByText("appears in this list with an Online mark")).toBeVisible();
     await page.locator("#add-worker-button").click();
     const dialog = page.getByRole("dialog", { name: "Add a worker" });
     await dialog.getByLabel("Worker name").fill("Bad Name");

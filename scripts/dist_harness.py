@@ -27,7 +27,10 @@ import math
 import os
 import random
 import re
-import resource
+try:
+    import resource
+except ImportError:  # Windows has no resource module; only Coordinator.limit_file_size needs it
+    resource = None  # type: ignore[assignment]
 import shlex
 import signal
 import socket
@@ -43,6 +46,42 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
+
+
+def group_popen_kwargs() -> dict:
+    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+
+
+def kill_group(process) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True)
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+    if process.poll() is None:
+        process.wait(timeout=10)
+
+
+def terminate_group(process, *, grace: float = 15.0) -> int | None:
+    if process is None or process.poll() is not None:
+        return process.returncode if process else None
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/PID", str(process.pid)], capture_output=True)
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        kill_group(process)
+        return process.wait(timeout=5)
+
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -344,7 +383,7 @@ def find_coordinator_binary(explicit: str | None = None, *, build: bool = False)
 
 def short_temp_dir(prefix: str) -> Path:
     """A private directory with a short path (Unix socket paths have a length limit)."""
-    path = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp" if os.name != "nt" else tempfile.gettempdir()))
     path.chmod(0o700)
     return path
 
@@ -567,8 +606,8 @@ class Coordinator:
         log = open(self.log_path, "ab")
         try:
             self.process = subprocess.Popen(
-                [str(self.binary), "serve", "--data-dir", str(self.data)], stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
-                env={**base_environment(), **self.extra_env}, preexec_fn=_ignore_sigxfsz if self.ignore_sigxfsz else None,
+                [str(self.binary), "serve", "--data-dir", str(self.data)], stdout=log, stderr=log, stdin=subprocess.DEVNULL, **group_popen_kwargs(),
+                env={**base_environment(), **self.extra_env}, **({"preexec_fn": _ignore_sigxfsz} if self.ignore_sigxfsz and os.name != "nt" else {}),
             )
         finally:
             log.close()
@@ -597,21 +636,10 @@ class Coordinator:
 
     def stop(self, timeout: float = 15.0) -> int | None:
         """SIGTERM and wait; the coordinator drains connections and exits (10 s bound)."""
-        process = self.process
-        if process is None or process.poll() is not None:
-            return process.returncode if process else None
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            return process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            return process.wait(timeout=5)
+        return terminate_group(self.process, grace=timeout)
 
     def kill9(self) -> None:
-        process = self.process
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+        kill_group(self.process)
 
     def restart(self, *, graceful: bool = True) -> None:
         if graceful:
@@ -683,6 +711,8 @@ class Coordinator:
 
     def limit_file_size(self, limit: int | None) -> None:
         """Set (or with ``None`` lift) ``RLIMIT_FSIZE`` of the running process: the disk-full fault."""
+        if resource is None:
+            raise RuntimeError("file size limits need the resource module (not available on Windows)")
         if self.pid is None:
             raise RuntimeError("coordinator is not running")
         soft = resource.RLIM_INFINITY if limit is None else limit
@@ -749,8 +779,10 @@ class WorkerNode:
     """One enrolled worker: its own state, runtime, config and home directories and a ``worker run`` process."""
 
     def __init__(self, name: str, base: Path, *, seed: int = 0, mix: ProviderMix | None = None, speed: float = 1.0,
-                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20, extra_env: dict[str, str] | None = None) -> None:
+                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20, extra_env: dict[str, str] | None = None,
+                 bridge_command: Sequence[str] | None = None) -> None:
         self.name = name
+        self.bridge_command = list(bridge_command) if bridge_command is not None else [sys.executable, str(LLM_BRIDGE)]
         self.extra_env = dict(extra_env or {})
         self.base = base
         self.state = base / "state"
@@ -790,7 +822,7 @@ class WorkerNode:
         return env
 
     def cli(self, *args: str, timeout: float = 60.0, check: bool = True, **env: str) -> subprocess.CompletedProcess[str]:
-        done = subprocess.run([sys.executable, str(LLM_BRIDGE), *args], env=self.env(**env), capture_output=True, text=True, timeout=timeout, cwd=self.base)
+        done = subprocess.run([*self.bridge_command, *args], env=self.env(**env), capture_output=True, text=True, timeout=timeout, cwd=self.base)
         if check and done.returncode != 0:
             raise RuntimeError(f"llm-bridge {' '.join(args)} failed ({done.returncode}): {done.stderr.strip() or done.stdout.strip()}")
         return done
@@ -812,8 +844,8 @@ class WorkerNode:
     def start(self) -> None:
         log = open(self.log_path, "ab")
         try:
-            self.process = subprocess.Popen([sys.executable, str(LLM_BRIDGE), "worker", "run"], env=self.env(), stdout=log, stderr=log,
-                                            stdin=subprocess.DEVNULL, start_new_session=True, cwd=self.base)
+            self.process = subprocess.Popen([*self.bridge_command, "worker", "run"], env=self.env(), stdout=log, stderr=log,
+                                            stdin=subprocess.DEVNULL, **group_popen_kwargs(), cwd=self.base)
         finally:
             log.close()
 
@@ -822,21 +854,10 @@ class WorkerNode:
         return self.process.pid if self.process and self.process.poll() is None else None
 
     def stop(self) -> None:
-        process = self.process
-        if process is None or process.poll() is not None:
-            return
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
+        terminate_group(self.process)
 
     def kill9(self) -> None:
-        process = self.process
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+        kill_group(self.process)
 
     # -- missions
     def create_mission(self, label: str, *, prompt: str | None = None, run_provider: bool = True, mode: str = "headless") -> str:

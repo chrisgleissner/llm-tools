@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.ref_type == 'tag'
     name: Build, publish, sign and attest coordinator image
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -64,18 +65,7 @@ jobs:
           subject-name: ${{ steps.build.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-      - name: Install pinned Syft and verify its archive
-        env:
-          SYFT_VERSION: 1.57.0
-        run: |
-          curl --fail --location --silent --show-error \
-            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
-            -o "$RUNNER_TEMP/syft.tar.gz"
-          curl --fail --location --silent --show-error \
-            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt" \
-            -o "$RUNNER_TEMP/syft-checksums.txt"
-          (cd "$RUNNER_TEMP" && grep 'syft_1.57.0_linux_amd64.tar.gz$' syft-checksums.txt | sha256sum --check)
-          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP" syft
+      - uses: ./.github/actions/install-syft
       - name: Produce CycloneDX SBOM for the published image
         env:
           IMAGE: ${{ steps.build.outputs.image }}

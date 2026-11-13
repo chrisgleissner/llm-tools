@@ -1,0 +1,29 @@
+name: Install pinned Syft
+description: Download and verify a pinned Syft release archive
+inputs:
+  version:
+    description: Syft version to install
+    required: false
+    default: 1.57.0
+outputs:
+  path:
+    description: Path to the installed Syft executable
+    value: ${{ steps.install.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - name: Install Syft and verify its archive
+      id: install
+      shell: bash
+      env:
+        SYFT_VERSION: ${{ inputs.version }}
+      run: |
+        curl --fail --location --silent --show-error \
+          "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
+          -o "$RUNNER_TEMP/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+        curl --fail --location --silent --show-error \
+          "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt" \
+          -o "$RUNNER_TEMP/syft-checksums.txt"
+        (cd "$RUNNER_TEMP" && grep "syft_${SYFT_VERSION}_linux_amd64.tar.gz$" syft-checksums.txt | sha256sum --check)
+        tar -xzf "$RUNNER_TEMP/syft_${SYFT_VERSION}_linux_amd64.tar.gz" -C "$RUNNER_TEMP" syft
+        echo "path=$RUNNER_TEMP/syft" >> "$GITHUB_OUTPUT"

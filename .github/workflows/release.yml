@@ -4,9 +4,16 @@ on:
   push:
     tags:
       - "*.*.*"
+  # Release dry run: builds every artifact and its checksums without secrets and publishes nothing.
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   release:
+    # Tag-only: publishing never runs for a pull request.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,7 +39,11 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
+      - name: Write SHA-256 checksums of the Python artifacts
+        run: python scripts/release_checksums.py dist SHA256SUMS
+
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           # Only attach the build artifacts. Do NOT regenerate release notes:
@@ -40,4 +51,123 @@ jobs:
           # and this workflow runs on the resulting tag push. Re-generating
           # here would append a second copy of the notes to the existing
           # release body (the duplication bug).
-          files: dist/*
+          files: |
+            dist/*
+            SHA256SUMS
+
+  dry-run:
+    name: Release dry run (wheel, coordinator binaries, multi-arch image, checksums)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/coordinator/target
+      REGISTRY: localhost:5000
+    steps:
+      - name: Set the image build directory
+        # The runner context is not available in a job-level env block.
+        run: echo "BRIDGE_BUILD_DIR=$RUNNER_TEMP/bridge-image-build" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Install pinned cross-build tools
+        run: python -m pip install cargo-zigbuild==0.24.1 ziglang==0.17.1
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: dry-run-zigbuild
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - name: Start throw-away local registry
+        run: |
+          docker run -d --name dry-run-registry -p 127.0.0.1:5000:5000 registry:2
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:5000/v2/ >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Local registry did not become ready within 30 seconds" >&2
+          exit 1
+      - name: Build and push multi-architecture image to local registry
+        id: build
+        run: |
+          container/build.sh --push --tag "$REGISTRY/coordinator:dry-run" --metadata "$RUNNER_TEMP/build-metadata.json"
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/build-metadata.json")
+          test -n "$digest" && test "$digest" != null
+          echo "image=$REGISTRY/coordinator" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/install-syft
+      - name: Produce CycloneDX SBOM for the local image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: '"$RUNNER_TEMP/syft" "registry:$IMAGE@$DIGEST" -o cyclonedx-json=container.cdx.json'
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign and verify the local image with an ephemeral key
+        # This proves the signing step runs; the published release signs keyless in container-release.yml.
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_PASSWORD: ""
+        run: |
+          cd "$RUNNER_TEMP"
+          COSIGN_PASSWORD= cosign generate-key-pair
+          cosign sign --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry "$IMAGE@$DIGEST"
+          cosign verify --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry "$IMAGE@$DIGEST"
+      - name: Create and verify local attestations
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_PASSWORD: ""
+        run: |
+          cd "$RUNNER_TEMP"
+          cosign attest --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry --type cyclonedx --predicate "$GITHUB_WORKSPACE/container.cdx.json" "$IMAGE@$DIGEST"
+          cosign attest --yes --key cosign.key --use-signing-config=false --tlog-upload=false --allow-insecure-registry --type custom --predicate "$RUNNER_TEMP/build-metadata.json" "$IMAGE@$DIGEST"
+          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry --type cyclonedx "$IMAGE@$DIGEST" > /dev/null
+          cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --private-infrastructure=true --allow-insecure-registry --type custom "$IMAGE@$DIGEST" > /dev/null
+      - name: Collect artifacts and write SHA-256 checksums
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p release-dry-run
+          cp dist/* release-dry-run/
+          for arch in amd64 arm64; do
+            cp "$BRIDGE_BUILD_DIR/context/bin/$arch/bridge-coordinator" "release-dry-run/bridge-coordinator-linux-$arch"
+          done
+          cp container.cdx.json "$RUNNER_TEMP/build-metadata.json" "$RUNNER_TEMP/cosign.pub" release-dry-run/
+          printf '%s\n' "$DIGEST" > release-dry-run/image-digest.txt
+          python scripts/release_checksums.py release-dry-run release-dry-run/SHA256SUMS
+          cat release-dry-run/SHA256SUMS
+          (cd release-dry-run && sha256sum --check SHA256SUMS)
+          {
+            echo '| File | Size |'
+            echo '| --- | ---: |'
+            for file in release-dry-run/*; do
+              printf '| %s | %s bytes |\n' "${file#release-dry-run/}" "$(stat -c %s "$file")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dry-run
+          path: release-dry-run
+          if-no-files-found: error
+          retention-days: 7
