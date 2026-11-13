@@ -214,7 +214,7 @@ Public:
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/healthz` | `{"status":"ok"}` only. |
+| GET | `/healthz` | `{"status":"ok"}` with 200. While an audit write has failed and none has succeeded since, `503` with `{"status":"fault","faults":["audit-write-failed: ..."]}` (FIND-004). Without a fault it does not use the database; with one it retries an audit write (`audit.recovered`) at most every 2 s, so health recovers when the disk does. |
 | GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. It also adds `password_change_required` (true while a temporary password from `admin reset-password --temporary` has not been replaced) and, after a reset on the host, `password_reset_notice: {at, message}` (`at` is the UTC epoch of the reset; the message is "Your password was reset by an administrator on the host."). The notice stays until the password is changed through `/auth/password` or seven days pass. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
 | POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
@@ -366,7 +366,7 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Stored events per worker | 50 000, oldest deleted first, in passes that keep 90 % of the cap once it is reached (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | rows 7 days and at most 5 000; the result body of a read-only command is dropped after 1 hour and that of a mutating command after 1 day (the outcome stays; results of 1 KiB or less stay whole) | fixed |
 | Mission tombstones kept | 90 days, and at most 10 000 per worker (oldest deleted first); table `mission_tombstones`, created with `IF NOT EXISTS` when the database opens, so the schema version does not change | fixed |
-| Database calls | run off the async worker threads (`block_in_place`); writes get the writer connection in arrival order, wait at most 3 s for it, and at most `max_connections` + 32 may wait (every connection has one call in flight); reads (lists, auth state, token and session lookups) use up to four read-only connections to the same WAL file and never wait for a commit, otherwise the request gets 503 `database-busy` with `Retry-After: 2`. `/healthz` does not use the database | fixed |
+| Database calls | run off the async worker threads (`block_in_place`); writes get the writer connection in arrival order, wait at most 3 s for it, and at most `max_connections` + 32 may wait (every connection has one call in flight); reads (lists, auth state, token and session lookups) use up to four read-only connections to the same WAL file and never wait for a commit, otherwise the request gets 503 `database-busy` with `Retry-After: 2`. `/healthz` does not use the database (it reads an in-memory audit fault flag; only while a fault is set does it retry an audit write) | fixed |
 | Retention and vacuum passes | hourly and at start, on a blocking thread, 50 rows per statement with the database lock released between statements; databases created by this version use incremental auto-vacuum and each pass returns up to 8 MiB of free pages; the write-ahead log file is cut back to 16 MiB after a checkpoint. A database created earlier keeps its free pages until `compact` | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
 | Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
@@ -421,3 +421,23 @@ Static files are served with `default-src 'self'`, `script-src 'self'` and
 `style-src 'self' 'unsafe-inline'`. Inline styles are allowed because xterm.js
 6 creates `<style>` elements at runtime and has no nonce option; scripts stay
 restricted to the coordinator's own files.
+
+## Integrity check at start, command re-delivery and audit failures (FIND-002, FIND-003, FIND-004)
+
+- **Start.** `serve` runs `PRAGMA quick_check` on the database before it binds a listener. A file that fails the
+  check, or that SQLite reports as malformed when it is opened, makes `serve` exit with status 1 and a message that
+  names the failure and the recovery: stop the service, run `bridge-coordinator restore --data-dir DIR --input
+  BACKUP.sqlite3` (`install.md`, Backup and restore) and start it again. The coordinator does not serve any request
+  from a damaged file, so `/healthz` is not reachable either. `quick_check` reads every page once. On a 210 MB
+  database with a warm file cache it added about 0.2 s to start; when it takes 2 s or more the time is logged. A
+  cold cache is limited by the disk read rate (about 2 s per 200 MB at 100 MB/s).
+- **Lost frames.** A mutating command that stays `pending`, `sent` or `acked` for 10 s without a result is sent
+  again on the same connection. The check runs every 5 s, so the repeat arrives 10 to 15 s after the last state
+  change, and again after every further 10 s until the result arrives. The worker answers a repeated request id
+  from its stored outcome (`command.ack` with `status: duplicate`, the first `command.result`), so the effect
+  happens once. No protocol field was added. Read-only commands are never repeated (see `protocol.md`).
+- **Audit writes.** A new mutating command (`POST /commands`, with the typed routes built on it) is stored together
+  with its `command.submit` audit entry in one transaction. When the audit insert fails the transaction is rolled
+  back, no command exists, and the client receives 500 `internal`. An audit write that fails after its action has
+  already taken effect (token or worker creation and revocation, sign-in, and so on) cannot undo the action; it
+  is logged on stderr and `/healthz` answers 503 with `audit-write-failed` until a later audit write succeeds; while the fault is set, `/healthz` retries the write itself every 2 s at most and records `audit.recovered` when it works.

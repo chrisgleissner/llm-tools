@@ -304,12 +304,14 @@ def fault_disk_full(fabric: Fabric) -> dict[str, Any]:
         statuses[status] = statuses.get(status, 0) + 1
         during.append(issued)
     expect(coordinator.pid is not None and not coordinator.log_has_panic(), "the coordinator crashed when its volume was full")
-    expect(coordinator.api.healthy(), "the coordinator stopped answering health checks while its volume was full")
+    # FIND-004: failed audit writes make /healthz answer 503 with a fault; it must still answer.
+    expect(coordinator.api.request("GET", "/healthz", timeout=3.0)[0] in (200, 503), "the coordinator stopped answering health checks while its volume was full")
     # A request answered with 2xx must be durable: it will finish after recovery. Any other answer is a refusal or an unknown outcome.
     refused = [item for item in during if not item.accepted]
     expect(refused, f"no write was refused while every write failed (statuses {statuses}); the fault was not injected")
     expect(all(item.last_status in (0, 500, 503) for item in refused), f"unexpected refusal statuses {statuses}")
     coordinator.limit_file_size(None)  # space is back; nothing is restarted
+    h.wait_until(coordinator.api.healthy, 30, message="health to recover after the volume has space again")
     fabric.wait_online(timeout=150)
     # A refused command may be retried under its ID: it applies once. Retrying must not duplicate an earlier unknown attempt.
     for item in refused:
@@ -393,16 +395,15 @@ def fault_ws_slow_frames(fabric: Fabric) -> dict[str, Any]:
             "reconnects": reconnects, "events": events}
 
 
+# FIND-003: the coordinator re-sends an unanswered command after 10 s idle, checked every 5 s; allow for a slow host.
+REDELIVERY_SECONDS = 45
+
+
 def fault_ws_dropped_frames(fabric: Fabric) -> dict[str, Any]:
     name = "chaos-w1"
     proxy: dist_ws_proxy.WsFrameProxy = fabric.proxies[name]
     observed: dict[str, Any] = {}
     node = fabric.nodes[name]
-
-    def reconnect() -> None:
-        accepted = proxy.accepted
-        proxy.reset_all()
-        h.wait_until(lambda: proxy.accepted > accepted and not fabric.offline(name), 150, message="the worker to reconnect")
 
     def stuck_for(request_id: str, seconds: float) -> str | None:
         end = time.monotonic() + seconds
@@ -418,11 +419,15 @@ def fault_ws_dropped_frames(fabric: Fabric) -> dict[str, Any]:
     first, request = fabric.ledger.add_task_request(name, fabric.missions[name])
     h.submit_until_accepted(fabric.coordinator.api, first, request, deadline=time.monotonic() + 30)
     h.wait_until(lambda: rule.dropped, 10, message="the command frame to be dropped")
-    observed["lost_command_state"] = stuck_for(first.request_id, 6.0)
+    observed["lost_command_state"] = stuck_for(first.request_id, 3.0)
     expect(observed["lost_command_state"] in ("pending", "sent"), f"a lost command is {observed['lost_command_state']}, expected pending or sent")
     expect(node.marker_count(first.marker or "") == 0, "the worker applied a command whose frame was dropped")
-    reconnect()
-    h.wait_until(lambda: fabric.command_state(first.request_id) == "done", 60, message="the redelivered command to finish")
+    # FIND-003: the coordinator sends the command again on the same connection; no reconnect is needed.
+    accepted = proxy.accepted
+    h.wait_until(lambda: fabric.command_state(first.request_id) == "done", REDELIVERY_SECONDS, message="the lost command to be re-sent and finish without a reconnect")
+    expect(proxy.accepted == accepted, "the lost command only finished after a reconnect")
+    expect(node.marker_count(first.marker or "") == 1, "the re-sent command was not applied exactly once")
+    observed["lost_command_resent_without_reconnect"] = True
 
     # 2. The worker's result frame is lost on its way to the coordinator: the effect exists, the coordinator does not know yet.
     rule = proxy.drop_next(dist_ws_proxy.UP, "command.result")
@@ -430,11 +435,13 @@ def fault_ws_dropped_frames(fabric: Fabric) -> dict[str, Any]:
     h.submit_until_accepted(fabric.coordinator.api, second, request, deadline=time.monotonic() + 30)
     h.wait_until(lambda: rule.dropped, 10, message="the result frame to be dropped")
     h.wait_until(lambda: node.marker_count(second.marker or "") == 1, 10, message="the worker to apply the command")
-    observed["lost_result_state"] = stuck_for(second.request_id, 6.0)
+    observed["lost_result_state"] = stuck_for(second.request_id, 3.0)
     expect(observed["lost_result_state"] in ("pending", "sent", "acked"), f"a command with a lost result is {observed['lost_result_state']}")
-    reconnect()
-    h.wait_until(lambda: fabric.command_state(second.request_id) == "done", 60, message="the command with the lost result to finish")
+    accepted = proxy.accepted
+    h.wait_until(lambda: fabric.command_state(second.request_id) == "done", REDELIVERY_SECONDS, message="the command with the lost result to finish without a reconnect")
+    expect(proxy.accepted == accepted, "the command with the lost result only finished after a reconnect")
     expect(node.marker_count(second.marker or "") == 1, "redelivery applied the command a second time")
+    observed["lost_result_resolved_without_reconnect"] = True
 
     # 3. An event batch is lost: the next batch fails the cursor check, the coordinator answers events.nack, the worker resends.
     rule = proxy.drop_next(dist_ws_proxy.UP, "events")
@@ -683,19 +690,20 @@ def fault_db_corrupt_page(fabric: Fabric) -> dict[str, Any]:
                                stdin=subprocess.DEVNULL, text=True, start_new_session=True, env=h.base_environment())
     try:
         code = process.wait(timeout=20)
-        output = (process.stdout.read() if process.stdout else "")[-400:]
+        output = (process.stdout.read() if process.stdout else "")[-4000:]
         observed.update({"start_result": "refused", "exit_code": code, "message": output.strip().splitlines()[-1] if output.strip() else ""})
         expect(code != 0, "the coordinator started on a corrupt database and exited with status 0")
+        expect("integrity" in output and "restore" in output, f"the refusal does not name the integrity failure and the restore step: {output.strip()[-300:]!r}")
     except subprocess.TimeoutExpired:
+        # FIND-002: serving from a corrupt database, even with errors on some requests, is a failure.
         coordinator.process = process
         try:
             coordinator.wait_healthy(10)
         except RuntimeError:
             pass
-        probe_status, _ = coordinator.api.request("GET", "/api/v1/commands/" + victim.request_id)
-        observed.update({"start_result": "serving", "probe_status": probe_status, "healthz_while_corrupt": coordinator.api.healthy()})
-        expect(probe_status != 200, "the coordinator served a command row from a corrupt page as if it were intact")
+        observed.update({"start_result": "serving", "healthz_while_corrupt": coordinator.api.healthy()})
         coordinator.stop()
+        raise Expectation("the coordinator kept running on a database that fails quick_check; it must refuse to start and name the restore step")
     finally:
         if process.poll() is None:
             process.kill()

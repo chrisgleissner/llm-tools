@@ -360,7 +360,7 @@ def test_a_dead_station_socket_is_removed_and_a_live_station_is_not_touched(tmp_
 
 def test_the_operation_is_declared_and_needs_an_explicit_confirmation(tmp_path, state, capsys) -> None:
     entry = next(item for item in commands.operation_catalog() if item["operation"] == "mission.delete")
-    assert entry["mutating"] and entry["needs_mission"] and entry["params"] == {"confirm": {"type": "bool", "required": False}}
+    assert entry["mutating"] and entry["needs_mission"] and entry["params"] == {"confirm": {"type": "bool", "required": False}, "force": {"type": "bool", "required": False}}
     mission_id = _create(tmp_path, capsys)
     refused = commands.execute(commands.CommandRequest("mission.delete", mission_id=mission_id, request_id="d1"))
     assert refused.outcome == "rejected" and refused.error is not None and refused.error.code == "confirmation-required"
