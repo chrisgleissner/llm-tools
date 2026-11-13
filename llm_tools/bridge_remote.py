@@ -161,7 +161,7 @@ class Client:
         """Use the resource route when one exists; return ``None`` for legacy-only operations."""
         mission = request.mission_id
         op = request.operation
-        if mission is None and op not in {"mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc", "session.list", "usage.snapshot"}:
+        if mission is None and op not in {"mission.list", "mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc", "session.list", "usage.snapshot"}:
             return None
         base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}" if mission is not None else ""
         params = dict(request.params)
@@ -170,6 +170,9 @@ class Client:
         wait_ms = int(wait * 1000)
         if op == "mission.create":
             status, body = self.call("POST", "/api/v1/missions", {**params, "worker": target, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "mission.list":
+            query = urllib.parse.urlencode({"include_config": "true" if params.get("include_config") else "false", "wait_ms": wait_ms})
+            status, body = self.call("GET", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/missions?{query}", timeout=wait + 15)
         elif op == "worker.restore":
             status, body = self.call("POST", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/restore", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op in {"mission.settings.get", "mission.rotation.get", "mission.rotation.put"}:

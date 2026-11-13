@@ -183,7 +183,10 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
     if path == "/api/v1/commands/{id}"
         || path == "/api/v1/commands"
-        || matches!(path, "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage")
+        || matches!(
+            path,
+            "/api/v1/workers/{name}/missions" | "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage"
+        )
         || path == "/api/v1/missions/{id}/station"
         || (matches!(
             path,
@@ -415,6 +418,12 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/workers/{name}/doctor" || path == "/api/v1/workers/{name}/agents" {
         op["parameters"] = json!([{"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
                                   {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/workers/{name}/missions" {
+        op["parameters"] = json!([
+            {"name":"include_config","in":"query","required":false,"schema":{"type":"boolean","default":false}},
+            {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}
+        ]);
     }
     if path == "/api/v1/workers/{name}/sessions" {
         op["parameters"] = json!([

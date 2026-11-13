@@ -2833,6 +2833,15 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
             }
             "mission.agents"
         }
+        "missions" => {
+            let include_config = match q.get("include_config").map(String::as_str) {
+                None | Some("false") => false,
+                Some("true") => true,
+                _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "include_config must be true or false")),
+            };
+            params.insert("include_config".into(), json!(include_config));
+            "mission.list"
+        }
         "sessions" => {
             let limit = q.get("limit").map_or(Ok(100), |value| {
                 value
@@ -2884,6 +2893,8 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
         &["limit", "wait_ms"][..]
     } else if matches!(action.as_str(), "doctor" | "agents") {
         &["mission", "wait_ms"][..]
+    } else if action == "missions" {
+        &["include_config", "wait_ms"][..]
     } else if action == "sessions" {
         &["mission", "limit", "offset", "cursor", "wait_ms"][..]
     } else if action == "usage" {
@@ -2949,6 +2960,30 @@ async fn worker_agents_resource(
         WorkerResourceRequest {
             worker,
             action: "agents".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_missions_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "missions".into(),
             q,
             headers,
             body: Buffered {
@@ -4042,6 +4077,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/missions", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/sessions", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/usage", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
@@ -4264,6 +4300,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
         .route("/api/v1/workers/{name}/doctor", get(worker_doctor_resource))
         .route("/api/v1/workers/{name}/agents", get(worker_agents_resource))
+        .route("/api/v1/workers/{name}/missions", get(worker_missions_resource))
         .route("/api/v1/workers/{name}/sessions", get(worker_sessions_resource))
         .route("/api/v1/workers/{name}/usage", get(worker_usage_resource))
         .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))

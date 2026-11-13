@@ -179,7 +179,12 @@ def test_remote_commands_match_local_semantics_and_are_idempotent(system):
     assert remote["state"] == "done"
     local = commands.execute(CommandRequest("mission.status", mission_id=mission_id))
     assert remote["result"]["outcome"] == "ok"
-    assert remote["result"]["result"]["mission"] == local.result["mission"]
+    # The command record omits mission content (cwd, repo_identity, objective, config); mission resources keep it.
+    redacted = {"cwd", "repo_identity", "objective", "config"}
+    local_mission = local.result["mission"]
+    remote_mission = remote["result"]["result"]["mission"]
+    assert remote_mission == {key: value for key, value in local_mission.items() if key not in redacted}
+    assert not redacted & remote_mission.keys()
 
     cancel = CommandRequest("mission.cancel", mission_id=mission_id[:8], target="ws", request_id="remote-cancel")
     first = _submit(coordinator, cancel)

@@ -312,7 +312,7 @@ def test_backup_target_is_explicitly_excluded_due_to_artifact_streaming_policy()
 
 def test_run_cli_outcomes(capsys):
     done = {"state": "done", "result": {"outcome": "ok", "result": {"missions": []}, "error": None}}
-    assert remote.run_cli("ws", args("mission", "list"), client=client({("POST", "/api/v1/commands"): (200, done)})) == 0
+    assert remote.run_cli("ws", args("mission", "list"), client=client({("GET", "/api/v1/workers/ws/missions"): (200, done)})) == 0
     assert capsys.readouterr().out.strip()
     pending = {"state": "pending", "result": None}
     assert remote.run_cli("ws", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (202, pending)})) == remote.EXIT_UNAVAILABLE
@@ -363,16 +363,16 @@ def test_resource_submission_uses_resource_path_and_idempotency_key():
 def test_target_all_aggregates_reads_and_reports_unavailable_workers(capsys):
     workers = {"workers": [{"name": "a", "state": "online"}, {"name": "b", "state": "offline"}, {"name": "c", "state": "online"}]}
     done = {"state": "done", "result": {"outcome": "ok", "result": {"missions": []}, "error": None}}
-    routes = {("GET", "/api/v1/workers"): (200, workers), ("POST", "/api/v1/commands"): [(200, done), (202, {"state": "pending"})]}
+    routes = {("GET", "/api/v1/workers"): (200, workers), ("GET", "/api/v1/workers/a/missions"): (200, done), ("GET", "/api/v1/workers/c/missions"): (202, {"state": "pending"})}
     fake = client(routes)
     assert remote.run_cli("all", args("mission", "list", "--json"), client=fake) == remote.EXIT_UNAVAILABLE
     targets = json.loads(capsys.readouterr().out)["targets"]
     assert targets["a"]["outcome"] == "ok" and targets["b"]["error"]["code"] == "offline" and targets["c"]["error"]["code"] == "unreachable"
-    request_ids = {call[1]["request"]["request_id"] for call in fake.opener.calls if call[1]}
-    assert len(request_ids) == 2  # one independent request per worker
+    mission_reads = [call[0] for call in fake.opener.calls if call[0][1].endswith("/missions")]
+    assert mission_reads == [("GET", "/api/v1/workers/a/missions"), ("GET", "/api/v1/workers/c/missions")]
     assert remote.run_cli("all", args("mission", "list"), client=client({("GET", "/api/v1/workers"): (200, {"workers": []})})) == 0
     assert "No workers" in capsys.readouterr().out
-    assert remote.run_cli("all", args("mission", "list"), client=client({("GET", "/api/v1/workers"): (200, workers), ("POST", "/api/v1/commands"): [(200, done), (200, done)]})) == remote.EXIT_UNAVAILABLE
+    assert remote.run_cli("all", args("mission", "list"), client=client({("GET", "/api/v1/workers"): (200, workers), ("GET", "/api/v1/workers/a/missions"): (200, done), ("GET", "/api/v1/workers/c/missions"): (200, done)})) == remote.EXIT_UNAVAILABLE
     assert "== a" in capsys.readouterr().out
     assert remote.run_cli("all", args("worker", "list"), client=client({("GET", "/api/v1/workers"): (200, workers)})) == 0
     assert "offline" in capsys.readouterr().out
@@ -577,3 +577,30 @@ def test_worker_sessions_usage_and_mission_station_use_resource_routes():
     assert queries[0].startswith("/api/v1/workers/ws/sessions?") and "limit=7" in queries[0] and "offset=3" in queries[0]
     assert queries[1].startswith("/api/v1/workers/ws/usage?")
     assert queries[2].startswith("/api/v1/missions/m1/station?") and "worker=ws" in queries[2]
+
+
+@pytest.mark.parametrize("include_config", [True, False])
+def test_worker_mission_list_uses_resource_route(include_config):
+    result = {"missions": [{"id": "m1", "cwd": "/srv/work", "repo_identity": "repo-1", "objective": "ship it"}]}
+    if include_config:
+        result["missions"][0]["config"] = {"headless": False}
+    api = client({("GET", "/api/v1/workers/ws%2Fone/missions"): (200, {"state": "done", "result": result})})
+    request = remote.commands.CommandRequest("mission.list", {"include_config": include_config}, target="ws/one", request_id="req-missions")
+    assert api.submit_resource("ws/one", request, wait=5) == result
+    assert len(api.opener.calls) == 1
+    call = api.opener.calls[0]
+    assert call[0][0] == "GET" and call[1] is None
+    assert call[3].endswith(f"/api/v1/workers/ws%2Fone/missions?include_config={str(include_config).lower()}&wait_ms=5000")
+
+
+@pytest.mark.parametrize("include_config", [True, False])
+def test_remote_mission_list_json_keeps_local_fields(capsys, include_config):
+    mission = {"id": "m1", "cwd": "/srv/work", "repo_identity": "repo-1", "objective": "ship it"}
+    if include_config:
+        mission["config"] = {"headless": False}
+    result = {"missions": [mission]}
+    done = {"state": "done", "result": {"outcome": "ok", "result": result, "error": None}}
+    fake = client({("GET", "/api/v1/workers/ws/missions"): (200, done)})
+    options = ["--include-config"] if include_config else []
+    assert remote.run_cli("ws", args("mission", "list", "--json", *options), client=fake) == 0
+    assert json.loads(capsys.readouterr().out) == result

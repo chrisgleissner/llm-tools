@@ -1422,6 +1422,49 @@ async fn worker_sessions_and_usage_are_readable_through_resource_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn worker_missions_resource_preserves_content_for_read_tokens() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "missions-read-worker", 0).await;
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"mission-reader","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let secret = created["secret"].as_str().unwrap().to_owned();
+    for (query, include_config) in [("", false), ("&include_config=false", false), ("&include_config=true", true)] {
+        let mut read_api = env.api();
+        read_api.bearer = Some(secret.clone());
+        let list = tokio::spawn(async move {
+            read_api
+                .rb(Method::GET, &format!("/api/v1/workers/w1/missions?wait_ms=5000{query}"))
+                .send()
+                .await
+                .unwrap()
+        });
+        let command = worker.recv().await;
+        assert_eq!(command["payload"]["operation"], "mission.list");
+        assert_eq!(command["payload"]["params"]["include_config"], include_config);
+        let mut mission = json!({"id":"m1","cwd":"/srv/work","objective":"ship it","repo_identity":"repo-1"});
+        if include_config {
+            mission["config"] = json!({"headless":false});
+        }
+        let result = json!({"missions":[mission]});
+        worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.list","outcome":"ok","result":result,"error":null})).await;
+        let response = list.await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["result"]["result"], result);
+    }
+    let mut read_api = env.api();
+    read_api.bearer = Some(secret);
+    for query in ["include_config=maybe", "unknown=true"] {
+        let (status, body) = read_api.get(&format!("/api/v1/workers/w1/missions?{query}")).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["type"], "https://llm-tools.dev/problems/invalid-request");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_resources_keep_mission_content_that_command_records_remove() {
     let env = boot().await;
     let api = env.admin().await;

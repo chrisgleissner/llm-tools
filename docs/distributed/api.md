@@ -47,6 +47,8 @@ with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
 
+`GET /api/v1/workers/{name}/missions` returns the worker’s full mission list (typed `mission.list`) with the `read` scope; it accepts `include_config` (`true` or `false`, default `false`) and `wait_ms`.
+
 `GET /api/v1/workers/{name}/sessions` returns the worker's provider sessions (typed `session.list`) and
 `GET /api/v1/workers/{name}/usage` returns its provider capacity snapshot (typed `usage.snapshot`). Both
 need the `read` scope and return the durable command envelope like the mission resources. `sessions` takes
@@ -280,7 +282,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `help` | Exclusion: offline help has no state/API operation; replacement is `llm-bridge help` locally. |
 | `view` | Exclusion: opens a local filesystem artifact; replacement is local `llm-bridge view --file`. |
 | `mission create` | Typed `mission.create`; resource `POST /api/v1/missions` with `worker` in the JSON body; worker requires `--allow-create` and a cwd inside an enrolled `--allow-root`. `worker` is optional: without it the coordinator places the mission (see "Worker placement" below). Only `--command-template` and the verifier command and file options stay local and return `unsupported-remote-option`; a verifier is chosen with `verifier_name`. |
-| `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
+| `mission list` | Typed `mission.list` via the read-scoped `GET /api/v1/workers/{name}/missions`, preserving the worker’s full local mission fields; `include_config` includes mission configuration. `GET /api/v1/missions` lists replicated summaries across workers. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
@@ -477,6 +479,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/workers/{name}/doctor` |
 | `GET /api/v1/workers/{name}/agents` |
+| `GET /api/v1/workers/{name}/missions` |
 | `GET /api/v1/workers/{name}/sessions` |
 | `GET /api/v1/workers/{name}/usage` |
 | `GET /api/v1/workers/{name}/audit` |
