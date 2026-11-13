@@ -553,6 +553,6 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | ORCH-009 | [ ] | Not started. |
 | ORCH-010 | [d] | Deferred beyond 1.6.0 by D42, target 1.7.0. Parallel work is provided by isolated missions (ORCH-001, ORCH-002). |
 | ORCH-011 | [w] | Rejected for now by D43: Bridge is a single-operator product; AUTH-009 is unchanged. |
-| ORCH-012 | [ ] | Not started. |
+| ORCH-012 | [x] | A provider or route that fails without a rate limit (non-zero exit or status 75) is relaunched only after min(cap, base·2^(n−1)), default base 30 s and cap 15 min, set by `[ralph] failure_backoff_base`/`failure_backoff_max` or `LLM_TOOLS_FAILURE_BACKOFF_BASE`/`_MAX` (base 0 restores the flat poll wait). The existing count budget is unchanged; a success resets the delay; a failure while capacity is limited uses the reset wait; a backed-off provider is skipped so another ready provider starts at once. Bridge records the wait as `provider-wait` with reason `failure-backoff`, interruptible by stop and pause. With base 0 by default, 5 of 9 tests fail. Tests: tests/test_failure_backoff.py::test_always_failing_provider_is_launched_at_capped_exponential_intervals, tests/test_failure_backoff.py::test_count_budget_still_stops_a_failing_provider, tests/test_failure_backoff.py::test_rate_limit_uses_the_reset_wait_not_the_backoff, tests/test_failure_backoff.py::test_another_ready_provider_is_not_delayed |
 | ORCH-013 | [ ] | Not started. |
 | ORCH-014 | [ ] | Not started. |
