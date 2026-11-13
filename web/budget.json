@@ -2,7 +2,7 @@
   "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus the app stylesheet. terminal is the single xterm.js chunk loaded on a mission page (its stylesheet is a separate file the chunk loads). routes is the sum of the other lazily loaded chunks of login, reset, account, workers, sessions, usage and diagnostics (jsRaw and jsGzip for their JavaScript, cssRaw and cssGzip for their route stylesheets css/fleet.css, css/auth.css and css/route-mission.css, which each route loads with its chunk) (lazyRoutes lists one string of each route module, which must be absent from the initial graph and present in a lazy chunk). The initial JavaScript and CSS caps are those of D17; the routes cap is the figure measured after the last page package plus at most 5% (D18). Sizes are bytes; gzip level 9 approximates a compressing proxy.",
   "initial": {
     "jsRaw": 91000,
-    "jsGzip": 31750,
+    "jsGzip": 32100,
     "cssRaw": 34000,
     "cssGzip": 9000,
     "totalRaw": 124000,
@@ -18,8 +18,8 @@
     "jsGzip": 93000
   },
   "routes": {
-    "jsRaw": 94000,
-    "jsGzip": 38700,
+    "jsRaw": 97000,
+    "jsGzip": 39600,
     "cssRaw": 18400,
     "cssGzip": 4900
   },

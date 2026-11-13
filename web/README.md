@@ -18,7 +18,10 @@ npx playwright test
 | `chromium-mobile` | Playwright `devices['Pixel 4']` (353x745 CSS px, DPR 3, touch) |
 | `firefox-mobile` | 393x851 CSS px, DPR 2.75, touch (Firefox has no mobile emulation, so viewport, scale factor and touch only) |
 
-Every spec runs on all four projects. `mobile.spec.ts` asserts no horizontal scrolling, touch targets of at least
+| `webkit-desktop` | Playwright `devices['Desktop Safari']` at 1440x900. Required in CI (job `web-webkit`) |
+| `webkit-mobile` | Playwright `devices['iPhone 13']`. Best effort for iOS Safari: it runs in the same job and does not fail it |
+
+Every spec runs on the first six projects (all but the two `webkit` rows are required on every platform; WebKit runs on Linux). `mobile.spec.ts` asserts no horizontal scrolling, touch targets of at least
 44x44 CSS px, input font size of at least 16 px, dialogs inside the viewport and the terminal key bar (Esc, Tab, Ctrl,
 arrows; the test captures the bytes sent on the WebSocket) in portrait and landscape.
 
@@ -26,6 +29,24 @@ The `typing-flood` project holds one test, T36 "typing under a 200 lines per sec
 wall-clock key-to-paint latency at 4x CPU throttling, which is only meaningful when no other test competes for the cores, so every other project
 depends on it: Playwright runs it first and alone, then the parallel workers start. Selecting any project therefore runs it once first (about 6 s);
 pass `--no-deps` to skip it. It does not take part in `--repeat-each` multiples of the other projects or in file and `-g` filters.
+
+## Keyboard, command palette and notifications
+
+`Ctrl+K` (`Cmd+K` on macOS) opens the command palette from any page. It lists missions, workers, provider sessions and actions, filters as you
+type and keeps the first result selected: Enter runs it, Up, Down, Home and End move, Escape closes. Every page has a `Go to ...` entry (Inbox,
+Missions, Sessions, Workers, Usage, Diagnostics, Account). A worker entry opens the Workers page. The actions of the open page (Approve, Reject,
+Pause the open mission, Write to the provider) appear when the page has exactly one such button. Outside text fields and the terminal the keys
+`g i`, `g m`, `g s`, `g w`, `g u` (go to a page), `j` `k` `Enter` (rows), `a` `r` `p` `c` (approve, reject, pause, compose), `/`, `t` and `?` work;
+`?` shows the list.
+
+Notifications: a toast that stays until dismissed (and a browser notification while the tab is hidden and permission is granted) for a mission that
+needs you, for a worker that has been offline for longer than the configured time, and for a rate limit that has lifted (a provider that waited
+for capacity is ready again). The offline time defaults to 5 minutes. Change it from the command palette ("Change the worker offline alert time"); the
+choice (1, 5, 15, 30 or 60 minutes) is kept in this browser (`localStorage` key `bridge-notify-offline-min`). A worker that is already offline when
+the console opens is not announced. The webhook is a separate item (SEC2-014).
+
+A browser that lacks WebSocket, fetch, the dialog element, or ResizeObserver gets a plain "This browser is not supported" page
+that says what is missing.
 
 ## Click paths, the on-screen keyboard and thumb reach (UXR-043 to UXR-046)
 

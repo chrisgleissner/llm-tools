@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test";
 //
 // Projects: desktop Chromium and Firefox at 1440x900, Chromium on the built-in Pixel 4 profile, and a Firefox
 // phone profile (Firefox has no mobile emulation: viewport, device scale factor and touch only).
+// WebKit projects (webkit-desktop 1440x900, webkit-mobile iPhone 13) run the same specs as Firefox; CI job `web-webkit`.
 // Visual baselines (e2e/screenshots.spec.ts) exist for the two Chromium projects only and are generated in the
 // official Playwright Docker image (see web/README.md); the file name carries no platform suffix for that reason.
 // T36 typing under a terminal flood (e2e/redesign/uxr-typing.spec.ts) measures wall-clock key-to-paint latency, which grows with every other busy
@@ -61,6 +62,10 @@ export default defineConfig({
     { name: "firefox-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
     // 393x851 CSS px at device scale factor 2.75 (the size the operator asked for); touch enabled.
     { name: "firefox-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
+    // WebKit (Playwright's build of the engine Safari uses) on Linux. webkit-desktop is required in CI (job `web-webkit`). webkit-mobile (iPhone 13 profile) is
+    // best effort for iOS Safari: it runs in the same job with a failure that does not fail the job, because Playwright's WebKit is not iOS Safari.
+    { name: "webkit-desktop", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["Desktop Safari"], viewport: { width: 1440, height: 900 } } },
+    { name: "webkit-mobile", testIgnore: [TYPING_SPEC, LIGHTHOUSE_SPEC, ...PLATFORM_IGNORE], ...aloneFirst, use: { ...devices["iPhone 13"] } },
     matrix(2560, 1440, "desktop"),
     matrix(1280, 720, "desktop"),
     matrix(768, 1024, "tablet"),
