@@ -270,7 +270,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-014 | [ ] | Not started (PR #31 is merged). Mission control at a glance (web). |
 | PRD-015 | [ ] | Not started (PR #31 is merged). Live session view (web). |
 | PRD-016 | [ ] | Not started (PR #31 is merged). Full operator control from the console (web). |
-| PRD-017 | [ ] | Not started (PR #31 is merged). Command palette and keyboard (web). |
+| PRD-017 | [~] | Command palette and keyboard (web). The palette exists (`web/src/palette.ts`, Ctrl/Cmd-K; `web/e2e/redesign/uxr-palette.spec.ts` T25, `uxr-keyboard-only.spec.ts`). Remaining: coverage of every operator action, keyboard paths for the actions of PRD-016, and the documentation of the shortcuts. |
 | PRD-018 | [ ] | Not started (PR #31 is merged). Notifications (web). |
 | PRD-019 | [ ] | Not started (PR #31 is merged). Accessibility (web). |
 | PRD-020 | [ ] | Not started (PR #31 is merged). Performance budgets (web). |
@@ -518,7 +518,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | FIND-004 | [x] | A `command.submit` is stored together with its audit row in one transaction; a failed audit write returns 500 and stores no command. For other audited actions (token and worker create and revoke, sign-in) a failed audit write sets a fault and `/healthz` answers 503 `audit-write-failed` until an audit write succeeds; while the fault is set, `/healthz` tries one recovery write at most every 2 s (D52). With `http.rs` reverted, the submission returns 202 with no audit row and health stays 200. Tests: coordinator/tests/audit_failure.rs::a_failed_audit_write_fails_a_command_submission_and_stores_nothing, coordinator/tests/audit_failure.rs::a_failed_audit_write_after_an_irreversible_action_is_a_health_fault |
 | FIND-005 | [d] | `worker-command-backlog` is implemented (`tests/test_distributed_soak_harness.py::test_a_growing_worker_command_backlog_is_reported`). D51 defers `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore`, which need coordinator changes; target 1.6.0. |
 | FIND-006 | [ ] | Not started. |
-| FIND-007 | [ ] | Not started. |
+| FIND-007 | [x] | All 33 web review findings (WUX-001 to WUX-033) have a disposition in the Dispositions table, checked against the web console and site on main after pull request #57: 24 fixed with a named file and test (a few with no dedicated test, stated in the row), 9 tracked by PRD-015, PRD-016, PRD-033 or UXR-057. Evidence: `docs/distributed/ux-review-web.md`. |
 | FIND-008 | [w] | `ZAP-001` (console CSP allows inline styles because xterm.js injects styles at run time) is waived by D14. `scripts/check_zap_reports.py` accepts only that alert, only on console paths and only with the expected policy; `review-findings.md` records the disposition. Tests: tests/test_zap_reports.py::test_zap_alert_gate_accepts_only_reviewed_xterm_style_csp_alert, tests/test_zap_reports.py::test_zap_alert_gate_does_not_accept_inline_script_csp |
 | FIND-009 | [ ] | Not started. |
 | FIND-010 | [x] | The prefix-B symptom of finding 32 was not reproduced. Under load (4 workers and 4 busy loops) the same test failed 4 of 48 runs on a different cause: the attach client's first paint missed a 5 s wait. With 30 s waits it failed 0 of 48. Tests: tests/test_terminal_attached.py::test_attached_client_input_paste_mouse_resize_detach_and_reattach |
