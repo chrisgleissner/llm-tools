@@ -26,7 +26,7 @@ _TOP_KEYS = {"template", "name", "objective", "tasks", "verifier", "rotation", "
 _TASK_KEYS = {"id", "title", "body", "depends_on", "acceptance"}
 _VERIFIER_KEYS = {"command", "argv", "files", "timeout_seconds"}
 _ROTATION_KEYS = {"providers", "routes"}
-_POLICY_KEYS = {"teams", "token_spend", "mode", "trust_folder", "auto_continue",
+_POLICY_KEYS = {"teams", "token_spend", "mode", "isolate", "trust_folder", "auto_continue",
                 "log_max_bytes", "log_rotations", "log_retained_runs", "capacity_refresh_seconds"}
 _MODES = ("native", "background", "headless")
 _INT_POLICY = ("log_max_bytes", "log_rotations", "log_retained_runs", "capacity_refresh_seconds")
@@ -34,7 +34,7 @@ _INT_POLICY = ("log_max_bytes", "log_rotations", "log_retained_runs", "capacity_
 # Command-line spellings that count as "the operator chose this" for each ``args`` attribute.
 _OPTION_DEST = {
     "--name": "name", "--providers": "providers", "--routes": "routes", "--teams": "teams",
-    "--token-spend": "token_spend", "--mode": "mode", "--headless": "mode", "--native": "mode",
+    "--token-spend": "token_spend", "--mode": "mode", "--isolate": "isolate", "--headless": "mode", "--native": "mode",
     "--trust-folder": "trust_folder", "--auto-continue": "auto_continue",
     "--log-max-bytes": "log_max_bytes", "--log-rotations": "log_rotations",
     "--log-retained-runs": "log_retained_runs", "--capacity-refresh-seconds": "capacity_refresh_seconds",
@@ -246,6 +246,9 @@ def _normalise_policy(table: dict[str, Any]) -> dict[str, Any]:
         elif key == "mode":
             if value not in _MODES:
                 raise ValueError("policy.mode must be one of " + ", ".join(_MODES))
+        elif key == "isolate":
+            if value not in ("none", "worktree"):
+                raise ValueError("policy.isolate must be \"none\" or \"worktree\"")
         elif key in ("trust_folder", "auto_continue"):
             if not isinstance(value, bool):
                 raise ValueError(f"policy.{key} must be true or false")
@@ -282,7 +285,7 @@ def apply_to_args(args: argparse.Namespace, template: dict[str, Any], explicit: 
         args.name = template["name"]
     args.template_tasks = template["tasks"]
     policy = template.get("policy", {})
-    for key in ("teams", "token_spend", "mode", *_INT_POLICY):
+    for key in ("teams", "token_spend", "mode", "isolate", *_INT_POLICY):
         if key in policy and key not in explicit:
             setattr(args, key, policy[key])
     if "mode" in policy and not ({"mode"} & explicit):
@@ -309,21 +312,17 @@ def prepare_args(args: argparse.Namespace, auto_continue: bool) -> bool:
     """Apply ``--template`` to the create arguments, if given; returns the effective ``auto_continue``."""
     if not getattr(args, "template", None):
         return auto_continue
-    if getattr(args, "isolate", "none") == "worktree":
-        raise ValueError("--template cannot be combined with --isolate worktree yet; create the mission without --isolate")
     apply_to_args(args, load_template(args.template), getattr(args, "explicit_options", frozenset()))
     return auto_continue or bool(getattr(args, "auto_continue", False))
 
 
-def create_template_tasks(store: Any, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
-    """Create the mission and the template's tasks and dependencies; returns ``{"mission", "task"}``.
+def create_template_mission(store: Any, args: argparse.Namespace, name: str, prompt: str, cwd: str, config: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Create the mission and the template's tasks and dependencies; returns the mission with ``initial_task_id``.
 
+    ``extra`` (``mission_id``, ``isolation``) comes from the shared worktree setup in ``bridge``.
     The store creates everything in one transaction, so a failure leaves no mission and no tombstone.
     """
-    from .bridge_store import derive_mission_name
-
-    mission = store.create_mission_with_tasks(args.name or derive_mission_name(prompt, "LLM Bridge mission"), prompt, args.template_tasks, cwd=args.cwd, config=config)
-    return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
+    return store.create_mission_with_tasks(name, prompt, args.template_tasks, cwd=cwd, config=config, **extra)
 
 
 # -- writing ------------------------------------------------------------------------------------
@@ -377,6 +376,7 @@ def render_template(mission: dict[str, Any], tasks: list[dict[str, Any]]) -> str
     if config.get("token_spend") in ("low", "medium", "high"):
         policy["token_spend"] = config["token_spend"]
     policy["mode"] = "headless" if config.get("headless") else "native" if config.get("native_tui") else "background"
+    policy["isolate"] = "worktree" if mission.get("isolation") == "worktree" else "none"
     for key in ("trust_folder", "auto_continue"):
         if config.get(key):
             policy[key] = True

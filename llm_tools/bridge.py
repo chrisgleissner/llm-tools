@@ -1597,12 +1597,15 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and its first task; returns ``{"mission": ..., "task": ...}``."""
     name = args.name or derive_mission_name(prompt, "LLM Bridge mission")
-    if getattr(args, "template_tasks", None):
-        from .bridge_templates import create_template_tasks
+    def create(cwd: str, config: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        if getattr(args, "template_tasks", None):
+            from .bridge_templates import create_template_mission
 
-        return create_template_tasks(store, args, prompt, config)
+            return create_template_mission(store, args, name, prompt, cwd, config, **extra)
+        return store.create_mission(name, prompt, cwd=cwd, initial_prompt=prompt, initial_acceptance=args.acceptance, config=config, **extra)
+
     if getattr(args, "isolate", "none") != "worktree":
-        mission = store.create_mission(name, prompt, cwd=args.cwd, initial_prompt=prompt, initial_acceptance=args.acceptance, config=config)
+        mission = create(args.cwd, config)
         return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
     import uuid
 
@@ -1623,8 +1626,7 @@ def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prom
         if fingerprints:
             config["verifier"]["fingerprints"] = fingerprints
     try:
-        mission = store.create_mission(name, prompt, cwd=facts["cwd"], mission_id=mission_id, initial_prompt=prompt,
-                                       initial_acceptance=args.acceptance, config=config, isolation=facts)
+        mission = create(facts["cwd"], config, mission_id=mission_id, isolation=facts)
     except BaseException:
         bridge_isolation.discard(facts["origin_cwd"], facts["worktree_path"], facts["branch"])
         raise

@@ -869,13 +869,15 @@ class BridgeStore:
         *,
         cwd: str | Path,
         config: dict[str, Any] | None = None,
+        mission_id: str | None = None,
+        isolation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a mission, its tasks and their dependencies in one transaction; a failure leaves nothing behind.
 
         Each task is ``{"id", "title", "body", "acceptance", "depends_on": [ids of tasks in this list]}``.
         """
         with self._transaction():
-            mission = self.create_mission(name, objective, cwd=cwd, config=config)
+            mission = self.create_mission(name, objective, cwd=cwd, config=config, mission_id=mission_id, isolation=isolation)
             ids = {task["id"]: self.add_task(mission["id"], task["body"], title=task["title"], acceptance=task["acceptance"]) for task in tasks}
             for task in tasks:
                 for dep in task["depends_on"]:

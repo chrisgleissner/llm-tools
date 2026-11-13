@@ -314,3 +314,40 @@ def test_explicit_verifier_timeout_and_log_flags_win(env, tmp_path, capsys) -> N
                      "--log-rotations", "2", "--log-retained-runs", "4", "--capacity-refresh-seconds", "30")["mission"]["config"]
     assert config["verifier"]["timeout_seconds"] == 60 and config["log_max_bytes"] == 4096
     assert config["log_rotations"] == 2 and config["log_retained_runs"] == 4 and config["capacity_refresh_seconds"] == 30
+
+
+def _make_repo(path: Path) -> None:
+    import subprocess
+
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    for args in (["init", "-q", "-b", "main"], ["add", "README.md"], ["commit", "-q", "-m", "first"]):
+        done = subprocess.run(["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+
+
+def test_template_with_isolate_worktree_creates_the_worktree_and_tasks(env, tmp_path, capsys) -> None:
+    _make_repo(env)
+    path = tmp_path / "t.toml"
+    path.write_text(BASIC.replace('mode = "headless"', 'mode = "headless"\nisolate = "worktree"'), encoding="utf-8")
+    mission = _create(capsys, env, "--template", str(path))["mission"]
+    assert mission["isolation"] == "worktree" and mission["cwd"] != str(env)
+    assert Path(mission["worktree_path"]).is_dir() and Path(mission["cwd"]) == Path(mission["worktree_path"])
+    assert [t["title"] for t in _tasks(mission["id"])] == ["Build", "Test"]
+    assert _tasks(mission["id"])[1]["depends_on_ordinals"] == [1]
+    # --isolate on the command line wins over the template.
+    plain = _create(capsys, env, "--template", str(path), "--isolate", "none", "--new")["mission"]
+    assert plain["isolation"] == "none" and plain["cwd"] == str(env)
+
+
+def test_export_round_trips_isolate(env, tmp_path, capsys) -> None:
+    _make_repo(env)
+    mission = _create(capsys, env, "--prompt", "Objective", "--providers", "codex", "--isolate", "worktree")["mission"]
+    exported = tmp_path / "iso.toml"
+    assert _run(capsys, "mission", "export", mission["id"], "--template", str(exported))[0] == 0
+    assert tomllib.loads(exported.read_text(encoding="utf-8"))["policy"]["isolate"] == "worktree"
+    again = _create(capsys, env, "--template", str(exported), "--new")["mission"]
+    assert again["isolation"] == "worktree" and again["id"] != mission["id"]
+    bad = tmp_path / "bad.toml"
+    bad.write_text('template = 1\nobjective = "x"\n[policy]\nisolate = "vm"\n', encoding="utf-8")
+    code, out, err = _run(capsys, "mission", "create", "--cwd", str(env), "--template", str(bad))
+    assert code == 2 and "policy.isolate" in out + err
