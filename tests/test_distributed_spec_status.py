@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import re
 import sys
 from collections import Counter
@@ -70,6 +72,13 @@ def test_verified_and_blocked_rows_carry_evidence() -> None:
             assert evidence, f"{identifier} is {status} without evidence or blocker"
 
 
+RELEASE_COUNT_CHECK = pytest.mark.skipif(
+    os.environ.get("SPEC_RELEASE_CHECK") != "1",
+    reason="FINAL_REPORT counts are checked at a release tag (SPEC_RELEASE_CHECK=1, D54)",
+)
+
+
+@RELEASE_COUNT_CHECK
 def test_final_report_counts_match_the_register() -> None:
     counts = Counter(status for _, status, _ in register_rows())
     labels = {"[x]": "Verified", "[w]": "Waived", "[d]": "Deferred", "[~]": "Incomplete", "[!]": "Blocked", "[ ]": "Not started"}
@@ -155,6 +164,7 @@ def final_report_mismatches(
     return mismatches
 
 
+@RELEASE_COUNT_CHECK
 def test_final_report_counts_match_register() -> None:
     mismatches = final_report_mismatches()
     assert not mismatches, "FINAL_REPORT counts differ from SPEC_STATUS.md:\n" + "\n".join(mismatches)

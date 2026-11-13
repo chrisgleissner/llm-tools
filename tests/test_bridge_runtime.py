@@ -1160,6 +1160,37 @@ def test_controller_cleans_owned_station_when_ralph_already_committed_stopped(tm
     assert stopped == [handle]
 
 
+def test_controller_records_background_not_autonomous_as_its_mode(tmp_path, monkeypatch) -> None:
+    from llm_tools.terminal import TerminalHandle
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_BRIDGE_STATE_DIR", raising=False)
+    store = BridgeStore(tmp_path / "llm-tools" / "llm-bridge" / "bridge.sqlite3")
+    mission = store.create_mission("background mode", "objective", cwd=tmp_path, config={"providers": "codex", "routes": "codex"})
+    handle = TerminalHandle(tmp_path / "station.sock", tmp_path / "station.conf", "mission-test", "%0", "%1", 6)
+
+    class Backend:  # no real tmux
+        def start(self, **_kwargs): return handle
+        def open_existing(self, **_kwargs): return None
+        def stop(self, _actual): pass
+        def set_detach_command(self, *_args): pass
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
+    monkeypatch.setattr("llm_tools.bridge_runtime.TmuxTerminalBackend", Backend)
+
+    def stop_inside_ralph(_argv, *, bridge_hooks):
+        store.set_mission_status(mission["id"], "STOPPED")
+        return 0
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", stop_inside_ralph)
+
+    assert run_controller(mission["id"], background=True) == 0
+
+    with store.db:
+        raw = store.db.execute("SELECT data_json FROM events WHERE kind='controller-mode'").fetchone()[0]
+    assert json.loads(raw)["actual_mode"] == "background"
+
+
 def test_recovery_terminates_a_persisted_verifier_by_start_token(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("managed verifier", "objective", cwd=tmp_path)

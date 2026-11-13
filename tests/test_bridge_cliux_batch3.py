@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge, bridge_missions, bridge_tui
+from llm_tools import bridge, bridge_console_draw, bridge_missions, bridge_tui
 from llm_tools.bridge import main
 from llm_tools.bridge_help import topic_text
 from llm_tools.bridge_store import BridgeStore
@@ -145,15 +145,15 @@ def test_hold_key_does_nothing_in_other_dialogs(monkeypatch) -> None:
 def test_console_header_shows_the_short_id_next_to_the_name(monkeypatch) -> None:
     console, _sent = _console([])
     console.snapshot = {"mission": {"status": "RUNNING", "name": "work"}, "tasks": []}
-    monkeypatch.setattr(bridge_tui, "ascii_mode", lambda: False)
+    monkeypatch.setattr(bridge_console_draw, "ascii_mode", lambda: False)
     assert bridge_tui._header(console, 100) == "LLM BRIDGE · ▌ work (01234567) · ● RUNNING"
-    monkeypatch.setattr(bridge_tui, "ascii_mode", lambda: True)
+    monkeypatch.setattr(bridge_console_draw, "ascii_mode", lambda: True)
     assert "work (01234567)" in bridge_tui._header(console, 100)
 
 
 def test_console_header_drops_the_id_when_the_name_would_get_too_short(monkeypatch) -> None:
     console, _sent = _console([])
     console.snapshot = {"mission": {"status": "RUNNING", "name": "a long mission name"}, "tasks": []}
-    monkeypatch.setattr(bridge_tui, "ascii_mode", lambda: False)
+    monkeypatch.setattr(bridge_console_draw, "ascii_mode", lambda: False)
     assert "(01234567)" in bridge_tui._header(console, 60)
     assert "(01234567)" not in bridge_tui._header(console, 40)

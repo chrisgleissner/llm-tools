@@ -107,7 +107,6 @@ is documented as an accepted risk.
 | L6 An over-long integer in a message raised an unhandled exception in the worker. | Fixed: it is a protocol error. |
 | L7 The session cookie had no `__Host-` prefix, the systemd unit lacked system call filtering, and the remote CLI followed redirects with the bearer token. | Fixed: `__Host-bridge_session`, `SystemCallFilter=@system-service`, `ProtectProc=invisible`, `ProcSubset=pid`; redirects are refused. |
 
-
 ## D8 Platform support and Windows (operator addendum 4, TEST-013, TEST-016)
 
 CI runs on six GitHub-hosted platforms: Linux x86-64 (`ubuntu-latest`), Linux ARM64
@@ -297,7 +296,6 @@ and is unchanged in `budget.json`.
 The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
-
 ## D18 Web route chunks and the separate routes budget (PRD-037 WP-0, UXR-039)
 
 The redesign adds a state model, shared components and several new pages, so the first load needs room.
@@ -410,185 +408,6 @@ with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until 
 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
-
-## D28 Operator decisions on the redesign and the overseer's findings R1 to R6 (PRD-037)
-
-The numbers D19 to D27 belong to the release branch (PR #35); this entry is D28 so that both branches merge without a clash.
-
-The fresh-eyes critique (`watch/prd037-critique-outcome.md`, "Needs operator decision") left six questions. The operator
-answered: "I agree with all your suggestions and for the redesign decisions." The overseer then reviewed screenshots of
-the redesign at 72930c5 (`watch/prd037-overseer-review.md`, 2026-11-08 00:20), accepted decisions 1, 2, 3, 5 and 6,
-replaced decision 4 and added the findings R1 to R6. The decisions are implemented as follows. `web/e2e/redesign/uxr-decisions.spec.ts`
-(T48) guards each of them; the revert column says what was undone to see the guarding test fail (each check was run in the Playwright
-image with that one change made and then restored).
-
-| # | Decision | What changed | Guarding test (T48 unless stated) | Revert that fails it |
-|---|---|---|---|---|
-| 1 | Inbox order | Failures from the last 24 hours rank first, then approval, then input. Older failures are one row after the input rows, "N older failures", with a Show button (and Hide) that lists them below that row. The heading count includes them. | "D28.1: failures of the last 24 hours come first..." and "D28.1: failures older than 24 hours are one row..." | the older-failures group removed; approval and input ranks swapped; the preview not following a visible row |
-| 2 | Capacity chip | Neutral while the provider is ready. While `usage.snapshot` says the provider is not ready, the chip has the attention tone and "resets 12:25" in its text. At 320 px the scope, the meter and the visible percentage give way ("Claude resets 12:25", 12 px, 6 px padding); the percentage stays in the accessible text and the title. | "D28.2: a chip is neutral..." and "D28.2: the waiting chip... fits the header at 320 px"; T35 and T22 still pass | `waiting: false` in `chipsFrom` |
-| 3 | Stop beside Reject, Undo for Pause | Stop has no danger outline while a Reject button is shown in the same header (from 30 rem; below it Reject is in the menu and Stop keeps its outline) and stays visible. Pause answers with "Mission paused." and an Undo button; the toast expires after 8 s (spec 6.4 has the exception) and Undo sends `mission.resume`. | "D28.3: Stop has no danger outline..." and "D28.3: Pause answers with an Undo toast..." | Stop always `danger`; the toast with an action sticky again |
-| 4 | Phone action bar | Replaced by the overseer, because UXR-007 needs Pause and Stop always visible. The primary label is "Approve" (the accessible name keeps "Approve task 2"). Pause and Stop show icon and label in 44 px buttons; padding is 8 px so Take control, Pause, Stop and the menu fit one row at 353 and 360 px. At 320 px (below 21 rem) Pause and Stop are icon only with their names for screen readers, because Take control, Pause, Stop and the menu need 315 px and 296 px are available. Stop is never moved into the menu. | "D28.4: the primary action reads 'Approve'..." and "D28.4: on a phone Pause and Stop are 44 px buttons..." | the label back to "Approve task 2"; the icon-only rule at every phone width |
-| 5 | Key bar | On a phone it is hidden until the client holds control, at every height (it was hidden only up to 640 px). T38 changes with it: hidden before control, six keys plus "..." after. | "D28.5: on a phone the key bar is hidden until control..." and T38 | the old height condition in `phone.css` |
-| 6 | Reconnect banner age | The banner says "Showing data as of 12:00" and adds "(15s ago)" once the data is 10 s old. `shell.spec.ts` and T28 wait for it; T28 uses the fake clock because the fixed clock never reaches 10 s. | `shell.spec.ts` "a reconnect shorter than the debounce..." and T28 | `AGE_AFTER_MS = 0` |
-
-The overseer's findings are registered as UXR-047 to UXR-052 in `SPEC_STATUS.md` (the register has the UXR group since PR #35 merged):
-
-| Row | Finding | Change | Guarding test | Revert that fails it |
-|---|---|---|---|---|
-| UXR-047 | R1: a phone opens the live session also while a task awaits approval | The product already opened on Session (`let tab = ... "session"`); the Tasks tab in the screenshots came from the screen definitions. A test now asserts the selected tab, the live pane and 14 rows with Approve in reach. | "R1: a mission that awaits approval opens on the Session tab on a phone..." | default tab "tasks" |
-| UXR-048 | R2: one place for the primary action | The header offers Approve, Reject and Retry for the task it is about; that task's row and the evidence block have no copy. A row of another task keeps its inline action and its menu; with several approvals the header says "Review N tasks" and each row keeps Approve and Reject. The evidence block has no buttons. | "R2: Approve and Reject are offered once..." and "R2: with several tasks awaiting approval..." | `subject` always undefined |
-| UXR-049 | R3: one number everywhere | The heading "Needs you (n)" uses the same figure as the badge, the tab title and the answer line; "+" appears only while some active mission is unread. | "R3: ... one number" and "R3: when every mission has been read..." | the heading using the row count |
-| UXR-050 | R4: the summary is not an instruction | The third part of the Inbox answer line names the kinds: "1 failed, 1 awaits approval". On phones taller than 30 rem the line keeps room for two lines from the start, so a late status does not move the rows (CLS); a landscape phone keeps one line so the first row stays above the fold (T18). | "R4: the Inbox summary names the kinds..."; T47 F2 and T36 | the text "Retry or open" |
-| UXR-051 | R5: the pill column | The column is 8.5 rem in Needs you, 6.5 rem in Running and 11 rem elsewhere, so the title starts 40 px closer at 1440 px in Needs you and no pill reaches a title. | "R5: at 1440 px an Inbox title starts close to its pill..." | 11 rem in Needs you |
-| UXR-052 | R6: the phone search button | No fill and no border at rest, like the account button. | "R6: on a phone the search button has no fill and no border..." | the old border colour |
-
-UXR-043 to UXR-046 are registered too; their guarding tests are `uxr-paths.spec.ts` (UXR-043, UXR-044), `uxr-keyboard.spec.ts` and
-`uxr-keyboard-only.spec.ts` (UXR-045) and `uxr-reach.spec.ts` (UXR-046).
-
-Answers to the questions of section 14 of `web-design-spec.md` (the section now records them):
-
-1. Backend fields for the Inbox: done by WP-7 and the DOG-021 digest. The Inbox rows switch to the digest after PR #35 merges.
-2. Routes cap: approved at the measured values of D18.
-3. Free-text steering without taking control: not in 1.5.0; a follow-up.
-4. Mission creation and snooze (DEV-10, DEV-11): out of PRD-037.
-5. Inbox preview content: the plain `task.output` tail is accepted.
-
-Existing tests changed only as far as the decisions require: T17 (the Pause toast has an Undo button, so its dismiss button is chosen by name,
-and the last queued toast of a phone ends after 24 s), T28 (fake clock, no age before 10 s, age after), T38 (key bar hidden before control),
-T47 F2 (the summary text) and F4 (the toast text includes Undo), `shell.spec.ts` (banner age), and the Reject screen (opens the
-dialog from the header, or from the header menu below 30 rem).
-
-Budget (bytes, raw / gzip, caps in `web/budget.json` not raised):
-
-| Measure | Before (72930c5) | Now | Cap |
-|---|---:|---:|---:|
-| Initial JavaScript | 79509 / 30905 | 80464 / 31326 | 91000 / 31750 |
-| Initial CSS | 33525 / 7451 | 33949 / 7550 | 34000 / 9000 |
-| Initial total | 113034 / 38356 | 114413 / 38876 | 124000 / 40000 |
-| Terminal chunk | 355631 / 92442 | 355631 / 92441 | 360000 / 93000 |
-| Route JavaScript | 93987 / 35975 | 93984 / 36138 | 94000 / 38700 |
-| Route CSS | 18296 / 4848 | 18358 / 4869 | 18400 / 4900 |
-
-The route JavaScript had 13 raw bytes left. The additions (the Undo option of a toast, the header's subject, the Approve label) were paid for by
-folding the Stop and Cancel confirmations into one function, merging the two Retry branches of the header, one helper for the task
-Retry, Resume and Pause calls, and dropping the evidence block's second pair of Approve and Reject buttons. The route JavaScript has 16 raw bytes left and the initial CSS 51.
-
-Baselines: regenerated in `mcr.microsoft.com/playwright:v1.64.1-noble` with `--update-snapshots=all` for `screenshots.spec.ts`; images that were
-pixel-identical or differed by fewer than 50 pixels were restored, which leaves 233 changed files (light and dark, desktop and phone) plus the new
-`inbox-older-failures` screen. 47 of them differ only in the header (the waiting chip). The login and setup screens are among the rest: the committed
-images still showed "What does this do?", which the source replaced with "What does remembering do?" earlier, and the 0.2% comparison tolerance had hidden it.
-Looked at in light and dark: contact sheets of the Inbox, mission, session, Sessions and Missions screens on phone and desktop, header crops of the images that differ only in the chip, and the login screens.
-Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
-The initial caps stay at 91000 raw / 31750 gzip (JavaScript) and 40000 gzip (JavaScript plus CSS).
-Same measurement method as above:
-
-| State | Initial JS raw | gzip | Initial total gzip | Lazy raw | gzip |
-|---|---:|---:|---:|---:|---:|
-| Merge base | 88506 | 30848 | 38382 | | |
-| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 | 365652 | 96411 |
-| This branch before the merge (already above its 91000 / 31750 caps) | 92390 | 32176 | 39710 | 352470 | 91000 |
-| Merge, `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 | | |
-| Merge, `passwordForm` in `views/password-form.ts` | 92638 | 33163 | 40747 | 363929 | 95857 |
-| Merge, plus workers, sessions and usage views loaded on demand | 84299 | 30855 | 38439 | 373424 | 100498 |
-
-What moved:
-- `passwordForm` lives in `views/password-form.ts`. The forced password-change screen (`reset.ts`) is part
-  of the first load and imported it from `account.ts`, which pulled the whole lazy account page (API token
-  restrictions, passkey list and re-enrolment, about 8 KB) into the first load: +9.5 KB raw.
-- The router loads the workers, sessions, usage and account views with `import()` (`lazyView` in
-  `main.ts`). While a chunk loads the main area shows the existing `status-skeleton` block with
-  `aria-busy`; a route change during the load discards the result. The overview, missions list, mission
-  detail and diagnostics views stay in the first load. The mission detail view alone is 3.9 KB gzip
-  of the first load, but moving it, or the missions list, costs more lazy bytes than moving the three
-  smaller views and would delay the pages used most.
-
-Why the lazy caps rose (`jsRaw` 366000 to 374000, `jsGzip` 97000 to 101000): the merged code was
-already larger than the two old budgets together (initial 31750 plus lazy 97000 is 128750 gzip bytes;
-the merged build was 129020 before any split). Any code taken out of the first load therefore
-counts against the lazy caps. Code that leaves the first-load bundle also compresses worse as separate
-chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
-The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
-
-## D30 Merging main into the web redesign: digest and attention, notices, load time and the lazy JavaScript cap (PRD-037, PRD-038, UXR-032, UXR-039)
-
-The redesign branch was merged with main after PR #35 (the release, with the DOG-021 mission digest and the coordinator's change notices) and PR #68 (mission delete).
-This entry records what the merge decided.
-
-| # | Decision | Change | Guarded by |
-|---|---|---|---|
-| 1 | One list answers what a row needs | A worker sends both `attention` (PRD-037 WP-7, for every mission that is not completed or cancelled, with the bounded message) and the digest (`task_counts`, `current_task`, `station`, `model`, `needs_kind`, `needs_tasks`, and `needs_you` for a live mission). `store.listedNeeds` reads `attention` first, then `needs_you` or `needs_kind`; only a mission for which the list says neither (a worker that predates both) is read with `mission.status`, at most 12 at a time. | `web/e2e/link-traffic.spec.ts`, `web/e2e/worker.spec.ts`, `tests/test_bridge_mission_summary.py`, `tests/test_bridge_worker.py` |
-| 2 | The mission page asks a worker only for tasks | Its status is drawn from the digest of the list entry, its events come from `GET /api/v1/events` of the coordinator, and a change notice that names the mission reads the new events; the tasks are read again only for a notice with the mission in `task_missions` and when the digest of the mission changed. A notice with `truncated` reads the events as well. A worker without the digest is asked for the status as before. | `web/e2e/link-traffic.spec.ts` (the count of status reads is 0), `uxr-fresh-eyes.spec.ts` F9 for both kinds of worker |
-| 3 | The activity line of a running row | `mission.activity_line` (spec DEV-5) is still asked for each running row, once, when the row's update time or current task changed, and for every row on the 30 s refresh of the page; a change notice alone does not ask again. | `web/e2e/link-traffic.spec.ts` |
-| 4 | Delete mission is in the overflow menu | `data-action="delete-mission"`, danger style, only for CREATED, COMPLETED, FAILED, CANCELLED and STOPPED, disabled with the reason when the worker is unreachable. The confirmation says "Delete mission?", names the mission and the worker and says that it cannot be undone. After the delete the console shows the missions list with a toast that survives the route change. | `web/e2e/mission-delete.spec.ts` |
-| 5 | Security notices | They are behind a header button with their count (a banner above the page moved the content after load: CLS 0.17 in Lighthouse). The code is a separate chunk, fetched after the first paint. | `web/e2e/auth-ux.spec.ts`, `web/e2e/passkey-login.spec.ts` |
-| 6 | Load time (T37) | A late sentence about the verifier or a late terminal chunk set the largest contentful paint. The sentence has its line from the first paint; the verifier text of an Inbox row is a box of its own; the terminal chunk is fetched 100 ms after the second frame and its evaluation and the building of the pane are two tasks; the mission route imports its page module directly; `index.html` preloads the first-load chunks and the sign-in check; the build writes a gzip copy of every text asset and the coordinator sends it to a client that accepts gzip (`coordinator/src/web.rs`, `tests/web.rs`). | `web/e2e/redesign/uxr-lighthouse.spec.ts`, `coordinator/tests/web.rs`, `uxr-text.spec.ts` (T08) |
-
-Lighthouse (mobile preset, simulated throttling, Playwright image, one run per page; each run varies by about 100 ms):
-
-| Page | Before the fixes (merge head) | Now |
-|---|---:|---:|
-| Inbox | LCP 2944 ms, performance 85, CLS 0.169 | LCP 2131 and 2137 ms, performance 98, CLS 0.004 |
-| Missions | LCP 2858 ms, performance 86 | LCP 1962 and 1976 ms, performance 98 and 99 |
-| Mission page | LCP 6098 ms, performance 72, TBT 230 ms | LCP 2332 and 2347 ms, performance 96 and 97, TBT 93 and 100 ms, CLS 0.007 |
-
-Where the browser tests run (first CI run on this branch, which had never run in CI): the layout, accessibility and timing specs of PRD-037 measure text and boxes, so they only
-hold with the fonts of the Playwright image. On the Ubuntu runner the top bar, the capacity chip, the phone action row and the short fields of the mission page measured differently
-(T35, T48 D28.2 and D28.4, T08), and the terminal and worker specs, which need tmux and Python, had been skipped in the image without anyone noticing: they failed against the
-redesigned session pane (the reason a viewer cannot type is in the composer, not in the status line). The job `web` now runs the four standard projects, the matrix and the
-click-path projects inside the image (tmux and a venv are installed in the container), the macOS and Windows jobs leave out `e2e/redesign` and the screenshots (a project's own
-`testIgnore` had replaced the config's, so they were not left out before), T36 allows 150 ms off Linux (88 ms measured on the macOS runner, 50 ms on Linux), T37 has its own
-project (`--project=lighthouse`) because it measures, and two terminal measurements of the mission page that depend on the row height of xterm.js in Firefox (T29 rows above
-the fold, T32 text spacing) are not made there; they fail the same way on 3f3105b.
-
-The lazy JavaScript cap is met without raising it (UXR-039). Main's passkey code and this branch's security notices, delete action and digest handling had taken the route
-JavaScript to 107324 raw and 41438 gzip bytes against the caps of 94000 and 38700. The caps in `web/budget.json` are unchanged. The bytes were cut as follows:
-
-| Measure | Before the merge (D28) | Merge, before the cut | Now | Cap |
-|---|---:|---:|---:|---:|
-| Initial JavaScript raw / gzip | 80464 / 31326 | 81701 / 31392 | 82357 / 31710 | 91000 / 31750 |
-| Initial CSS raw / gzip | 33949 / 7550 | 33997 / 7576 | 33997 / 7576 | 34000 / 9000 |
-| Terminal chunk raw / gzip | 355631 / 92441 | 355660 / 92450 | 355580 / 92423 | 360000 / 93000 |
-| Route JavaScript raw / gzip | 93984 / 36138 | 107324 / 41438 | 93884 / 37826 | 94000 / 38700 |
-| Route CSS raw / gzip | 18358 / 4869 | 18358 / 4869 | 18358 / 4869 | 18400 / 4900 |
-
-- The sources of the lazy pages were reduced by about 12000 raw bytes: shared helpers for error messages, dialogs, field validation, fact lists and button rows; tables instead of
-  repeated branches; the same function for near-identical code. No text, element, attribute or request changed. Gzip fell by only about 1200 bytes, because most of the removed bytes
-  were repetition that gzip had already compressed.
-- The gzip cap was the harder one. Most of its saving came from fewer chunks (every chunk is compressed on its own and starts with its imports): sign-in, setup, forced password change,
-  account, workers, sessions, usage and diagnostics are one lazy chunk (`views/routes.ts`; each route still loads only its own stylesheet), and `passkeys.ts` is part of it instead of a chunk of
-  its own. A visitor who is not signed in now fetches the fleet pages with the sign-in page (about 8 KB gzip more, on a page that no performance budget measures); the mission page and the
-  two pages that T37 measures are unchanged.
-- The mission page and the steer chips pass new events through a document event instead of a tiny shared module, and the mission page awaits the terminal stylesheet next to the terminal
-  chunk import instead of a top-level await in the terminal module. Both removed a chunk that held a few hundred bytes.
-- The event phrase table is generated as one string and leaves out the kinds that the browser derives from the kind name (26 of 84).
-- The initial JavaScript gained 340 gzip bytes from the in-place update of the live lists (D31) and has 40 bytes of room left; the raw route JavaScript has 116 bytes of room left.
-
-Merging a later main again needs no change here as long as it adds no web code.
-
-## D31 Live lists update rows in place (DOG-026)
-
-PR #70 found that the mission page redrew the tasks table several times in the half second after each task action, replacing the buttons, so that a click whose pointer-down and
-pointer-up straddled a redraw never fired (seen on Firefox, 1 run in 20 in `worker.spec.ts`, which then retried the click). An operator loses the same click, so this is a defect
-of the product and not of the test.
-
-Before: the Inbox and the Missions list kept a row whose signature was unchanged but replaced a changed row; the tasks panel, Workers and Sessions rebuilt their whole content on
-each redraw.
-
-Now: `morph(old, fresh)` and `patch(parent, children)` in `web/src/dom.ts` make an element equal to a freshly built one without replacing it. A child is kept when its identity is the same
-(`data-row-key`, `data-entity`, `data-action`, `id`, else its class); its attributes, text and listeners are patched. `h()` and `button()` register listeners through `on()`, which keeps
-one dispatcher per event type on the element and lets `morph` hand it the function built for the new data, so a kept button acts on the latest revision of its task and not on the one
-it was built with. A handler must not close over an element of the row it was built for (the Retry button and the row's details toggle take their element from the event). Things the user
-changes by using the control are not overwritten: an open menu popover (`data-keep`), `open` and `aria-expanded`, and the open state of a row's details (`data-own`, `data-leaf`).
-`reconcile` skips a row whose signature is unchanged and patches a changed one; the mission tasks panel, Workers, Sessions and the fleet pages call `patch`.
-
-Why a guard that postpones the redraw while the pointer is pressed was not used: it would leave stale text on a row the pointer rests on (the pill after Pause), and the focused
-element would still be replaced by a redraw that follows.
-
-Not covered: the buttons of the mission header are rebuilt when the header data changes; they are not a list, and the header changes only on a change of the mission state.
-
-Guarded by `web/e2e/live-lists.spec.ts` (Tasks, Inbox, Missions, Workers, Sessions; chromium-desktop and firefox-desktop) and by `web/e2e/link-traffic.spec.ts` (the tasks panel is redrawn
-once for a change of its data). With the identity of every node replaced by a new value, nine of the ten tests of `live-lists.spec.ts` fail; the Missions test on firefox-desktop still
-passes on revert and is the weakest of the set.
 
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 
@@ -718,6 +537,104 @@ The operator delegated the remaining open questions: "All other questions answer
 - PRD-037 spec section 14: the routes cap is approved at the values measured in D18; free-text steering through the web console is not part of 1.5.0; mission creation and snooze stay out of PRD-037; the plain `task.output` tail is accepted as the Inbox preview; the Inbox backend fields were delivered by WP-7 and DOG-021.
 - DOG-025 (final provider line lost when a native provider exits at once on tmux 3.4) is deferred after 1.5.0 and listed as a known limitation in the release notes. A fix has to wrap the provider command, which changes how the station detects a clean exit, and that is too large a change for the release.
 
+## D28 Operator decisions on the redesign and the overseer's findings R1 to R6 (PRD-037)
+
+The numbers D19 to D27 belong to the release branch (PR #35); this entry is D28 so that both branches merge without a clash.
+
+The fresh-eyes critique (`watch/prd037-critique-outcome.md`, "Needs operator decision") left six questions. The operator
+answered: "I agree with all your suggestions and for the redesign decisions." The overseer then reviewed screenshots of
+the redesign at 72930c5 (`watch/prd037-overseer-review.md`, 2026-11-08 00:20), accepted decisions 1, 2, 3, 5 and 6,
+replaced decision 4 and added the findings R1 to R6. The decisions are implemented as follows. `web/e2e/redesign/uxr-decisions.spec.ts`
+(T48) guards each of them; the revert column says what was undone to see the guarding test fail (each check was run in the Playwright
+image with that one change made and then restored).
+
+| # | Decision | What changed | Guarding test (T48 unless stated) | Revert that fails it |
+|---|---|---|---|---|
+| 1 | Inbox order | Failures from the last 24 hours rank first, then approval, then input. Older failures are one row after the input rows, "N older failures", with a Show button (and Hide) that lists them below that row. The heading count includes them. | "D28.1: failures of the last 24 hours come first..." and "D28.1: failures older than 24 hours are one row..." | the older-failures group removed; approval and input ranks swapped; the preview not following a visible row |
+| 2 | Capacity chip | Neutral while the provider is ready. While `usage.snapshot` says the provider is not ready, the chip has the attention tone and "resets 12:25" in its text. At 320 px the scope, the meter and the visible percentage give way ("Claude resets 12:25", 12 px, 6 px padding); the percentage stays in the accessible text and the title. | "D28.2: a chip is neutral..." and "D28.2: the waiting chip... fits the header at 320 px"; T35 and T22 still pass | `waiting: false` in `chipsFrom` |
+| 3 | Stop beside Reject, Undo for Pause | Stop has no danger outline while a Reject button is shown in the same header (from 30 rem; below it Reject is in the menu and Stop keeps its outline) and stays visible. Pause answers with "Mission paused." and an Undo button; the toast expires after 8 s (spec 6.4 has the exception) and Undo sends `mission.resume`. | "D28.3: Stop has no danger outline..." and "D28.3: Pause answers with an Undo toast..." | Stop always `danger`; the toast with an action sticky again |
+| 4 | Phone action bar | Replaced by the overseer, because UXR-007 needs Pause and Stop always visible. The primary label is "Approve" (the accessible name keeps "Approve task 2"). Pause and Stop show icon and label in 44 px buttons; padding is 8 px so Take control, Pause, Stop and the menu fit one row at 353 and 360 px. At 320 px (below 21 rem) Pause and Stop are icon only with their names for screen readers, because Take control, Pause, Stop and the menu need 315 px and 296 px are available. Stop is never moved into the menu. | "D28.4: the primary action reads 'Approve'..." and "D28.4: on a phone Pause and Stop are 44 px buttons..." | the label back to "Approve task 2"; the icon-only rule at every phone width |
+| 5 | Key bar | On a phone it is hidden until the client holds control, at every height (it was hidden only up to 640 px). T38 changes with it: hidden before control, six keys plus "..." after. | "D28.5: on a phone the key bar is hidden until control..." and T38 | the old height condition in `phone.css` |
+| 6 | Reconnect banner age | The banner says "Showing data as of 12:00" and adds "(15s ago)" once the data is 10 s old. `shell.spec.ts` and T28 wait for it; T28 uses the fake clock because the fixed clock never reaches 10 s. | `shell.spec.ts` "a reconnect shorter than the debounce..." and T28 | `AGE_AFTER_MS = 0` |
+
+The overseer's findings are registered as UXR-047 to UXR-052 in `SPEC_STATUS.md` (the register has the UXR group since PR #35 merged):
+
+| Row | Finding | Change | Guarding test | Revert that fails it |
+|---|---|---|---|---|
+| UXR-047 | R1: a phone opens the live session also while a task awaits approval | The product already opened on Session (`let tab = ... "session"`); the Tasks tab in the screenshots came from the screen definitions. A test now asserts the selected tab, the live pane and 14 rows with Approve in reach. | "R1: a mission that awaits approval opens on the Session tab on a phone..." | default tab "tasks" |
+| UXR-048 | R2: one place for the primary action | The header offers Approve, Reject and Retry for the task it is about; that task's row and the evidence block have no copy. A row of another task keeps its inline action and its menu; with several approvals the header says "Review N tasks" and each row keeps Approve and Reject. The evidence block has no buttons. | "R2: Approve and Reject are offered once..." and "R2: with several tasks awaiting approval..." | `subject` always undefined |
+| UXR-049 | R3: one number everywhere | The heading "Needs you (n)" uses the same figure as the badge, the tab title and the answer line; "+" appears only while some active mission is unread. | "R3: ... one number" and "R3: when every mission has been read..." | the heading using the row count |
+| UXR-050 | R4: the summary is not an instruction | The third part of the Inbox answer line names the kinds: "1 failed, 1 awaits approval". On phones taller than 30 rem the line keeps room for two lines from the start, so a late status does not move the rows (CLS); a landscape phone keeps one line so the first row stays above the fold (T18). | "R4: the Inbox summary names the kinds..."; T47 F2 and T36 | the text "Retry or open" |
+| UXR-051 | R5: the pill column | The column is 8.5 rem in Needs you, 6.5 rem in Running and 11 rem elsewhere, so the title starts 40 px closer at 1440 px in Needs you and no pill reaches a title. | "R5: at 1440 px an Inbox title starts close to its pill..." | 11 rem in Needs you |
+| UXR-052 | R6: the phone search button | No fill and no border at rest, like the account button. | "R6: on a phone the search button has no fill and no border..." | the old border colour |
+
+UXR-043 to UXR-046 are registered too; their guarding tests are `uxr-paths.spec.ts` (UXR-043, UXR-044), `uxr-keyboard.spec.ts` and
+`uxr-keyboard-only.spec.ts` (UXR-045) and `uxr-reach.spec.ts` (UXR-046).
+
+Answers to the questions of section 14 of `web-design-spec.md` (the section now records them):
+
+1. Backend fields for the Inbox: done by WP-7 and the DOG-021 digest. The Inbox rows switch to the digest after PR #35 merges.
+2. Routes cap: approved at the measured values of D18.
+3. Free-text steering without taking control: not in 1.5.0; a follow-up.
+4. Mission creation and snooze (DEV-10, DEV-11): out of PRD-037.
+5. Inbox preview content: the plain `task.output` tail is accepted.
+
+Existing tests changed only as far as the decisions require: T17 (the Pause toast has an Undo button, so its dismiss button is chosen by name,
+and the last queued toast of a phone ends after 24 s), T28 (fake clock, no age before 10 s, age after), T38 (key bar hidden before control),
+T47 F2 (the summary text) and F4 (the toast text includes Undo), `shell.spec.ts` (banner age), and the Reject screen (opens the
+dialog from the header, or from the header menu below 30 rem).
+
+Budget (bytes, raw / gzip, caps in `web/budget.json` not raised):
+
+| Measure | Before (72930c5) | Now | Cap |
+|---|---:|---:|---:|
+| Initial JavaScript | 79509 / 30905 | 80464 / 31326 | 91000 / 31750 |
+| Initial CSS | 33525 / 7451 | 33949 / 7550 | 34000 / 9000 |
+| Initial total | 113034 / 38356 | 114413 / 38876 | 124000 / 40000 |
+| Terminal chunk | 355631 / 92442 | 355631 / 92441 | 360000 / 93000 |
+| Route JavaScript | 93987 / 35975 | 93984 / 36138 | 94000 / 38700 |
+| Route CSS | 18296 / 4848 | 18358 / 4869 | 18400 / 4900 |
+
+The route JavaScript had 13 raw bytes left. The additions (the Undo option of a toast, the header's subject, the Approve label) were paid for by
+folding the Stop and Cancel confirmations into one function, merging the two Retry branches of the header, one helper for the task
+Retry, Resume and Pause calls, and dropping the evidence block's second pair of Approve and Reject buttons. The route JavaScript has 16 raw bytes left and the initial CSS 51.
+
+Baselines: regenerated in `mcr.microsoft.com/playwright:v1.64.1-noble` with `--update-snapshots=all` for `screenshots.spec.ts`; images that were
+pixel-identical or differed by fewer than 50 pixels were restored, which leaves 233 changed files (light and dark, desktop and phone) plus the new
+`inbox-older-failures` screen. 47 of them differ only in the header (the waiting chip). The login and setup screens are among the rest: the committed
+images still showed "What does this do?", which the source replaced with "What does remembering do?" earlier, and the 0.2% comparison tolerance had hidden it.
+Looked at in light and dark: contact sheets of the Inbox, mission, session, Sessions and Missions screens on phone and desktop, header crops of the images that differ only in the chip, and the login screens.
+Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
+The initial caps stay at 91000 raw / 31750 gzip (JavaScript) and 40000 gzip (JavaScript plus CSS).
+Same measurement method as above:
+
+| State | Initial JS raw | gzip | Initial total gzip | Lazy raw | gzip |
+|---|---:|---:|---:|---:|---:|
+| Merge base | 88506 | 30848 | 38382 | | |
+| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 | 365652 | 96411 |
+| This branch before the merge (already above its 91000 / 31750 caps) | 92390 | 32176 | 39710 | 352470 | 91000 |
+| Merge, `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 | | |
+| Merge, `passwordForm` in `views/password-form.ts` | 92638 | 33163 | 40747 | 363929 | 95857 |
+| Merge, plus workers, sessions and usage views loaded on demand | 84299 | 30855 | 38439 | 373424 | 100498 |
+
+What moved:
+- `passwordForm` lives in `views/password-form.ts`. The forced password-change screen (`reset.ts`) is part
+  of the first load and imported it from `account.ts`, which pulled the whole lazy account page (API token
+  restrictions, passkey list and re-enrolment, about 8 KB) into the first load: +9.5 KB raw.
+- The router loads the workers, sessions, usage and account views with `import()` (`lazyView` in
+  `main.ts`). While a chunk loads the main area shows the existing `status-skeleton` block with
+  `aria-busy`; a route change during the load discards the result. The overview, missions list, mission
+  detail and diagnostics views stay in the first load. The mission detail view alone is 3.9 KB gzip
+  of the first load, but moving it, or the missions list, costs more lazy bytes than moving the three
+  smaller views and would delay the pages used most.
+
+Why the lazy caps rose (`jsRaw` 366000 to 374000, `jsGzip` 97000 to 101000): the merged code was
+already larger than the two old budgets together (initial 31750 plus lazy 97000 is 128750 gzip bytes;
+the merged build was 129020 before any split). Any code taken out of the first load therefore
+counts against the lazy caps. Code that leaves the first-load bundle also compresses worse as separate
+chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
+The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
+
 ## D29 Coordinator backups and database access (DOG-024)
 
 Cause. On the Pi, `backup` ran for more than 35 minutes and the coordinator answered
@@ -842,6 +759,87 @@ Remaining limit: a commit that holds the writer connection for longer than the w
 requests that write answer 503 for its duration (reads are not affected). Page-cache write stalls on the
 card itself are outside what the process can control; the backup no longer causes them.
 
+## D30 Merging main into the web redesign: digest and attention, notices, load time and the lazy JavaScript cap (PRD-037, PRD-038, UXR-032, UXR-039)
+
+The redesign branch was merged with main after PR #35 (the release, with the DOG-021 mission digest and the coordinator's change notices) and PR #68 (mission delete).
+This entry records what the merge decided.
+
+| # | Decision | Change | Guarded by |
+|---|---|---|---|
+| 1 | One list answers what a row needs | A worker sends both `attention` (PRD-037 WP-7, for every mission that is not completed or cancelled, with the bounded message) and the digest (`task_counts`, `current_task`, `station`, `model`, `needs_kind`, `needs_tasks`, and `needs_you` for a live mission). `store.listedNeeds` reads `attention` first, then `needs_you` or `needs_kind`; only a mission for which the list says neither (a worker that predates both) is read with `mission.status`, at most 12 at a time. | `web/e2e/link-traffic.spec.ts`, `web/e2e/worker.spec.ts`, `tests/test_bridge_mission_summary.py`, `tests/test_bridge_worker.py` |
+| 2 | The mission page asks a worker only for tasks | Its status is drawn from the digest of the list entry, its events come from `GET /api/v1/events` of the coordinator, and a change notice that names the mission reads the new events; the tasks are read again only for a notice with the mission in `task_missions` and when the digest of the mission changed. A notice with `truncated` reads the events as well. A worker without the digest is asked for the status as before. | `web/e2e/link-traffic.spec.ts` (the count of status reads is 0), `uxr-fresh-eyes.spec.ts` F9 for both kinds of worker |
+| 3 | The activity line of a running row | `mission.activity_line` (spec DEV-5) is still asked for each running row, once, when the row's update time or current task changed, and for every row on the 30 s refresh of the page; a change notice alone does not ask again. | `web/e2e/link-traffic.spec.ts` |
+| 4 | Delete mission is in the overflow menu | `data-action="delete-mission"`, danger style, only for CREATED, COMPLETED, FAILED, CANCELLED and STOPPED, disabled with the reason when the worker is unreachable. The confirmation says "Delete mission?", names the mission and the worker and says that it cannot be undone. After the delete the console shows the missions list with a toast that survives the route change. | `web/e2e/mission-delete.spec.ts` |
+| 5 | Security notices | They are behind a header button with their count (a banner above the page moved the content after load: CLS 0.17 in Lighthouse). The code is a separate chunk, fetched after the first paint. | `web/e2e/auth-ux.spec.ts`, `web/e2e/passkey-login.spec.ts` |
+| 6 | Load time (T37) | A late sentence about the verifier or a late terminal chunk set the largest contentful paint. The sentence has its line from the first paint; the verifier text of an Inbox row is a box of its own; the terminal chunk is fetched 100 ms after the second frame and its evaluation and the building of the pane are two tasks; the mission route imports its page module directly; `index.html` preloads the first-load chunks and the sign-in check; the build writes a gzip copy of every text asset and the coordinator sends it to a client that accepts gzip (`coordinator/src/web.rs`, `tests/web.rs`). | `web/e2e/redesign/uxr-lighthouse.spec.ts`, `coordinator/tests/web.rs`, `uxr-text.spec.ts` (T08) |
+
+Lighthouse (mobile preset, simulated throttling, Playwright image, one run per page; each run varies by about 100 ms):
+
+| Page | Before the fixes (merge head) | Now |
+|---|---:|---:|
+| Inbox | LCP 2944 ms, performance 85, CLS 0.169 | LCP 2131 and 2137 ms, performance 98, CLS 0.004 |
+| Missions | LCP 2858 ms, performance 86 | LCP 1962 and 1976 ms, performance 98 and 99 |
+| Mission page | LCP 6098 ms, performance 72, TBT 230 ms | LCP 2332 and 2347 ms, performance 96 and 97, TBT 93 and 100 ms, CLS 0.007 |
+
+Where the browser tests run (first CI run on this branch, which had never run in CI): the layout, accessibility and timing specs of PRD-037 measure text and boxes, so they only
+hold with the fonts of the Playwright image. On the Ubuntu runner the top bar, the capacity chip, the phone action row and the short fields of the mission page measured differently
+(T35, T48 D28.2 and D28.4, T08), and the terminal and worker specs, which need tmux and Python, had been skipped in the image without anyone noticing: they failed against the
+redesigned session pane (the reason a viewer cannot type is in the composer, not in the status line). The job `web` now runs the four standard projects, the matrix and the
+click-path projects inside the image (tmux and a venv are installed in the container), the macOS and Windows jobs leave out `e2e/redesign` and the screenshots (a project's own
+`testIgnore` had replaced the config's, so they were not left out before), T36 allows 150 ms off Linux (88 ms measured on the macOS runner, 50 ms on Linux), T37 has its own
+project (`--project=lighthouse`) because it measures, and two terminal measurements of the mission page that depend on the row height of xterm.js in Firefox (T29 rows above
+the fold, T32 text spacing) are not made there; they fail the same way on 3f3105b.
+
+The lazy JavaScript cap is met without raising it (UXR-039). Main's passkey code and this branch's security notices, delete action and digest handling had taken the route
+JavaScript to 107324 raw and 41438 gzip bytes against the caps of 94000 and 38700. The caps in `web/budget.json` are unchanged. The bytes were cut as follows:
+
+| Measure | Before the merge (D28) | Merge, before the cut | Now | Cap |
+|---|---:|---:|---:|---:|
+| Initial JavaScript raw / gzip | 80464 / 31326 | 81701 / 31392 | 82357 / 31710 | 91000 / 31750 |
+| Initial CSS raw / gzip | 33949 / 7550 | 33997 / 7576 | 33997 / 7576 | 34000 / 9000 |
+| Terminal chunk raw / gzip | 355631 / 92441 | 355660 / 92450 | 355580 / 92423 | 360000 / 93000 |
+| Route JavaScript raw / gzip | 93984 / 36138 | 107324 / 41438 | 93884 / 37826 | 94000 / 38700 |
+| Route CSS raw / gzip | 18358 / 4869 | 18358 / 4869 | 18358 / 4869 | 18400 / 4900 |
+
+- The sources of the lazy pages were reduced by about 12000 raw bytes: shared helpers for error messages, dialogs, field validation, fact lists and button rows; tables instead of
+  repeated branches; the same function for near-identical code. No text, element, attribute or request changed. Gzip fell by only about 1200 bytes, because most of the removed bytes
+  were repetition that gzip had already compressed.
+- The gzip cap was the harder one. Most of its saving came from fewer chunks (every chunk is compressed on its own and starts with its imports): sign-in, setup, forced password change,
+  account, workers, sessions, usage and diagnostics are one lazy chunk (`views/routes.ts`; each route still loads only its own stylesheet), and `passkeys.ts` is part of it instead of a chunk of
+  its own. A visitor who is not signed in now fetches the fleet pages with the sign-in page (about 8 KB gzip more, on a page that no performance budget measures); the mission page and the
+  two pages that T37 measures are unchanged.
+- The mission page and the steer chips pass new events through a document event instead of a tiny shared module, and the mission page awaits the terminal stylesheet next to the terminal
+  chunk import instead of a top-level await in the terminal module. Both removed a chunk that held a few hundred bytes.
+- The event phrase table is generated as one string and leaves out the kinds that the browser derives from the kind name (26 of 84).
+- The initial JavaScript gained 340 gzip bytes from the in-place update of the live lists (D31) and has 40 bytes of room left; the raw route JavaScript has 116 bytes of room left.
+
+Merging a later main again needs no change here as long as it adds no web code.
+
+## D31 Live lists update rows in place (DOG-026)
+
+PR #70 found that the mission page redrew the tasks table several times in the half second after each task action, replacing the buttons, so that a click whose pointer-down and
+pointer-up straddled a redraw never fired (seen on Firefox, 1 run in 20 in `worker.spec.ts`, which then retried the click). An operator loses the same click, so this is a defect
+of the product and not of the test.
+
+Before: the Inbox and the Missions list kept a row whose signature was unchanged but replaced a changed row; the tasks panel, Workers and Sessions rebuilt their whole content on
+each redraw.
+
+Now: `morph(old, fresh)` and `patch(parent, children)` in `web/src/dom.ts` make an element equal to a freshly built one without replacing it. A child is kept when its identity is the same
+(`data-row-key`, `data-entity`, `data-action`, `id`, else its class); its attributes, text and listeners are patched. `h()` and `button()` register listeners through `on()`, which keeps
+one dispatcher per event type on the element and lets `morph` hand it the function built for the new data, so a kept button acts on the latest revision of its task and not on the one
+it was built with. A handler must not close over an element of the row it was built for (the Retry button and the row's details toggle take their element from the event). Things the user
+changes by using the control are not overwritten: an open menu popover (`data-keep`), `open` and `aria-expanded`, and the open state of a row's details (`data-own`, `data-leaf`).
+`reconcile` skips a row whose signature is unchanged and patches a changed one; the mission tasks panel, Workers, Sessions and the fleet pages call `patch`.
+
+Why a guard that postpones the redraw while the pointer is pressed was not used: it would leave stale text on a row the pointer rests on (the pill after Pause), and the focused
+element would still be replaced by a redraw that follows.
+
+Not covered: the buttons of the mission header are rebuilt when the header data changes; they are not a list, and the header changes only on a change of the mission state.
+
+Guarded by `web/e2e/live-lists.spec.ts` (Tasks, Inbox, Missions, Workers, Sessions; chromium-desktop and firefox-desktop) and by `web/e2e/link-traffic.spec.ts` (the tasks panel is redrawn
+once for a change of its data). With the identity of every node replaced by a new value, nine of the ten tests of `live-lists.spec.ts` fail; the Missions test on firefox-desktop still
+passes on revert and is the weakest of the set.
+
 ## D40 Release split (TRACK-013)
 
 Release 1.5.0 ships the distributed Bridge, the web redesign (PRD-037) and the release gates. Release 1.6.0 ships provider parity (`PROV`) and orchestration (`ORCH`), together with `LB-004`. Reason: about 560 commits are unreleased since 1.4.0, and the 1.6.0 work changes the store schema and the controller loop. `scripts/spec_open.py` encodes this membership.
@@ -892,3 +890,17 @@ The fresh-eyes critique of every console page at 1440 and 360 pixels, in both th
 ## D50 Menus replaced by a live refresh are a registered defect (DOG-028)
 
 The `terminal.spec.ts` failure on firefox-desktop in the CI of pull request #57 was a product defect, not a flaky test: a live refresh replaced the open session menu and the mission header menu. It is registered as `DOG-028` and fixed in the redesign branch, so the redesign does not merge with a known menu defect.
+
+## D51 Soak memory gate and remaining phase-B soak items (FIND-001, FIND-005)
+
+This replaces the 1200 s warm-up recorded in D16. The controller memory slope is fitted after a 1800 s warm-up, and the nightly soak runs 2700 s so that the fit window lies between two 900 s retention passes. The recorded nightly series show no leak: the failures came from a fit window that ended on a retention peak. A 900 s window cannot resolve a controller leak below about 2 MiB/h; the long nightly run covers that range.
+
+The soak items `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore` are deferred to 1.6.0. Each needs a coordinator change (a task count in diagnostics, a native clock source, or a query of unfinished commands per worker). Until then the thread count, the `LD_PRELOAD` clock shim and the `db-corrupt-page` restore fault cover them in part.
+
+## D53 Old mode names are normalised on read, not migrated (FIND-018)
+
+Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
+
+## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
+
+Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.
