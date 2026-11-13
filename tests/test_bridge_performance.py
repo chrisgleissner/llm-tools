@@ -15,6 +15,7 @@ import unicodedata
 
 import pytest
 
+from llm_tools import bridge_console_text
 from llm_tools import bridge_documents as documents
 from llm_tools import bridge_tui as tui
 from llm_tools.bridge_input import cell_width
@@ -554,18 +555,18 @@ def test_unchanged_text_is_not_written_again(tmp_path, monkeypatch):
 
 def test_reflow_is_remembered_per_text_width_and_limit(monkeypatch):
     text = "# Heading\n\n" + "A paragraph of words. " * 200 + "\n\n- item one\n- item two\n```\ncode\n```\n"
-    expected = tui._reflow_markdown_rows(text, 60, 20)
+    expected = bridge_console_text._reflow_markdown_rows(text, 60, 20)
     calls = []
-    real = tui._reflow_markdown_rows
-    monkeypatch.setattr(tui, "_reflow_markdown_rows", lambda *args: calls.append(args) or real(*args))
-    tui._REFLOW_CACHE.clear()
-    first = tui._reflow_markdown(text, 60, 20)
-    again = tui._reflow_markdown(text, 60, 20)
+    real = bridge_console_text._reflow_markdown_rows
+    monkeypatch.setattr(bridge_console_text, "_reflow_markdown_rows", lambda *args: calls.append(args) or real(*args))
+    bridge_console_text._REFLOW_CACHE.clear()
+    first = bridge_console_text._reflow_markdown(text, 60, 20)
+    again = bridge_console_text._reflow_markdown(text, 60, 20)
     assert first == again == expected
     assert len(calls) == 1  # the second call came from the cache
     assert again is not first  # callers get their own list
     again.append(("mutated", "info"))
-    assert tui._reflow_markdown(text, 60, 20) == expected
-    tui._reflow_markdown(text, 80, 20)
-    tui._reflow_markdown(text, 60, 5)
+    assert bridge_console_text._reflow_markdown(text, 60, 20) == expected
+    bridge_console_text._reflow_markdown(text, 80, 20)
+    bridge_console_text._reflow_markdown(text, 60, 5)
     assert len(calls) == 3  # a different width or limit is computed again
