@@ -214,10 +214,15 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         big_bodies: Arc::new(Semaphore::new(http::BIG_BODY_SLOTS)),
         shutdown: shutdown_rx.clone(),
         web_dir,
+        monitor: crate::diagnostics::Monitor::default(),
     });
     // Each connection has at most one database call in flight, so a burst can queue `max_connections` callers.
     state.db.set_max_lock_waiters(state.cfg.max_connections.saturating_add(32));
     let lock = crate::ops::lock_data_dir(data_dir)?;
+    if let Ok(d) = state.db.diagnostics() {
+        state.monitor.record(crate::now(), d["db_bytes"].as_u64().unwrap_or(0));
+    }
+    tokio::spawn(crate::diagnostics::sample_loop(state.clone()));
     let limits = ConnLimits {
         max_connections: state.cfg.max_connections,
         per_ip: state.cfg.max_connections_per_ip,
@@ -225,7 +230,9 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         http_idle: Duration::from_secs(state.cfg.http_idle_timeout_secs),
     };
     let budget = Arc::new(ConnectionBudget::new(&limits));
-    let mut tasks = Vec::with_capacity(listeners.len());
+    let mut tasks = Vec::with_capacity(listeners.len() + 1);
+    // Awaited by `stop`: a running backup is interrupted at shutdown, so this returns promptly.
+    tasks.push(tokio::spawn(crate::backups::run(state.clone())));
     for (index, (group, _, listener)) in listeners.into_iter().enumerate() {
         let app = http::router_for_group(state.clone(), group);
         let listener_tls = if worker_mtls && matches!(group, crate::config::ListenerGroup::WorkerChannel | crate::config::ListenerGroup::Combined) {

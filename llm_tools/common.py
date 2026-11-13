@@ -3445,7 +3445,7 @@ def _zai_snapshot(env: dict[str, str] | None):
 def _scope_to_dict(scope: Any) -> dict[str, Any]:
     if not hasattr(scope, "name"):
         return scope if isinstance(scope, dict) else {}
-    return {
+    out = {
         "name": scope.name,
         "kind": scope.kind,
         "ready": scope.ready,
@@ -3459,6 +3459,9 @@ def _scope_to_dict(scope: Any) -> dict[str, Any]:
         "label": scope.label,
         "source": scope.source,
     }
+    if getattr(scope, "extras", None) and scope.extras.get("spent"):
+        out["spent"] = True  # the amount is observed spend, not a balance; Bridge budgets read it
+    return out
 
 
 def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:

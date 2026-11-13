@@ -5,6 +5,13 @@ and restoring Bridge state, and troubleshooting. Coordinator installation, certi
 trust and coordinator backup are in `install.md`; coordinator configuration and limits
 are in `coordinator.md`.
 
+Coordinator health at a glance: `bridge-coordinator diagnostics` (or `--json`) lists uptime-independent
+checks (database size, free disk, last backup age and next due, certificate expiry, queue depth), each as
+value, status `ok`/`warn`/`fail` and a fix text; the authenticated `GET /api/v1/diagnostics` adds uptime,
+connected workers and event lag. Coordinator backups run automatically every 24 hours and are kept 7 deep
+in `<data dir>/backups`; see `install.md` (Backup and restore) and `coordinator.md` (Diagnostics and
+backups, with the threshold table).
+
 ## Worker service
 
 Enrol the host once, then install the systemd user unit:

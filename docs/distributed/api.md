@@ -358,6 +358,14 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--log-retained-runs` | `mission.create` body `log_retained_runs` (1 to 1000). |
 | `--isolate` | Local worktree isolation (ORCH-001); remote mission creation returns `unsupported-remote-option`. The worker's typed `mission.create` accepts `isolate`, but the coordinator does not forward it yet. |
 | `--log-rotations` | `mission.create` body `log_rotations` (0 to 20). |
+| `--commit` | `mission.settings.patch` field `commit` (`none`, `per-task`; ORCH-003); on `mission create` local only, remote create returns `unsupported-remote-option`. |
+| `--push` | `mission.settings.patch` field `push` (`never`, `per-task`, `per-mission`; ORCH-003); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
+| `--push-default-branch` | Local mission creation only (ORCH-003); remote create returns `unsupported-remote-option`. |
+| `--budget-runs` | `mission.settings.patch` field `budget_runs` (ORCH-005; 0 removes the limit); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
+| `--budget-minutes` | `mission.settings.patch` field `budget_minutes` (ORCH-005); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
+| `--budget-provider-changes` | `mission.settings.patch` field `budget_provider_changes` (ORCH-005); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
+| `--budget-spend` | `mission.settings.patch` field `budget_spend` (ORCH-005; needs a currency); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
+| `--budget-currency` | `mission.settings.patch` field `budget_currency` (ORCH-005); `mission create` accepts it locally only (remote create returns `unsupported-remote-option`). |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
 | `--native` | `mission.start` params or `mission.create` body `native_tui`. |
 | `--prompt` | `task.add`/`task.amend` or `mission.create` typed `prompt` field; local file read if `--prompt-file`. |
