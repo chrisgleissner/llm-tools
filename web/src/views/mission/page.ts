@@ -8,8 +8,9 @@ import { humanizeEvent } from "../../event-humanizer";
 import { hasDigest, listedNeeds, missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import { announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
-import { controlBlock } from "./control";
-import { sessionInfo } from "./session-info";
+import type { Control } from "./control";
+import { turnsFromEvents } from "./facts";
+import type { SessionInfo } from "./session-info";
 import { hasLine, lastLine, loadLines, onDetails } from "../../rows";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
@@ -152,13 +153,15 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const tasksP = tasksPanel(ctx, actions, addTask);
   const activityP = activityPanel(loadOlderEvents);
   const about = aboutBlock();
-  const info = sessionInfo();
-  const control = controlBlock({ workerName, missionId, blocked });
+  // The Session block and the rotation and settings block are built after the first paint (see `mountExtras`): they are not part of what the page shows first.
+  let info: SessionInfo | null = null;
+  let control: Control | null = null;
+  const aboutBox = h("div", { class: "mission-about" }, about.el);
   const panel = (id: Tab, el: HTMLElement) => h("div", { class: `mission-panel panel-${id}`, role: "tabpanel", id: `panel-${id}`, "aria-labelledby": `tab-${id}` }, el);
   const tasksWrap = panel("tasks", tasksP.el);
   const activityWrap = panel("activity", activityP.el);
   const side = h("div", { class: "mission-side" }, tasksWrap, activityWrap);
-  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, h("div", { class: "mission-about" }, info.el, control.el, about.el));
+  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, aboutBox);
   const wrap = h("div", { class: "mission-wrap" }, page);
   // The page is shown once what decides the header's height is known: the attention of the mission (carried by the list entry, else read with the status),
   // so a late "Needs approval" does not push the session pane down after the page was on screen. The wait is bounded.
@@ -362,19 +365,26 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   function renderActivity(): void {
     const all = [...events, ...liveEvents].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id);
     activityP.update({ events: all, error: eventError, loaded: eventsLoaded, more: eventStart > 0 });
+    renderInfo();
   }
 
-  /** The full status projection (it carries the provider runs), read separately because a digest answers the header without a worker round trip. */
-  let detail: Record<string, unknown> | null = null;
-  async function loadDetail(): Promise<void> {
-    if (!online()) return;
-    detail = await api.missionStatus(workerName, missionId).catch(() => detail);
-    if (!disposed) renderInfo();
-  }
-  const scheduleDetail = debounce(loadDetail, 1500);
+  /** The provider runs come from the events already read from the coordinator, and the last line from `mission.activity_line`: nothing here asks the worker for the status. */
   function renderInfo(): void {
+    if (!info) return;
     const e = entry();
-    info.update({ snapshot: detail ?? snapshot, lastLine: e && status() === "RUNNING" ? lastLine(e) : "", nowMs: Date.now() });
+    const ordinalOf = (id: number | null): number | null => tasks.find((t) => t.id === id)?.ordinal ?? null;
+    info.update({ snapshot, turns: turnsFromEvents([...events, ...liveEvents], ordinalOf), lastLine: e && status() === "RUNNING" ? lastLine(e) : "", nowMs: Date.now() });
+  }
+  /** Load and add the two blocks once the page has been painted. */
+  async function mountExtras(): Promise<void> {
+    await afterPaint();
+    const [a, c] = await Promise.all([import("./session-info"), import("./control")]);
+    if (disposed) return;
+    info = a.sessionInfo();
+    control = c.controlBlock({ workerName, missionId, blocked });
+    aboutBox.prepend(info.el, control.el);
+    renderInfo();
+    control.sync();
   }
   const offDetails = onDetails(renderInfo);
   const infoClock = window.setInterval(() => {
@@ -386,7 +396,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   function renderAbout(): void {
     renderInfo();
-    control.sync();
+    control?.sync();
     const created = record(snapshot?.["mission"])["created_at"];
     about.update({ missionId, folder: folder(), workerName, worker: worker(workerName), createdAt: typeof created === "string" ? created : null });
   }
@@ -409,7 +419,6 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     headSignature = "";
     renderAll();
     reveal();
-    void loadDetail();
     const e = entry();
     if (e && status() === "RUNNING" && !hasLine(e)) void loadLines([e], () => disposed);
   }
@@ -500,10 +509,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   // One task read for the several triggers (a task event and a digest change usually arrive together).
-  const scheduleTasks = debounce(() => {
-    void loadTasks();
-    scheduleDetail();
-  }, 150);
+  const scheduleTasks = debounce(loadTasks, 150);
 
   async function reloadAll(): Promise<void> {
     await Promise.all([refresh().catch(() => {}), loadSnapshot(), loadTasks()]);
@@ -624,6 +630,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   document.addEventListener(SHORTCUT_EVENT, onShortcut);
 
   setTab(tab, false);
+  void mountExtras();
   renderAll();
   renderActivity();
   stamp();

@@ -1,6 +1,6 @@
 // PRD-015: the session view shows model, the task, the elapsed time of the run, the last output line and the turn history, and offers search and copy
 // in the scrollback. Only fields the worker already returns are used (see views/mission/facts.ts).
-import { durationText, sessionFacts, turnLine } from "../src/views/mission/facts";
+import { durationText, sessionFacts, turnLine, turnsFromEvents } from "../src/views/mission/facts";
 import { findMatches, matchLabel, stepMatch } from "../src/transcript-search";
 import { expect, test } from "./fixtures";
 import { MISSION_URL, openApp } from "./redesign/harness";
@@ -45,6 +45,16 @@ test("sessionFacts reads provider, model, task and turns from the projection and
   expect(durationText(0, 65 * 60000)).toBe("1h 05m");
 });
 
+test("turnsFromEvents pairs each exit with the open run of its task, newest first", () => {
+  const ev = (kind: string, task_id: number, at: string, data: Record<string, unknown>) => ({ kind, task_id, created_at: `2026-11-05T${at}:00Z`, data });
+  const turns = turnsFromEvents(
+    [ev("operation-exited", 1, "10:20", { exit_code: 0 }), ev("operation-running", 1, "10:00", { route_id: "codex", model: "gpt-5" }), ev("operation-running", 2, "11:30", { route_id: "claude" }), ev("controller-heartbeat", 2, "11:31", {})],
+    (id) => id,
+  );
+  expect(turns.map((t) => [t.ordinal, t.provider, t.outcome])).toEqual([[2, "claude", "running"], [1, "codex", "exited 0"]]);
+  expect(turns[1]!.endedMs).toBe(Date.parse("2026-11-05T10:20:00Z"));
+});
+
 // ---- in the page
 
 test.beforeEach(async ({ page }) => {
@@ -60,25 +70,15 @@ test.beforeEach(async ({ page }) => {
           return json({ request_id: "x", target: "alpha", operation: "mission.activity_line", state: "done", result: { outcome: "ok", result: { available: true, line: "Running cargo test", provider: "codex", task: 2 }, error: null } });
       }
       const res = await original(input, init);
-      if (method === "GET" && /^\/api\/v1\/missions\/[^/]+$/.test(url.pathname) && res.ok) {
-        const row = (await res.json()) as { result?: { result?: Record<string, unknown> } };
-        if (row.result?.result)
-          row.result.result["operations"] = [
-            { ordinal: 1, station: "codex", model: "gpt-5", status: "EXITED", exit_code: 0, created_at: "2026-11-05T10:00:00Z", updated_at: "2026-11-05T10:20:00Z" },
-            { ordinal: 2, station: "codex", model: "gpt-5", status: "EXITED", exit_code: 1, created_at: "2026-11-05T10:30:00Z", updated_at: "2026-11-05T11:00:00Z" },
-            { ordinal: 2, station: "codex", model: "gpt-5", status: "RUNNING", exit_code: null, created_at: "2026-11-05T11:30:00Z", updated_at: "2026-11-05T11:30:00Z" },
-          ];
-        return json(row);
-      }
       return res;
     };
   });
 });
 
-test("the Session details show provider, model, task, elapsed time, last output and the turn history", async ({ page }) => {
-  await openApp(page, { auth: "in", terminalScreen: true }, MISSION_URL);
+test("the Session details show provider, model, task, elapsed time, last output and the run history without asking the worker for the status", async ({ page }) => {
+  const app = await openApp(page, { auth: "in", terminalScreen: true }, MISSION_URL);
   const box = page.locator("#session-details");
-  await expect(box.locator('[data-q="session-glance"]')).toHaveText("codex gpt-5 · task 2 · 30m");
+  await expect(box.locator('[data-q="session-glance"]')).toHaveText("codex gpt-5 · task 2 · 52m");
   await box.locator("summary").click();
   await expect(box).toContainText("Codex");
   await expect(box.locator("dd", { hasText: "gpt-5" })).toBeVisible();
@@ -86,9 +86,9 @@ test("the Session details show provider, model, task, elapsed time, last output 
   await expect(box.locator("dt", { hasText: "Running for" })).toBeVisible();
   await expect(box.locator('[data-q="last-line"]')).toHaveText("Running cargo test");
   const turns = box.locator(".session-turns li");
-  await expect(turns).toHaveCount(3);
-  await expect(turns.first()).toHaveText(/^Task 2, codex gpt-5, running, 30m$/);
-  await expect(turns.last()).toHaveText("Task 1, codex gpt-5, exited 0, 20m");
+  await expect(turns).toHaveCount(1);
+  await expect(turns.first()).toHaveText("Task 2, codex gpt-5, running, 52m");
+  expect(app.requestCounts().status, "the mission page never asks the worker for the status").toBe(0);
 });
 
 async function openSearch(page: import("@playwright/test").Page): Promise<void> {

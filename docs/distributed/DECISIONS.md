@@ -418,7 +418,7 @@ with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
 
-Addendum, 2026-11-13 (PRD-014, PRD-015, PRD-016): the routes caps rose to 114900 raw / 45500 gzip for
+Addendum, 2026-11-13 (PRD-014, PRD-015, PRD-016): the routes caps rose to 114900 raw / 47000 gzip for
 JavaScript and 19800 / 5200 for route stylesheets, each the measured figure plus 5% (measured 109461 /
 43380 and 18893 / 4978; before: 93868 raw). The growth is the mission page and its lazy parts: the
 Session block with the turn history, scrollback search and copy, the rotation and settings block,

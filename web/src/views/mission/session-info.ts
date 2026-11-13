@@ -2,10 +2,12 @@
 // provider printed, and the history of runs (turns). Everything comes from `facts.ts`; a value the worker does not report is left out, never guessed.
 import { h } from "../../dom";
 import { fields } from "./kit";
-import { durationText, sessionFacts, turnLine } from "./facts";
+import { durationText, sessionFacts, turnLine, type Turn } from "./facts";
 
 export interface SessionInfoModel {
   snapshot: Record<string, unknown> | null;
+  /** Provider runs from the mission's events (`turnsFromEvents`). */
+  turns: Turn[];
   /** The last line of the provider's retained log (`mission.activity_line`), "" when unknown. */
   lastLine: string;
   nowMs: number;
@@ -27,7 +29,7 @@ export function sessionInfo(): SessionInfo {
   return {
     el,
     update(m) {
-      const f = sessionFacts(m.snapshot);
+      const f = sessionFacts(m.snapshot, m.turns);
       const rows: Array<[string, Node | string]> = [];
       if (f.provider) rows.push(["Provider", f.provider[0]!.toUpperCase() + f.provider.slice(1)]);
       if (f.model) rows.push(["Model", f.model]);

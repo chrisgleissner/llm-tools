@@ -35,7 +35,35 @@ function outcomeOf(status: string, exit: unknown): string {
   return status.toLowerCase() || "unknown";
 }
 
-export function sessionFacts(snapshot: Record<string, unknown> | null): SessionFacts {
+/** The events of the mission that matter here: `operation-running` starts a provider run, `operation-exited` ends the run of the same task. */
+export interface RunEvent {
+  kind: string;
+  task_id: number | null;
+  created_at: string;
+  data?: Record<string, unknown> | null;
+}
+
+/**
+ * The provider runs of a mission from its events, newest first. The events come from the coordinator's own store, so no request reaches the worker.
+ * A run that has no `operation-exited` after it is still running.
+ */
+export function turnsFromEvents(events: RunEvent[], ordinalOf: (taskId: number | null) => number | null): Turn[] {
+  const turns: Array<Turn & { taskId: number | null }> = [];
+  const byTime = [...events].sort((a, b) => (ms(a.created_at) ?? 0) - (ms(b.created_at) ?? 0));
+  for (const e of byTime) {
+    const data = rec(e.data);
+    if (e.kind === "operation-running") {
+      const provider = [data["route_id"], data["station"]].find(known);
+      turns.push({ taskId: e.task_id, ordinal: ordinalOf(e.task_id), provider: provider ?? "", model: known(data["model"]) ? data["model"] : "", outcome: "running", startedMs: ms(e.created_at) ?? 0, endedMs: null });
+    } else if (e.kind === "operation-exited") {
+      const open = [...turns].reverse().find((t) => t.taskId === e.task_id && t.endedMs === null);
+      if (open) [open.outcome, open.endedMs] = [outcomeOf("EXITED", data["exit_code"]), ms(e.created_at)];
+    }
+  }
+  return turns.reverse().map(({ taskId: _unused, ...t }) => t);
+}
+
+export function sessionFacts(snapshot: Record<string, unknown> | null, runs?: Turn[]): SessionFacts {
   const observed = rec(snapshot?.["station_observation"]);
   const context = rec(snapshot?.["station_context"]);
   const station = [observed["station"], context["last_launched_station"]].find(known);
@@ -43,7 +71,7 @@ export function sessionFacts(snapshot: Record<string, unknown> | null): SessionF
   const model = [observed["model"], station ? models[station] : undefined].find(known);
   const current = rec(snapshot?.["current_task"]);
   const ops = Array.isArray(snapshot?.["operations"]) ? (snapshot!["operations"] as unknown[]).map(rec) : [];
-  const turns: Turn[] = ops
+  const turns: Turn[] = runs ?? ops
     .map((o): Turn => {
       const status = String(o["status"] ?? "");
       const provider = [o["route_id"], o["station"]].find(known);
