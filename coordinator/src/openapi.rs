@@ -111,6 +111,12 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if let Some(schema) = crate::openapi_workers::response(path, method)
+        .or_else(|| crate::openapi_missions::response(path, method))
+        .or_else(|| crate::openapi_misc::response(path, method))
+    {
+        return schema;
+    }
     if path == "/api/v1/auth/passkeys" && method == "GET" {
         return json!({
             "type":"object","required":["passkeys"],"additionalProperties":false,
