@@ -950,3 +950,11 @@ Review follow-up. Eviction orders by `missions.touched_at`, a coordinator-side c
 
 Second review follow-up. Replayed summaries (`replay: true` on the deferred `events` batches, optional field, resent without it to an older coordinator) take `touched_at` values below the worker's minimum, decreasing in arrival order, so over the cap they are evicted before hello rows and live updates; the worker sends them newest first. Refused ids are stored as a set (`worker_refused_missions`) and counted once; the count falls only when an id is stored, deleted or replaced by a new hello. Migration 18 numbers existing rows by `updated_at` and adds the index `missions_worker_touched(worker, touched_at)`. The worker keeps the last `notice` in its state file.
 
+
+## D57 Scope decisions for the remaining 1.5.0 rows (2026-11-13)
+
+- The fifth split of the secapi branch (#64), the "Documents API", maps to no open 1.5.0 row. It is dropped from 1.5.0. The work-in-progress patch is kept outside the repository for a later release.
+- PRD-011: the coordinator gets an update-availability check. It is off by default, sends no identifying data, and is documented. It is built for 1.5.0, not waived.
+- PRD-013: restore is implemented as a guided console action with step-up (SEC2-008), as the spec requires. The register keeps PRD-013 at [~] until then, even if a diagnostics view merges earlier.
+- DOG-020: the remaining fixed write cost of about 32 KB per accepted batch is deferred to 1.6.0. Batching already bounds SD-card wear (see benchmarks.md). The rowid events-table rewrite is a large schema change with low benefit for one operator.
+- UX-001, UX-005, UX-010: the live persona observations are run once by an agent acting as each persona against the demo environment. The transcripts are kept as evidence instead of being waived.
