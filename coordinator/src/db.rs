@@ -503,10 +503,20 @@ pub struct EventBatch<'a> {
 }
 
 pub enum HelloOutcome {
-    Ok { generation: u64, cursor: u64 },
+    Ok {
+        generation: u64,
+        cursor: u64,
+    },
     WorkerIdMismatch,
     Unknown,
+    /// Accepting this hello would take the coordinator above `MAX_TOTAL_MISSIONS`.
+    TooManyMissions,
 }
+
+/// Most missions the coordinator indexes across all workers (capacity plan F6).
+pub const MAX_TOTAL_MISSIONS: u64 = 10_000;
+/// Most enrolled workers (capacity plan F5).
+pub const MAX_ENROLLED_WORKERS: u64 = 256;
 
 pub struct Session {
     pub principal_id: String,
@@ -1587,6 +1597,9 @@ impl Db {
     }
 
     // ---- workers ----
+    pub fn workers_count(&self) -> R<u64> {
+        Ok(self.r()?.query_row("SELECT COUNT(*) FROM workers", [], |r| r.get::<_, i64>(0))? as u64)
+    }
     pub fn worker_add(&self, name: &str, hash: &str) -> R<bool> {
         Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO workers(name, token_hash, created_at) VALUES(?,?,?)",
@@ -1738,6 +1751,12 @@ impl Db {
         tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=?, worker_policy=? WHERE name=?",
             params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, text("worker_policy"), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
+        let incoming = hello.get("missions").and_then(Value::as_array).map_or(0, |m| m.len() as u64);
+        let others: i64 = tx.query_row("SELECT COUNT(*) FROM missions", [], |r| r.get(0))?;
+        if others as u64 + incoming > MAX_TOTAL_MISSIONS {
+            // Dropping `tx` rolls the whole hello back: the worker's previous mission list stays.
+            return Ok(HelloOutcome::TooManyMissions);
+        }
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
@@ -1756,6 +1775,14 @@ impl Db {
             generation: generation as u64,
             cursor: cursor as u64,
         })
+    }
+
+    /// Every mission row as `(worker, info JSON text)`, without parsing the summaries.
+    pub fn missions_list_raw(&self) -> R<Vec<(String, String)>> {
+        let c = self.r()?;
+        let mut st = c.prepare("SELECT worker, info FROM missions ORDER BY worker, mission_id")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect()
     }
 
     pub fn missions_list(&self) -> R<Vec<(String, Value)>> {
@@ -2325,7 +2352,13 @@ impl Db {
             let (w, s, n) = r?;
             depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
         }
-        Ok(json!({"db_bytes": pages * size + wal as i64, "command_queue_depths": depths}))
+        let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
+        Ok(json!({
+            "db_bytes": pages * size + wal as i64,
+            "command_queue_depths": depths,
+            "enrolled_workers": count("SELECT COUNT(*) FROM workers")?,
+            "missions_indexed": count("SELECT COUNT(*) FROM missions")?,
+        }))
     }
     }
 }

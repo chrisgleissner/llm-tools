@@ -1692,6 +1692,13 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
             "worker name must be lowercase letters, digits and '-' (at most 63)",
         ));
     }
+    if st.db.workers_count()? >= crate::db::MAX_ENROLLED_WORKERS {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "too-many-workers",
+            "the coordinator already has the maximum number of enrolled workers (256); revoke one first",
+        ));
+    }
     let token = auth::random_token();
     let identity = if st.cfg.worker_mtls {
         Some(crate::certs::issue_worker_client_identity(&st.data_dir, name).map_err(|_| {
@@ -1736,6 +1743,26 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
 /// `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`),
 /// `limit` (default 100, maximum 500) and an authenticated, encrypted opaque `cursor`. Legacy `offset` remains
 /// accepted. The reply carries `total`, `next_cursor` and status facets.
+/// The summary fields that the mission list filters and sorts on. A field that is missing or is not a string reads as "".
+#[derive(serde::Deserialize, Default)]
+struct MissionKey {
+    #[serde(default, deserialize_with = "lenient_text")]
+    id: String,
+    #[serde(default, deserialize_with = "lenient_text")]
+    name: String,
+    #[serde(default, deserialize_with = "lenient_text")]
+    folder: String,
+    #[serde(default, deserialize_with = "lenient_text")]
+    status: String,
+    #[serde(default, deserialize_with = "lenient_text")]
+    updated_at: String,
+}
+
+fn lenient_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_str().unwrap_or("").to_string())
+}
+
 async fn list_missions(State(st): State<St>, Authed(principal, _): Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
     if q.get("worker").is_some_and(|worker| !valid_name(worker)) {
@@ -1804,41 +1831,43 @@ async fn list_missions(State(st): State<St>, Authed(principal, _): Authed, Query
         (None, None) => 0,
     };
     let workers: HashMap<String, crate::db::WorkerRow> = st.db.workers_list()?.into_iter().map(|w| (w.name.clone(), w)).collect();
-    let text = |info: &Value, k: &str| info.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-    let mut rows: Vec<(String, bool, Value)> = st
+    // Only the fields the filters and the sort read are parsed for every row; the full summary is parsed for the
+    // returned page alone. Parsing every summary into a `Value` cost about 10 KiB per mission (capacity plan F6).
+    let mut rows: Vec<(String, bool, MissionKey, String)> = st
         .db
-        .missions_list()?
+        .missions_list_raw()?
         .into_iter()
         .filter_map(|(worker, info)| {
             let w = workers.get(&worker)?;
             // The worker advances mission_cursor atomically with its event batch and
             // mission snapshot. Unrelated events no longer make a caught-up worker stale.
             let stale = !st.hub.online(&worker) || w.event_cursor > w.mission_cursor;
-            Some((worker, stale, info))
+            let key: MissionKey = serde_json::from_str(&info).unwrap_or_default();
+            Some((worker, stale, key, info))
         })
-        .filter(|(worker, _, info)| {
+        .filter(|(worker, _, key, _)| {
             principal.allows_worker(worker)
                 && q.get("worker").is_none_or(|w| w == worker)
                 && needle.as_ref().is_none_or(|n| {
-                    [worker.as_str(), &text(info, "name"), &text(info, "id"), &text(info, "folder")]
+                    [worker.as_str(), &key.name, &key.id, &key.folder]
                         .iter()
                         .any(|f| f.to_lowercase().contains(n.as_str()))
                 })
         })
         .collect();
     let mut by_status: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for (_, _, info) in &rows {
-        *by_status.entry(text(info, "status")).or_default() += 1;
+    for (_, _, key, _) in &rows {
+        *by_status.entry(key.status.clone()).or_default() += 1;
     }
-    rows.retain(|(_, _, info)| statuses.is_empty() || statuses.contains(&text(info, "status").to_uppercase()));
+    rows.retain(|(_, _, key, _)| statuses.is_empty() || statuses.contains(&key.status.to_uppercase()));
     if let Some(sort) = sort {
-        let key = |r: &(String, bool, Value)| match sort {
-            "name" => text(&r.2, "name").to_lowercase(),
-            "status" => text(&r.2, "status"),
+        let order_key = |r: &(String, bool, MissionKey, String)| match sort {
+            "name" => r.2.name.to_lowercase(),
+            "status" => r.2.status.clone(),
             "worker" => r.0.clone(),
-            _ => text(&r.2, "updated_at"),
+            _ => r.2.updated_at.clone(),
         };
-        rows.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| text(&a.2, "id").cmp(&text(&b.2, "id"))));
+        rows.sort_by(|a, b| order_key(a).cmp(&order_key(b)).then_with(|| a.2.id.cmp(&b.2.id)));
         if descending {
             rows.reverse();
         }
@@ -1848,7 +1877,7 @@ async fn list_missions(State(st): State<St>, Authed(principal, _): Authed, Query
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|(worker, stale, info)| json!({"worker": worker, "stale": stale, "mission": info}))
+        .map(|(worker, stale, _, info)| json!({"worker": worker, "stale": stale, "mission": serde_json::from_str::<Value>(&info).unwrap_or(Value::Null)}))
         .collect();
     let next_cursor = (offset.saturating_add(missions.len()) < total)
         .then(|| crate::cursor::issue(&st.cursor_key, "missions", &filters, offset.saturating_add(missions.len())));
@@ -3283,6 +3312,7 @@ async fn diagnostics(State(st): State<St>, _a: Authed) -> ApiResult {
     d["connected_workers"] = json!(st.hub.connected());
     // Messages and bytes since start by direction (worker_in, worker_out, browser_out) and message type.
     d["link_bytes"] = st.hub.link_bytes();
+    d["resources"] = st.hub.resource_counts();
     d["sqlite_version"] = json!(rusqlite::version());
     Ok(json_ok(StatusCode::OK, d))
 }
@@ -3298,6 +3328,18 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
         ));
     }
     let rx = st.hub.stream.subscribe();
+    let Some(open) = st.hub.try_stream_open() else {
+        let mut busy = err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "busy",
+            format!(
+                "the coordinator already serves {} browser streams; close one and retry",
+                crate::hub::MAX_STREAM_CLIENTS
+            ),
+        );
+        busy.retry_after = Some(5);
+        return Err(busy);
+    };
     let shutdown = st.shutdown.clone();
     let hub = st.hub.clone();
     let keepalive = (
@@ -3307,7 +3349,10 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |s| stream_session(s, rx, shutdown, keepalive, hub))
+        .on_upgrade(move |s| async move {
+            let _open = open;
+            stream_session(s, rx, shutdown, keepalive, hub).await
+        })
         .into_response())
 }
 

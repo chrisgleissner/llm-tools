@@ -63,6 +63,13 @@ whole numbers with `invalid-message`.
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
+A `hello` with more than 5000 missions gets an `error` with code `invalid-message`; the connection stays
+open until the hello deadline. A `hello` that is valid but would take the coordinator above 10 000
+missions across all workers gets an `error` with code `too-many-missions`, followed by close 1008
+`too many missions`. The coordinator keeps the worker's previous mission list. The worker reconnects with
+its normal backoff; the operator must delete missions before it is accepted. With summaries of about 300
+bytes, the 1 MiB message limit is reached at roughly 3000 missions, before the 5000 limit.
+
 ## Mission summaries
 
 A mission summary is a small object the worker sends in `hello` and in the `missions` list of

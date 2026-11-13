@@ -232,6 +232,22 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
             let _ = socket.send(close_frame(1008, "worker id mismatch")).await;
             return;
         }
+        Ok(HelloOutcome::TooManyMissions) => {
+            let _ = send(
+                &st,
+                &mut socket,
+                protocol::error_message(
+                    &name,
+                    0,
+                    "too-many-missions",
+                    &format!("the coordinator indexes at most {} missions across all workers", crate::db::MAX_TOTAL_MISSIONS),
+                    Some(&hello.id),
+                ),
+            )
+            .await;
+            let _ = socket.send(close_frame(1008, "too many missions")).await;
+            return;
+        }
         Ok(HelloOutcome::Unknown) => {
             let _ = socket.send(close_frame(1008, "worker revoked")).await;
             return;
@@ -242,6 +258,9 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
             return;
         }
     };
+    // The parsed hello holds every mission summary (a few KiB each once parsed). Nothing reads it again, and it
+    // would otherwise stay allocated for as long as the connection lives.
+    drop((hello, caps));
     if pending_token {
         match st.db.worker_promote_token_rotation(&name, &token_hash, crate::now()) {
             Ok(true) => {}

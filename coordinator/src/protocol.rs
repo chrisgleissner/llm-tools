@@ -197,8 +197,11 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
         }
         "hello" => {
             uint(p.get("event_cursor"), "event_cursor", 0)?;
-            if !p["capabilities"].is_array() || !p["missions"].as_array().is_some_and(|missions| missions.len() <= MAX_MISSIONS_PER_HELLO) {
+            if !p["capabilities"].is_array() || !p["missions"].is_array() {
                 return perr("invalid-message", "hello: capabilities and missions must be lists");
+            }
+            if p["missions"].as_array().is_some_and(|missions| missions.len() > MAX_MISSIONS_PER_HELLO) {
+                return perr("invalid-message", format!("hello: too many missions (at most {MAX_MISSIONS_PER_HELLO})"));
             }
         }
         "terminal.open" | "terminal.close" | "terminal.status" => {
