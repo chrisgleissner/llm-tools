@@ -50,6 +50,8 @@ def _init_repo(path: Path, branch: str = "main") -> Path:
     git(path, "config", "user.name", "Repo Author")
     git(path, "config", "user.email", "author@example.invalid")
     git(path, "config", "commit.gpgsign", "false")
+    # Under the coverage gate, child processes started in the repository write .coverage.* files there.
+    (path / ".git" / "info" / "exclude").write_text(".coverage*\n", encoding="utf-8")
     (path / "README.md").write_text("hello\n", encoding="utf-8")
     git(path, "add", "README.md")
     git(path, "commit", "-q", "-m", "first")
