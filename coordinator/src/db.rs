@@ -28,6 +28,8 @@ pub const fn session_policy(remember: bool) -> (i64, i64) {
 /// would otherwise cause one a minute. The shortest idle timeout is two hours, so five minutes
 /// moves an idle expiry by at most 4%.
 pub const TOUCH_EVERY_SECS: i64 = 300;
+/// While an audit write failure is recorded, `/healthz` tries a write again at most this often.
+pub const AUDIT_RECHECK_SECS: i64 = 2;
 pub const COMPLETED_COMMAND_KEEP_SECS: i64 = 7 * 86_400;
 /// A finished command keeps its result body for this long. Read-only commands (status, list) return
 /// several KB each and nobody reads the body after the requesting client has polled it once.
@@ -383,6 +385,11 @@ pub struct Db {
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
     /// which only makes the next retention pass run early and correct the figure.
     event_counts: Mutex<HashMap<String, u64>>,
+    /// FIND-004: the last audit write failed and none has succeeded since. Reported by `/healthz`.
+    audit_failed: std::sync::atomic::AtomicBool,
+    audit_failures: AtomicU64,
+    audit_last_attempt: std::sync::atomic::AtomicI64,
+    audit_last_error: Mutex<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,6 +875,10 @@ impl Db {
             stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
+            audit_failed: std::sync::atomic::AtomicBool::new(false),
+            audit_failures: AtomicU64::new(0),
+            audit_last_attempt: std::sync::atomic::AtomicI64::new(0),
+            audit_last_error: Mutex::new(String::new()),
         })
     }
 
@@ -1950,6 +1961,19 @@ impl Db {
     }
 
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
+        self.command_insert_audited(worker, operation, mutating, request, None)
+    }
+
+    /// [`Db::command_insert`] with the audit entry of a new command written in the same transaction (FIND-004):
+    /// when the audit insert fails the command is not stored and the caller gets the error.
+    pub fn command_insert_audited(
+        &self,
+        worker: &str,
+        operation: &str,
+        mutating: bool,
+        request: &Value,
+        audit: Option<(&str, &str, &str, &str)>,
+    ) -> R<InsertOutcome> {
         let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let request_json = request.to_string();
         if request_json.len() > MAX_COMMAND_REQUEST_BYTES {
@@ -1989,6 +2013,11 @@ impl Db {
             params![id, worker, operation, mutating as i64, request_json, now, now],
         )?;
         let row = tx.query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)?;
+        if let Some((actor, action, detail, remote)) = audit {
+            let written = Self::audit_insert(&tx, actor, action, detail, remote);
+            self.audit_outcome(&written);
+            written?;
+        }
         tx.commit()?;
         Ok(InsertOutcome::New(row))
     }
@@ -2002,6 +2031,30 @@ impl Db {
         ))?;
         let rows = st.query_map(params![worker], command_row)?.collect();
         rows
+    }
+
+    /// FIND-003: unfinished mutating commands of `worker` that have not changed state for `idle_secs`
+    /// (a `command` frame or its `command.result` was lost on a live connection), at most `limit`,
+    /// oldest first. Each returned row's `updated_at` is moved to now, so the same command is offered
+    /// again only after another `idle_secs`. The state does not change: the worker's `command.ack` and
+    /// `command.result` move it as for the first delivery, and the worker answers a repeated request id
+    /// from its stored outcome without repeating the effect.
+    pub fn commands_stale(&self, worker: &str, idle_secs: i64, limit: i64) -> R<Vec<CommandRow>> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        let now = crate::now();
+        let rows: Vec<CommandRow> = {
+            let mut st = tx.prepare(&format!(
+                "SELECT {CCOLS} FROM commands WHERE worker=?1 AND mutating=1 AND state IN ('pending','sent','acked') AND updated_at<=?2 ORDER BY rowid LIMIT ?3"
+            ))?;
+            let rows = st.query_map(params![worker, now - idle_secs, limit], command_row)?.collect::<R<_>>()?;
+            rows
+        };
+        for row in &rows {
+            tx.execute("UPDATE commands SET updated_at=?1 WHERE request_id=?2", params![now, row.request_id])?;
+        }
+        tx.commit()?;
+        Ok(rows)
     }
 
     /// Finish every unfinished read-only command of `worker` with a `worker-offline` failure and
@@ -2066,7 +2119,9 @@ impl Db {
     }
     pub fn command_sent(&self, id: &str) -> R<Option<CommandRow>> {
         self.transition(
-            "UPDATE commands SET state='sent', updated_at=?1 WHERE request_id=?2 AND state='pending'",
+            // A replayed or re-sent row keeps its state but gets a new idle clock, so the stale check does not
+            // offer it again until the idle time has passed.
+            "UPDATE commands SET state=CASE WHEN state='pending' THEN 'sent' ELSE state END, updated_at=?1 WHERE request_id=?2 AND state IN ('pending','sent','acked')",
             &[&crate::now(), &id],
             id,
         )
@@ -2087,16 +2142,67 @@ impl Db {
     }
 
     // ---- audit and maintenance ----
+    /// Record an audit entry for an action that has already taken effect. A failed write cannot undo the
+    /// action, so it is logged and reported as a health fault ([`Db::audit_fault`], `/healthz`) until a later
+    /// write succeeds. Callers that can still refuse the action use [`Db::audit_checked`] or the
+    /// transactional variants (`command_insert_audited`) so that the action fails with the audit.
     pub fn audit(&self, actor: &str, action: &str, detail: &str, remote: &str) {
-        let _ = self.audit_checked(actor, action, detail, remote);
+        if let Err(e) = self.audit_checked(actor, action, detail, remote) {
+            eprintln!("bridge-coordinator: audit write failed for {action}: {e}");
+        }
     }
 
-    pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
-        self.c()?.execute(
+    /// The audit write error that is still unresolved: `Some(message)` from the first failed audit write until
+    /// the next successful one, `None` otherwise. Lock-free apart from the message, so `/healthz` stays cheap.
+    pub fn audit_fault(&self) -> Option<String> {
+        if !self.audit_failed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let last = self.audit_last_error.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        Some(format!(
+            "audit-write-failed: {} failed write(s), last error: {last}",
+            self.audit_failures.load(Ordering::SeqCst)
+        ))
+    }
+
+    /// [`Db::audit_fault`] that first tries again to write an audit entry (`audit.recovered`) when a fault is
+    /// recorded and the last attempt is at least [`AUDIT_RECHECK_SECS`] old, so that health follows the disk
+    /// coming back even when nothing else is audited. Without a fault it does not touch the database.
+    pub fn audit_fault_rechecked(&self) -> Option<String> {
+        if self.audit_failed.load(Ordering::SeqCst) {
+            let now = crate::now();
+            let last = self.audit_last_attempt.load(Ordering::SeqCst);
+            if now - last >= AUDIT_RECHECK_SECS && self.audit_last_attempt.compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                let _ = self.audit_checked("system", "audit.recovered", "audit writes work again after a failure", "local");
+            }
+        }
+        self.audit_fault()
+    }
+
+    fn audit_outcome(&self, result: &R<()>) {
+        match result {
+            Ok(()) => self.audit_failed.store(false, Ordering::SeqCst),
+            Err(e) => {
+                self.audit_last_attempt.store(crate::now(), Ordering::SeqCst);
+                self.audit_failures.fetch_add(1, Ordering::SeqCst);
+                *self.audit_last_error.lock().unwrap_or_else(|p| p.into_inner()) = e.to_string();
+                self.audit_failed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn audit_insert(conn: &Connection, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
+        conn.execute(
             "INSERT INTO audit(ts, actor, action, detail, remote,principal_id) VALUES(?,?,?,?,?,COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END))",
             params![crate::now(), actor, action, detail, remote, actor, actor, actor, actor],
         )?;
         Ok(())
+    }
+
+    pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
+        let result = self.c().and_then(|c| Self::audit_insert(&c, actor, action, detail, remote));
+        self.audit_outcome(&result);
+        result
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
         let c = self.r()?;
@@ -2236,6 +2342,28 @@ impl Db {
         let total: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let mode: i64 = c.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
         Ok((free * size, total * size, mode == 2))
+    }
+
+    /// `PRAGMA quick_check` of a database file through a read-only connection, before [`Db::open`] has set the
+    /// journal mode or migrated anything: a damaged file is not written to. A missing file has no problems.
+    pub fn quick_check_file(path: &Path, limit: usize) -> R<Vec<String>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut st = c.prepare(&format!("PRAGMA quick_check({})", limit.max(1)))?;
+        let rows: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.collect::<R<_>>()?;
+        Ok(if rows.len() == 1 && rows[0] == "ok" { Vec::new() } else { rows })
+    }
+
+    /// `PRAGMA quick_check` on the live database: the problems found (at most `limit`), empty when the
+    /// file is intact. Reads every page once, so it runs at start only.
+    pub fn quick_check(&self, limit: usize) -> R<Vec<String>> {
+        let c = self.r()?;
+        let mut st = c.prepare(&format!("PRAGMA quick_check({})", limit.max(1)))?;
+        let rows: Vec<String> = st.query_map([], |r| r.get::<_, String>(0))?.collect::<R<_>>()?;
+        Ok(if rows.len() == 1 && rows[0] == "ok" { Vec::new() } else { rows })
     }
 
     pub fn diagnostics(&self) -> R<Value> {

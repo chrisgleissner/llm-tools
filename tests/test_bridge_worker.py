@@ -259,6 +259,26 @@ def test_commands_ack_then_result_and_duplicates_do_not_repeat(state):
         assert store.db.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 1
 
 
+def test_repeated_redelivery_on_one_connection_applies_a_task_add_once(state):
+    """FIND-003: the coordinator re-sends an unanswered command every few seconds on the same connection.
+
+    Every delivery must be acknowledged, must return the first outcome and must not add a second task."""
+    directory, mission_id = state
+    session, _ = _session(directory)
+    _welcome(session)
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        before = store.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0]
+    request = CommandRequest("task.add", mission_id=mission_id, params={"title": "once", "prompt": "do it once"}, request_id="remote-add-1")
+    ack, first = _command(session, request)
+    assert (ack.payload["status"], first.payload["outcome"]) == ("received", "applied")
+    for _ in range(3):
+        ack, again = _command(session, request)
+        assert ack.payload["status"] == "duplicate"
+        assert again.payload == first.payload
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        assert store.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0] == before + 1
+
+
 def test_read_only_worker_refuses_mutations(state):
     directory, mission_id = state
     session, _ = _session(directory, allow_control=False)
@@ -801,7 +821,7 @@ def test_hello_offers_every_supported_version_and_a_welcome_must_pick_one_of_the
     assert caught.value.code == "unsupported-version"
 
 
-def _create_session(tmp_path, directory):
+def _session_with_root(tmp_path, directory):
     root = tmp_path / "approved"
     root.mkdir(exist_ok=True)
     config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
@@ -820,7 +840,7 @@ def _write_config(tmp_path, monkeypatch, text):
 
 def test_remote_create_resolves_a_verifier_declared_in_the_worker_config(state, tmp_path, monkeypatch):
     directory, _ = state
-    session, root = _create_session(tmp_path, directory)
+    session, root = _session_with_root(tmp_path, directory)
     (root / "check.sh").write_text("#!/bin/sh\nexit 0\n")
     _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["sh", "check.sh"]\nfiles = ["check.sh"]\ntimeout_seconds = 90\n')
     _, created = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "providers": "codex", "verifier_name": "unit"}))
@@ -836,7 +856,7 @@ def test_remote_create_resolves_a_verifier_declared_in_the_worker_config(state, 
 
 def test_remote_create_refuses_unknown_and_malformed_verifier_names(state, tmp_path, monkeypatch):
     directory, _ = state
-    session, root = _create_session(tmp_path, directory)
+    session, root = _session_with_root(tmp_path, directory)
     _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["true"]\n')
     for name in ("missing", "../etc/passwd", "Bad Name"):
         _, refused = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "verifier_name": name}))
@@ -848,7 +868,7 @@ def test_remote_create_refuses_unknown_and_malformed_verifier_names(state, tmp_p
 @pytest.mark.parametrize("option", ["command_template", "verifier_argv", "verifier_files", "verifier", "verifier_command"])
 def test_remote_create_still_refuses_commands_and_files(state, tmp_path, option):
     directory, _ = state
-    session, root = _create_session(tmp_path, directory)
+    session, root = _session_with_root(tmp_path, directory)
     value = ["true"] if option.endswith(("argv", "files")) else "true"
     _, refused = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), option: value}))
     assert refused.payload["error"]["code"] == "unsupported-remote-option"
@@ -856,7 +876,7 @@ def test_remote_create_still_refuses_commands_and_files(state, tmp_path, option)
 
 def test_remote_create_accepts_the_retention_and_continue_options(state, tmp_path):
     directory, _ = state
-    session, root = _create_session(tmp_path, directory)
+    session, root = _session_with_root(tmp_path, directory)
     _, created = _command(session, CommandRequest("mission.create", {
         "prompt": "x", "cwd": str(root), "providers": "codex", "auto_continue": True, "include_config": True,
         "log_max_bytes": 2048, "log_rotations": 1, "log_retained_runs": 5, "capacity_refresh_seconds": 30}))
@@ -879,7 +899,81 @@ def test_worker_config_validates_verifier_declarations(tmp_path, monkeypatch):
 
 def test_an_explicit_verifier_timeout_wins_even_when_it_equals_the_default(state, tmp_path, monkeypatch):
     directory, _ = state
-    session, root = _create_session(tmp_path, directory)
+    session, root = _session_with_root(tmp_path, directory)
     _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["true"]\ntimeout_seconds = 90\n')
     _, created = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "verifier_name": "unit", "verifier_timeout": 300}))
     assert created.payload["result"]["mission"]["config"]["verifier"]["timeout_seconds"] == 300.0
+
+
+def _create_session(directory, root):
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(root)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(session, generation=2)
+    return session
+
+
+def _mission_count(directory):
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        return store.db.execute("SELECT COUNT(*) FROM missions").fetchone()[0]
+
+
+def test_duplicate_mission_create_returns_the_first_result_and_creates_one_mission(state, tmp_path):
+    """FIND-003: the coordinator re-sends a command whose result was lost; mission.create has no id of its own to deduplicate on."""
+    directory, _ = state
+    session = _create_session(directory, tmp_path)
+    before = _mission_count(directory)
+    request = CommandRequest("mission.create", {"prompt": "new work", "cwd": str(tmp_path), "providers": "codex"}, request_id="create-1")
+    _, first = _command(session, request)
+    ack, again = _command(session, request)
+    assert first.payload["outcome"] == "applied"
+    assert ack.payload["status"] == "duplicate" and again.payload == first.payload
+    assert _mission_count(directory) == before + 1
+
+
+def test_duplicate_mission_delete_returns_the_first_result_not_not_found(state, tmp_path):
+    directory, mission_id = state
+    session = _create_session(directory, tmp_path)
+    request = CommandRequest("mission.delete", {"confirm": True}, mission_id=mission_id, request_id="delete-1")
+    _, first = _command(session, request)
+    _, again = _command(session, request)
+    assert first.payload["outcome"] == "applied", first.payload
+    assert again.payload == first.payload
+    other = CommandRequest("mission.delete", {"confirm": True}, mission_id=mission_id, request_id="delete-2")
+    assert _command(session, other)[1].payload["outcome"] != "applied"  # a different request id really is a new attempt
+
+
+@pytest.mark.parametrize("operation", ["proposal.create", "proposal.accept", "mission.finish", "worker.restore", "mission.settings.patch",
+                                       "mission.rotation.put", "worker.gc", "mission.start", "mission.suspend_until_credits"])
+def test_every_mutating_operation_runs_once_per_request_id(state, tmp_path, monkeypatch, operation):
+    directory, mission_id = state
+    session = _create_session(directory, tmp_path)
+    runs = []
+
+    def slow_execute(request):
+        runs.append(request.request_id)  # stands for an operation that takes longer than the coordinator's re-send interval
+        return worker.commands.CommandResult(request.request_id, request.operation, "applied", result={"run": len(runs)})
+
+    monkeypatch.setattr(worker.commands, "execute", slow_execute)
+    monkeypatch.setattr(session, "_policy_error", lambda request, spec: None)
+    spec = worker.commands.OPERATIONS.get(operation)
+    assert spec is not None and spec.mutating, operation
+    request = CommandRequest(operation, mission_id=mission_id, request_id=f"once-{operation}")
+    first = _command(session, request)[1]
+    for _ in range(2):  # re-sent frames queued behind the running copy are handled after it, one at a time
+        assert _command(session, request)[1].payload == first.payload
+    assert runs == [f"once-{operation}"]
+
+
+def test_outcome_ledger_is_private_bounded_and_pruned(tmp_path, monkeypatch):
+    now = [1_000_000.0]
+    ledger = worker.OutcomeLedger(tmp_path / "worker" / "outcomes.sqlite3", clock=lambda: now[0])
+    monkeypatch.setattr(worker, "OUTCOMES_KEEP", 5)
+    for index in range(8):
+        now[0] += 1
+        ledger.record(f"r{index}", {"outcome": "applied", "n": index})
+    assert ledger.get("r0") is None and ledger.get("r2") is None and ledger.get("r7") == {"outcome": "applied", "n": 7}
+    assert (ledger.path.stat().st_mode & 0o777) == 0o600
+    now[0] += worker.OUTCOMES_KEEP_SECONDS + 1
+    ledger.record("late", {"outcome": "applied"})
+    assert ledger.get("r7") is None and ledger.get("late") is not None

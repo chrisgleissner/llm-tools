@@ -659,8 +659,12 @@ fn clean(s: &str) -> String {
 
 // ---------------------------------------------------------------- handlers: auth
 
-async fn healthz() -> Response {
-    json_ok(StatusCode::OK, json!({"status": "ok"}))
+async fn healthz(State(st): State<St>) -> Response {
+    // FIND-004: an audit write that failed and has not succeeded since is a health fault. The database is touched only while a fault is recorded (a retried audit write, at most every 2 s).
+    match st.db.audit_fault_rechecked() {
+        None => json_ok(StatusCode::OK, json!({"status": "ok"})),
+        Some(fault) => json_ok(StatusCode::SERVICE_UNAVAILABLE, json!({"status": "fault", "faults": [fault]})),
+    }
 }
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote) -> ApiResult {
@@ -3044,7 +3048,15 @@ async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m:
         ));
     }
     let request_value = Value::Object(request.clone());
-    let row = match st.db.command_insert(target, operation, mutating, &request_value)? {
+    // A new mutating command and its audit entry are stored in one transaction (FIND-004): a failed audit write
+    // fails the submission with a 5xx and leaves no command behind.
+    let detail = format!(
+        "worker={target} operation={operation} request_id={request_id} mission={}",
+        clean(request.get("mission_id").and_then(Value::as_str).unwrap_or(""))
+    );
+    let actor = p.actor();
+    let audit = mutating.then_some((actor.as_str(), "command.submit", detail.as_str(), ip.as_str()));
+    let row = match st.db.command_insert_audited(target, operation, mutating, &request_value, audit)? {
         InsertOutcome::Conflict => {
             return Err(err(
                 StatusCode::CONFLICT,
@@ -3062,13 +3074,6 @@ async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m:
         }
         InsertOutcome::Existing(row) => row,
         InsertOutcome::New(row) => {
-            if mutating {
-                let detail = format!(
-                    "worker={target} operation={operation} request_id={request_id} mission={}",
-                    clean(request.get("mission_id").and_then(Value::as_str).unwrap_or(""))
-                );
-                st.db.audit(&p.actor(), "command.submit", &detail, &ip);
-            }
             st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
             let mut payload = request.clone();
             payload.insert("target".into(), json!("local"));

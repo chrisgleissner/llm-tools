@@ -628,6 +628,11 @@ This replaces the 1200 s warm-up recorded in D16. The controller memory slope is
 
 The soak items `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore` are deferred to 1.6.0. Each needs a coordinator change (a task count in diagnostics, a native clock source, or a query of unfinished commands per worker). Until then the thread count, the `LD_PRELOAD` clock shim and the `db-corrupt-page` restore fault cover them in part.
 
+## D52 Lost frames and lost audit writes in the coordinator (FIND-003, FIND-004)
+
+- A lost command or result frame is repaired by re-sending, not by a protocol change. The coordinator re-sends a mutating command that has been idle for 10 s, checked every 5 s. The worker is responsible for running each mutating request id at most once: it records every mutating result in a private outcome ledger before it answers, and answers a duplicate from the ledger. A crash after the effect and before the record can still run a command once more after a restart; `protocol.md` states this window.
+- A failed audit write fails the action where the action and its audit row can share one transaction (`command.submit`). Where they cannot, because the action has already taken effect, the failure is reported as a health fault (`/healthz` 503 `audit-write-failed`) until an audit write succeeds again.
+
 ## D53 Old mode names are normalised on read, not migrated (FIND-018)
 
 Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
