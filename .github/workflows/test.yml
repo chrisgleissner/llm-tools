@@ -359,6 +359,38 @@ jobs:
 
   # Native ARM64 (GitHub-hosted ubuntu-24.04-arm, Cobalt 100). This is not a Raspberry Pi: the
   # figures show behaviour on the arm64 architecture and under Pi-like limits, not Pi speed.
+  first-success:
+    name: First-success walkthrough (PRD-001, under 5 minutes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the release coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Install tmux and the project
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Walk through install, enrol, mission and live events with a timer
+        # Throw-away state and runtime directories and a fake provider; the script fails past 300 seconds.
+        run: python scripts/first_success_walkthrough.py --coordinator-bin coordinator/target/release/bridge-coordinator | tee -a "$GITHUB_STEP_SUMMARY"
+
   arm64-coordinator:
     name: ARM64 coordinator (lint, tests, Python integration)
     runs-on: ubuntu-24.04-arm
