@@ -29,7 +29,7 @@ SPEC_GROUPS = {
     "NET": 10, "AUTH": 10, "SEC": 9, "WEB": 12, "DATA": 7, "OPS": 5, "TEST": 17, "QUAL": 10, "CONV": 12,
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6, "PRD": 38,
-    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 28, "PAR": 14,
+    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 29, "PAR": 14,
     "UXR": 57, "FIND": 20, "PROV": 13, "ORCH": 14, "LB": 4, "DOCS": 4,
 }
 SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000", "DOG-017", "DOG-018", "DOG-019", "DOG-020", "DOG-021", "DOG-024", "DOG-025", "DOG-026"}

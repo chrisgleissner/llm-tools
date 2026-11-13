@@ -28,3 +28,4 @@ Requirement text is taken from spec-addendum-2026-11-06.md, spec-addendum-2026-1
 - DOG-026: A live refresh never replaces a row element that the pointer or keyboard focus is on; rows of every live-refreshing list in the web console are keyed and updated in place.
 - DOG-027: `llm-bridge finish` typed `/quit` into Codex without submitting it. Test with the fake provider that requires the submit key.
 - DOG-028: An open overflow menu in the web console survives live refreshes; a click on one of its items always reaches a connected element.
+- DOG-029: Attaching to a station fits the tmux window to the terminal before attach, so a transient screen is not drawn at the old size.

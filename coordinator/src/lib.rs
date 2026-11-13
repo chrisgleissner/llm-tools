@@ -4,12 +4,14 @@
 
 pub mod admin_reset;
 pub mod auth;
+pub mod backups;
 pub mod certs;
 pub mod client_ip;
 pub mod config;
 pub mod config_check;
 pub mod cursor;
 pub mod db;
+pub mod diagnostics;
 pub mod http;
 pub mod hub;
 pub mod init;
@@ -35,7 +37,11 @@ pub fn db_path(dir: &Path) -> PathBuf {
 
 /// Current UTC time as `YYYYMMDDTHHMMSSZ` (file name suffixes).
 pub fn utc_stamp() -> String {
-    let t = now();
+    utc_stamp_at(now())
+}
+
+/// `YYYYMMDDTHHMMSSZ` for the epoch second `t`.
+pub fn utc_stamp_at(t: i64) -> String {
     let (y, m, d) = certs::civil_from_days(t.div_euclid(86_400));
     let s = t.rem_euclid(86_400);
     format!("{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z", s / 3600, s % 3600 / 60, s % 60)

@@ -291,6 +291,20 @@ class CapacityRefreshWorker:
                 self._discard_connection()
                 raise
 
+    def _budget_tick(self, mission: dict[str, Any]) -> None:
+        """On the heartbeat: hold a running mission whose wall-clock limit has passed.
+
+        The other limits change only when a run starts, so the controller checks them at its own boundaries. The hold
+        pauses the mission; the provider run in flight is never killed and finishes first.
+        """
+        if str(mission.get("status")) != "RUNNING" or "wall_seconds" not in (mission.get("config") or {}).get("budget", {}):
+            return
+        from . import bridge_budget
+
+        with self._write_lock:
+            if not self._stop.is_set():
+                bridge_budget.hold_if_reached(self._connection(), mission, only=("wall_seconds",))
+
     def _record_refresh(self, observation: dict[str, Any]) -> None:
         """Record a capacity observation, or bring the previous row up to date when nothing changed.
 
@@ -435,6 +449,7 @@ class CapacityRefreshWorker:
                         **({"main_loop_progress": self.progress.value} if self.progress is not None else {}),
                         "observed_at": utc_now(),
                     })
+                    self._budget_tick(mission)
                 except Exception as exc:
                     self._record("controller-heartbeat-error", {"reason": type(exc).__name__, "observed_at": utc_now()})
                 next_heartbeat = time.monotonic() + self.heartbeat_seconds
