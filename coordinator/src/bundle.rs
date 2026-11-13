@@ -116,6 +116,11 @@ pub const LOG_EVENTS: &[LogEvent] = &[
         prefix: "bridge-coordinator ",
     },
     LogEvent {
+        id: "database_free_space",
+        level: "warn",
+        prefix: "database file free space: ",
+    },
+    LogEvent {
         id: "shutdown",
         level: "info",
         prefix: "shutting down",

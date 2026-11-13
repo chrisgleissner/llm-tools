@@ -118,7 +118,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     if let Ok((free, total, incremental)) = db.free_space() {
         if !incremental && free >= 32 * 1024 * 1024 && free * 4 >= total {
             eprintln!(
-                "bridge-coordinator: {} MiB of the {} MiB database file is free space that this file cannot give back; \
+                "bridge-coordinator: database file free space: {} MiB of {} MiB is free space that this file cannot give back; \
                  stop the service and run `bridge-coordinator compact` to shrink it (backups and later growth stay small afterwards)",
                 free >> 20,
                 total >> 20

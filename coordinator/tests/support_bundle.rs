@@ -430,31 +430,116 @@ fn unrecognized_lines_are_counted_not_copied() {
 
 #[test]
 fn every_eprintln_in_the_source_has_an_allow_listed_event() {
+    // These dynamic-only messages have no static prefix to match. They are command-line
+    // output and are deliberately exempt from the support log archive.
+    const EXEMPT_CALLS: &[(&str, &str)] = &[
+        // progress lines of `backup --verbose`, command line only
+        ("ops.rs", "eprintln!(\"{text}\")"),
+        // complete configuration error line, command line only
+        ("main.rs", "eprintln!(\"{e}\")"),
+        // newline after a hidden password prompt
+        ("admin_reset.rs", "eprintln!()"),
+    ];
     let mut failures = Vec::new();
+    let mut seen_exemptions = std::collections::HashSet::new();
+    let mut observed_prefixes = std::collections::HashSet::new();
     for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
         let source = std::fs::read_to_string(&path).unwrap();
-        for (offset, _) in source.match_indices("eprintln!(") {
-            let tail = source[offset + "eprintln!(".len()..].trim_start();
-            // Empty invocations have no message; all other invocations use a literal.
-            if tail.starts_with(')') {
-                continue;
+        let mut skipped = Vec::new();
+        let mut line_start = 0;
+        for line in source.split_inclusive('\n') {
+            if line.trim() == "#[cfg(test)]" {
+                if let Some(open) = source[line_start + line.len()..].find('{') {
+                    let open = line_start + line.len() + open;
+                    let mut depth = 0usize;
+                    let mut end = source.len();
+                    for (i, b) in source.as_bytes()[open..].iter().enumerate() {
+                        if *b == b'{' {
+                            depth += 1;
+                        }
+                        if *b == b'}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = open + i + 1;
+                                break;
+                            }
+                        }
+                    }
+                    skipped.push((line_start, end));
+                }
             }
-            let literal = tail.strip_prefix('"').expect("eprintln must start with a string literal");
-            let prefix = literal.split(['{', '"']).next().unwrap();
-            let prefix = prefix.strip_prefix("bridge-coordinator: ").unwrap_or(prefix);
-            if prefix.is_empty() {
-                continue;
-            }
-            if !bundle::LOG_EVENTS.iter().any(|e| !e.prefix.is_empty() && prefix.starts_with(e.prefix)) {
-                failures.push(format!("{}:{}: {prefix:?}", path.display(), source[..offset].lines().count()));
+            line_start += line.len();
+        }
+        for macro_name in ["eprintln!", "println!", "panic!"] {
+            for (offset, _) in source.match_indices(macro_name) {
+                let before_ok = offset == 0 || !source.as_bytes()[offset - 1].is_ascii_alphanumeric() && source.as_bytes()[offset - 1] != b'_';
+                if !before_ok || source.as_bytes().get(offset + macro_name.len()) != Some(&b'(') {
+                    continue;
+                }
+                if skipped.iter().any(|(start, end)| (*start..*end).contains(&offset)) {
+                    continue;
+                }
+                let mut depth = 1usize;
+                let mut close = offset + macro_name.len() + 1;
+                for (i, b) in source.as_bytes()[close..].iter().enumerate() {
+                    if *b == b'(' {
+                        depth += 1;
+                    }
+                    if *b == b')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            close += i;
+                            break;
+                        }
+                    }
+                }
+                let statement = source[offset..=close].trim();
+                let line = source[..offset].lines().count() + 1;
+                if macro_name == "println!" && (file == "main.rs" || file == "init.rs") {
+                    continue;
+                }
+                if let Some((index, _)) = EXEMPT_CALLS.iter().enumerate().find(|(_, (f, s))| *f == file && *s == statement) {
+                    seen_exemptions.insert(index);
+                    continue;
+                }
+                let args = source[offset + macro_name.len() + 1..close].trim();
+                if args.starts_with(')') {
+                    failures.push(format!("{file}:{line}: empty call is not exempt: "));
+                    continue;
+                }
+                let Some(literal) = args.strip_prefix('"') else {
+                    failures.push(format!("{file}:{line}: call does not start with a string literal: "));
+                    continue;
+                };
+                let mut prefix = literal.split(['{', '"']).next().unwrap_or("");
+                prefix = prefix.strip_prefix("bridge-coordinator: ").unwrap_or(prefix);
+                if prefix.is_empty() {
+                    failures.push(format!("{file}:{line}: empty static prefix: {prefix:?}"));
+                    continue;
+                }
+                observed_prefixes.insert(prefix.to_string());
+                if !bundle::LOG_EVENTS.iter().any(|e| e.prefix == prefix) {
+                    failures.push(format!("{file}:{line}: no exact allow-list entry: {prefix:?}"));
+                }
             }
         }
     }
-    assert!(failures.is_empty(), "missing log events:\n{}", failures.join("\n"));
+    for (index, (file, statement)) in EXEMPT_CALLS.iter().enumerate() {
+        if !seen_exemptions.contains(&index) {
+            failures.push(format!("stale exemption {file}: {statement}"));
+        }
+    }
+    for event in bundle::LOG_EVENTS {
+        if !observed_prefixes.contains(event.prefix) {
+            failures.push(format!("{} has no matching call site: {:?}", event.id, event.prefix));
+        }
+    }
+    assert!(failures.is_empty(), "log allow-list failures:\n{}", failures.join("\n"));
     for (index, event) in bundle::LOG_EVENTS.iter().enumerate() {
         assert!(!event.prefix.is_empty());
         assert!(event.id.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
