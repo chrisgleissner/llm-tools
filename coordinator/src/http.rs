@@ -65,6 +65,7 @@ pub struct AppState {
     pub big_bodies: Arc<Semaphore>,
     pub shutdown: watch::Receiver<bool>,
     pub web_dir: Option<PathBuf>,
+    pub monitor: crate::diagnostics::Monitor,
 }
 
 pub type St = Arc<AppState>;
@@ -3284,6 +3285,20 @@ async fn diagnostics(State(st): State<St>, _a: Authed) -> ApiResult {
     // Messages and bytes since start by direction (worker_in, worker_out, browser_out) and message type.
     d["link_bytes"] = st.hub.link_bytes();
     d["sqlite_version"] = json!(rusqlite::version());
+    // PRD-011/013: `status`, per-value `checks` ({value, status, fix}) and the `backup` summary.
+    let runtime = crate::diagnostics::Runtime {
+        uptime_secs: st.started.elapsed().as_secs(),
+        connected: st.hub.connected(),
+        monitor: &st.monitor,
+    };
+    let db = st.db.clone();
+    let (data_dir, cfg) = (st.data_dir.clone(), st.cfg.clone());
+    let report = crate::diagnostics::collect(&data_dir, &cfg, &db, Some(runtime)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", e))?;
+    if let (Some(dst), Some(src)) = (d.as_object_mut(), report.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
     Ok(json_ok(StatusCode::OK, d))
 }
 

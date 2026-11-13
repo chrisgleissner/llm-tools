@@ -4,12 +4,14 @@
 
 pub mod admin_reset;
 pub mod auth;
+pub mod backups;
 pub mod certs;
 pub mod client_ip;
 pub mod config;
 pub mod config_check;
 pub mod cursor;
 pub mod db;
+pub mod diagnostics;
 pub mod http;
 pub mod hub;
 pub mod init;

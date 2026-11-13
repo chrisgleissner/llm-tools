@@ -24,6 +24,10 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   backup-check --backup-dir DIR [--max-age-hours N] [--full]
                                 (newest *.sqlite3 in DIR: opens, passes quick_check (--full: integrity_check)
                                  and is at most N hours old, default 24; exit 0 fresh, 1 not)
+  diagnostics [--json]          (checks with value, status ok|warn|fail and a fix text: database size, queue depth,
+                                 disk space, last backup age and next due, certificate expiry. Uptime, connected
+                                 workers and event lag need the running service (GET /api/v1/diagnostics).
+                                 Nothing leaves this host. Exit 0 ok or warn, 1 when a check fails)
   restore --input FILE          (needs the server stopped)
   compact                       (needs the server stopped; rebuilds the database file without free pages and
                                  with incremental auto-vacuum; same options as backup; keeps the old file)
@@ -66,6 +70,7 @@ struct Args {
     backup_dir: Option<PathBuf>,
     force: bool,
     full: bool,
+    json: bool,
     budget_minutes: Option<u64>,
     max_age_hours: Option<u64>,
     max_mb_s: Option<u64>,
@@ -94,6 +99,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         backup_dir: None,
         force: false,
         full: false,
+        json: false,
         budget_minutes: None,
         max_age_hours: None,
         max_mb_s: None,
@@ -123,6 +129,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             "--backup-dir" => a.backup_dir = Some(value("--backup-dir")?.into()),
             "--force" => a.force = true,
             "--full" => a.full = true,
+            "--json" => a.json = true,
             "--budget-minutes" => a.budget_minutes = Some(whole(&value("--budget-minutes")?, "--budget-minutes")?),
             "--max-age-hours" => a.max_age_hours = Some(whole(&value("--max-age-hours")?, "--max-age-hours")?),
             "--max-mb-s" => a.max_mb_s = Some(whole(&value("--max-mb-s")?, "--max-mb-s")?),
@@ -234,6 +241,20 @@ async fn run(args: Args) -> Result<(), String> {
                 s.schema_version,
                 if args.full { "integrity_check" } else { "quick_check" }
             );
+            Ok(())
+        }
+        ["diagnostics"] => {
+            let cfg = config::Config::load(&dir)?;
+            let db = open_db(&dir)?;
+            let report = bridge_coordinator::diagnostics::collect(&dir, &cfg, &db, None)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+            } else {
+                print!("{}", bridge_coordinator::diagnostics::render_text(&report));
+            }
+            if report["status"] == "fail" {
+                return Err("one or more checks failed".into());
+            }
             Ok(())
         }
         ["compact"] => {

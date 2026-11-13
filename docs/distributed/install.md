@@ -308,6 +308,27 @@ the new `ca.pem` in every browser and re-enrol every worker. Workers trust the s
 
 ## Backup and restore
 
+Automatic backups. The running coordinator backs itself up every 24 hours (`backup_interval_hours`),
+keeps the newest 7 (`backup_keep`) and stores them in `backups/` inside the data directory
+(`backup_dir` changes the place; the directory is mode 0700 and the files 0600). The first one is taken a
+minute after the first start. The backup uses the paced implementation described below, so it does not stop
+serving. When the 15 minute budget or the free disk space does not allow a backup, it is skipped, the reason
+is logged and shown by `bridge-coordinator diagnostics` and in `/api/v1/diagnostics`, and the older backups
+stay. Set `backup_interval_hours = 0` in `config.toml` to turn it off (then schedule `backup` yourself).
+The backups sit on the same disk as the database, so they do not survive a lost disk or card. Copying them
+off the device is the operator's job (the coordinator never sends anything off the host), for example from
+another machine, every night:
+`rsync -a --include='coordinator-*.sqlite3' --exclude='*' bridge@coordinator:/var/lib/bridge-coordinator/backups/ /backup/coordinator/`
+(`scripts/coordinator_offsite_backup.py`, below, adds verification, compression and encryption).
+A backup that is running when the service stops is interrupted, its partial file is removed and the
+attempt is recorded as `cancelled`; the next start schedules a new one.
+`bridge-coordinator diagnostics` shows the age and size of the newest one and when the next is due.
+
+To restore from an automatic backup: stop the service, run
+`bridge-coordinator restore --data-dir DIR --input DIR/backups/coordinator-<UTC>.sqlite3`
+(it checks the file, keeps the old database as `coordinator.sqlite3.before-restore-<UTC>` and prints the credentials that
+are active afterwards), start the service. Workers replay the events the backup lacks.
+
 `bridge-coordinator backup --data-dir DIR --output FILE` writes a compacted, consistent
 copy of the database while the server runs. The file is mode 0600, an existing file is
 never overwritten, and `integrity_check` must pass on the copy before the file appears

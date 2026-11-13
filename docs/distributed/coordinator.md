@@ -251,7 +251,59 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/stream` | WebSocket; pushes change notices: `worker` (state), `event`, `command` and `terminal`. A notice never carries events, request parameters or results, so its size does not depend on the data: see "Browser stream" below. |
 | GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation; the frame and backlog bounds are specified there and the session counts are in the limits table below (over the cap: `x` frame, close 1013). Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
 | GET | `/worker/terminal/{session_id}` | Worker side of a session; worker bearer token; accepted once, only for a session opened for that worker. |
-| GET | `/diagnostics` | versions, uptime, RSS, DB size, connected workers, queue depths, and `link_bytes`: messages and bytes since start by direction (`worker_in`, `worker_out`, `browser_out`) and message type. |
+| GET | `/diagnostics` | Admin only. Versions, uptime, RSS, DB size, connected workers, queue depths, and `link_bytes` (messages and bytes since start by direction and message type), plus `status` (worst of all checks), `checks` and `backup`; see Diagnostics and backups below. |
+
+### Diagnostics and backups (PRD-011, PRD-013)
+
+Automatic backups are on by default. The serving process takes a backup every
+`backup_interval_hours` (24) with the same `VACUUM INTO` implementation as `bridge-coordinator backup`
+(read snapshot, paced write rate, 15 minute budget, free-space check, `integrity_check`), keeps the newest
+`backup_keep` (7) as `coordinator-<UTC>.sqlite3` in `backup_dir` (default `<data dir>/backups`, directory
+0700, files 0600) and removes older ones only after a new one succeeded. The first backup of a process
+with none is taken a minute after start. An attempt that the budget or the free-space check refuses is
+logged and recorded as `skipped` with the reason, and retried after at most an hour; any other error is
+`failed`. Every attempt is recorded in `backup-status.json` in the backup directory. Config keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `backup_interval_hours` | 24 | Hours between backups; `0` turns automatic backups off. |
+| `backup_keep` | 7 | Backups kept (1 to 365). |
+| `backup_dir` | unset | Directory; unset means `backups` in the data directory. |
+| `backup_interval_seconds` | 0 | Test hook: when above 0, replaces `backup_interval_hours`. |
+
+`GET /api/v1/diagnostics` (admin) and `bridge-coordinator diagnostics [--json]` return `status` (`ok`,
+`warn` or `fail`, the worst check), `checks` and `backup`. Each check is
+`{value, status, fix}`; `fix` is text only when the status is not `ok`. `backup` holds `enabled`,
+`interval_seconds`, `keep`, `dir`, `count`, `last_backup_at`, `last_backup_age_seconds`,
+`last_backup_bytes`, `last_attempt_at`, `last_result` (`ok`, `skipped`, `failed`), `last_reason` and
+`next_due_at`. The command line reads the database and files directly, so it cannot know uptime,
+connected workers, event lag or growth; those checks show `null` there. It exits 1 when a check fails.
+Nothing is sent off the host. An update-availability check is not implemented; it would need an
+outbound request and would be opt-in only.
+
+All thresholds are in one table, `diagnostics::THRESHOLDS`:
+
+| Check | warn | fail |
+| --- | --- | --- |
+| `uptime_seconds` | below 60 s | none |
+| `connected_workers` | fewer connected than registered | registered workers, none connected |
+| `command_queue_depth` (all workers) | 50 or more | 100 or more |
+| `event_lag` (per connected worker: seconds since the last message; connected workers refresh it every 600 s) | 1500 s | 3600 s |
+| `database_size_bytes` | 1 GiB | 4 GiB |
+| `database_growth_bytes_per_day` (projected, after an hour of samples) | 128 MiB | none |
+| `disk_free_bytes` (data directory) | 1 GiB or less | 256 MiB or less |
+| `last_backup`, automatic backups on | older than 2 intervals, no backup an hour after start, or the last attempt was skipped or failed | older than 7 intervals |
+| `last_backup`, automatic backups off | older than 48 h, or none | older than 7 days |
+| `server_certificate` | under 30 days left | under 7 days or expired |
+| `ca_certificate` | under 90 days left | under 30 days |
+| `version` | none | none |
+
+The coordinator does not know a worker's newest event, so event lag is the silence of the worker link,
+not a count of missing events.
+
+Restore stays on the command line (`bridge-coordinator restore`, service stopped; see `install.md`).
+A guided restore in the web console needs an administrator step-up (SEC2-008), an integrity check
+before replacing the file and a restart of the service; it is not implemented in the API.
 
 ### Browser stream
 
