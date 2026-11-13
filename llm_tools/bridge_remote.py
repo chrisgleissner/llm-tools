@@ -409,7 +409,9 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         }
         if args.verifier_name:
             params["verifier_name"] = args.verifier_name
-        for option, default in (("verifier_timeout", 300), ("log_max_bytes", 4 * 1024 * 1024), ("log_rotations", 3),
+        if args.verifier_timeout is not None:
+            params["verifier_timeout"] = args.verifier_timeout
+        for option, default in (("log_max_bytes", 4 * 1024 * 1024), ("log_rotations", 3),
                                 ("log_retained_runs", 20), ("capacity_refresh_seconds", 60)):
             if getattr(args, option) != default:
                 params[option] = getattr(args, option)

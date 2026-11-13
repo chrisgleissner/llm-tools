@@ -17,6 +17,9 @@ struct Spec<'a> {
     /// Providers that the worker's latest usage snapshot reports as ready, or `None` for no snapshot.
     ready: Option<&'a [&'a str]>,
     running: usize,
+    roots: &'a [&'a str],
+    /// Extra keys of the stored usage snapshot, such as `routes`.
+    extra: Value,
 }
 
 fn spec<'a>(name: &'a str, ready: Option<&'a [&'a str]>, running: usize) -> Spec<'a> {
@@ -26,10 +29,15 @@ fn spec<'a>(name: &'a str, ready: Option<&'a [&'a str]>, running: usize) -> Spec
         control: true,
         ready,
         running,
+        roots: &["/srv/work"],
+        extra: json!({}),
     }
 }
 
 async fn fleet(specs: Vec<Spec<'_>>) -> Fleet {
+    // Placement waits at most this long for a usage snapshot that it had to fetch.
+    static SHORT_WAIT: std::sync::Once = std::sync::Once::new();
+    SHORT_WAIT.call_once(|| std::env::set_var("BRIDGE_PLACEMENT_USAGE_WAIT_MS", "2500"));
     let env = boot().await;
     let api = env.admin().await;
     let mut connections = Vec::new();
@@ -44,7 +52,7 @@ async fn fleet(specs: Vec<Spec<'_>>) -> Fleet {
         hello.insert(
             "worker_policy".into(),
             json!({"allow_control": s.control, "allow_terminal_view": false, "allow_create": true,
-                   "allow_root": ["/srv/work"], "allow_power": false, "allow_restore": false}),
+                   "allow_root": s.roots, "allow_power": false, "allow_restore": false}),
         );
         let capabilities = json!([
             {"operation":"mission.create","mutating":true},
@@ -67,7 +75,11 @@ async fn fleet(specs: Vec<Spec<'_>>) -> Fleet {
             env.srv
                 .state
                 .db
-                .command_done(s.name, &id, &json!({"outcome": "applied", "result": {"providers": providers}}))
+                .command_done(
+                    s.name,
+                    &id,
+                    &json!({"outcome": "applied", "result": {"providers": providers, "routes": s.extra["routes"]}}),
+                )
                 .unwrap();
         }
         if s.online {
@@ -180,5 +192,173 @@ async fn a_remote_verifier_command_or_file_is_refused_and_a_verifier_name_is_for
     assert_eq!(status, 202, "{created}");
     assert_eq!(created["request"]["params"]["verifier_name"], "unit");
     assert_eq!(created["request"]["params"]["auto_continue"], true);
+    f.env.stop().await;
+}
+
+async fn post_with_key(f: &Fleet, key: &str, body: Value) -> (u16, Value) {
+    f.api
+        .send(f.api.rb(reqwest::Method::POST, "/api/v1/missions").header("idempotency-key", key).json(&body))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_with_the_same_idempotency_key_repeats_the_original_placement() {
+    let f = fleet(vec![spec("alpha", Some(&["codex"]), 0), spec("beta", Some(&["codex"]), 4)]).await;
+    let body = create_body(json!({"providers": "codex"}));
+    let (status, first) = post_with_key(&f, "create-1", body.clone()).await;
+    assert_eq!(status, 202, "{first}");
+    assert_eq!(first["placement"]["worker"], "alpha");
+    // Alpha now forbids control, so a fresh placement would choose beta.
+    let mut hello = serde_json::Map::new();
+    hello.insert("missions".into(), json!([]));
+    hello.insert(
+        "worker_policy".into(),
+        json!({"allow_control": false, "allow_terminal_view": false, "allow_create": true,
+               "allow_root": ["/srv/work"], "allow_power": false, "allow_restore": false}),
+    );
+    let capabilities = json!([{"operation":"mission.create","mutating":true}]);
+    f.env
+        .srv
+        .state
+        .db
+        .worker_hello("alpha", "id-alpha", &hello, &capabilities, "203.0.113.9")
+        .unwrap();
+    let (status, fresh) = f.api.post("/api/v1/missions", body.clone()).await;
+    assert_eq!(status, 202, "{fresh}");
+    assert_eq!(fresh["placement"]["worker"], "beta");
+    let (status, retry) = post_with_key(&f, "create-1", body).await;
+    assert_eq!(status, 202, "{retry}");
+    assert_eq!(retry["placement"], first["placement"]);
+    assert_eq!(retry["request_id"], first["request_id"]);
+    f.env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placement_matches_the_folder_against_allowed_roots_by_path_component() {
+    let mut inside = spec("alpha", Some(&["codex"]), 5);
+    inside.roots = &["/srv/work"];
+    let mut prefix_only = spec("beta", Some(&["codex"]), 0);
+    prefix_only.roots = &["/srv/wor"];
+    let mut elsewhere = spec("gamma", Some(&["codex"]), 0);
+    elsewhere.roots = &["/home/other"];
+    let f = fleet(vec![inside, prefix_only, elsewhere]).await;
+    let (status, created) = f
+        .api
+        .post("/api/v1/missions", create_body(json!({"providers": "codex", "cwd": "/srv/work/project"})))
+        .await;
+    assert_eq!(status, 202, "{created}");
+    assert_eq!(created["placement"]["worker"], "alpha");
+    let (status, escaped) = f
+        .api
+        .post("/api/v1/missions", create_body(json!({"providers": "codex", "cwd": "/srv/work/../secret"})))
+        .await;
+    assert_eq!(status, 409, "{escaped}");
+    let reasons = &escaped["error"]["details"]["workers"];
+    assert_eq!(reasons["alpha"], "folder-not-allowed");
+    assert_eq!(reasons["beta"], "folder-not-allowed");
+    assert_eq!(reasons["gamma"], "folder-not-allowed");
+    f.env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placement_fetches_missing_snapshots_together_and_reuses_a_pending_fetch() {
+    let f = fleet(vec![spec("alpha", None, 0), spec("beta", None, 0)]).await;
+    let db = f.env.srv.state.db.clone();
+    let request = json!({"schema_version": 1, "operation": "usage.snapshot", "params": {}, "mission_id": null,
+                         "target": "alpha", "request_id": "pre-alpha"});
+    db.command_insert("alpha", "usage.snapshot", false, &request).unwrap();
+    let answered = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let log = answered.clone();
+    let responder = tokio::spawn(async move {
+        for _ in 0..400 {
+            for (name, ready) in [("alpha", "codex"), ("beta", "claude")] {
+                if let Some(open) = db.open_command(name, "usage.snapshot", 0).unwrap() {
+                    let providers: Vec<Value> = ["codex", "claude"]
+                        .iter()
+                        .map(|p| json!({"provider": p, "available": true, "ready": *p == ready, "scopes": []}))
+                        .collect();
+                    db.command_done(name, &open.request_id, &json!({"outcome": "applied", "result": {"providers": providers}}))
+                        .unwrap();
+                    log.lock().unwrap().push((name.to_string(), open.request_id));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    let started = std::time::Instant::now();
+    let (status, created) = f.api.post("/api/v1/missions", create_body(json!({"providers": "codex"}))).await;
+    assert_eq!(status, 202, "{created}");
+    assert_eq!(created["placement"]["worker"], "alpha");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the fetches ran together and finished early"
+    );
+    responder.abort();
+    let answered = answered.lock().unwrap();
+    let alpha: Vec<&String> = answered.iter().filter(|(name, _)| name == "alpha").map(|(_, id)| id).collect();
+    let beta: Vec<&String> = answered.iter().filter(|(name, _)| name == "beta").map(|(_, id)| id).collect();
+    assert_eq!(alpha, vec!["pre-alpha"], "the pending fetch of alpha is reused, not repeated");
+    assert_eq!(beta.len(), 1);
+    assert!(beta[0].starts_with("placement-"));
+    f.env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placement_with_routes_uses_route_rows_and_treats_missing_data_as_unknown() {
+    let mut alpha = spec("alpha", Some(&["codex"]), 0);
+    alpha.extra = json!({"routes": [{"route": "fast", "provider": "codex", "available": false}]});
+    let mut beta = spec("beta", Some(&["codex"]), 2);
+    beta.extra = json!({"routes": [{"route": "fast", "provider": "codex", "available": true}]});
+    let f = fleet(vec![alpha, beta]).await;
+    let (status, created) = f.api.post("/api/v1/missions", create_body(json!({"routes": "fast"}))).await;
+    assert_eq!(status, 202, "{created}");
+    assert_eq!(created["placement"]["worker"], "beta");
+    assert!(created["placement"]["reason"].as_str().unwrap().contains("route fast available"));
+    let (status, unknown) = f.api.post("/api/v1/missions", create_body(json!({"routes": "mystery"}))).await;
+    assert_eq!(status, 202, "{unknown}");
+    assert_eq!(unknown["placement"]["worker"], "alpha");
+    assert!(unknown["placement"]["reason"].as_str().unwrap().contains("route readiness unknown"));
+    f.env.stop().await;
+
+    let mut only = spec("alpha", Some(&["codex"]), 0);
+    only.extra = json!({"routes": [{"route": "fast", "provider": "codex", "available": false}]});
+    let f = fleet(vec![only]).await;
+    let (status, refused) = f.api.post("/api/v1/missions", create_body(json!({"routes": "fast"}))).await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["error"]["details"]["workers"]["alpha"], "no requested route is available (fast)");
+    f.env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_restricted_to_some_workers_only_sees_those_workers_in_placement() {
+    let f = fleet(vec![
+        spec("alpha", Some(&["claude"]), 0),
+        spec("beta", Some(&["codex"]), 0),
+        spec("gamma", Some(&["codex"]), 0),
+    ])
+    .await;
+    let (status, token) = f
+        .api
+        .post(
+            "/api/v1/tokens",
+            json!({"name": "alpha-only", "scopes": ["admin"], "allowed_workers": ["alpha"]}),
+        )
+        .await;
+    assert_eq!(status, 201, "{token}");
+    let secret = token["secret"].as_str().unwrap().to_string();
+    let post = |body: Value| {
+        let rb = f.env.api().bare(reqwest::Method::POST, "/api/v1/missions").bearer_auth(&secret).json(&body);
+        async move {
+            let r = rb.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, refused) = post(create_body(json!({"providers": "codex"}))).await;
+    assert_eq!(status, 409, "{refused}");
+    let reasons = refused["error"]["details"]["workers"].as_object().unwrap();
+    assert_eq!(reasons.keys().collect::<Vec<_>>(), vec!["alpha"]);
+    let (status, placed) = post(create_body(json!({"providers": "claude"}))).await;
+    assert_eq!(status, 202, "{placed}");
+    assert_eq!(placed["placement"]["worker"], "alpha");
     f.env.stop().await;
 }

@@ -624,6 +624,16 @@ def _usage_scopes(rows: list[Any], provider: str, cfg: Any, usage: Any) -> list[
     return scopes
 
 
+def _usage_routes(usage: Any, cfg: Any) -> list[dict[str, Any]]:
+    """Configured routes as ``{route, provider, available}``; empty when none are configured or they cannot be read."""
+    try:
+        summary = usage.route_decision_summary(cfg)
+    except (Exception, SystemExit):  # noqa: BLE001 - route data is optional
+        return []
+    return [{"route": str(item.get("route")), "provider": str(item.get("provider")), "available": bool(item.get("available"))}
+            for item in summary if isinstance(item, dict) and item.get("route")]
+
+
 def _usage_collect() -> dict[str, Any]:
     from . import usage
 
@@ -650,7 +660,7 @@ def _usage_collect() -> dict[str, Any]:
             "ready": bool(provider_rows) and usage.provider_ready(rows, provider_rows[0].provider),
             "scopes": scopes,
         })
-    return {"source": source, "generated_at": generated_at, "providers": providers}
+    return {"source": source, "generated_at": generated_at, "providers": providers, "routes": _usage_routes(usage, cfg)}
 
 
 def _usage_snapshot(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -673,9 +683,9 @@ def _usage_snapshot(store: BridgeStore | None, request: CommandRequest, params: 
     value = outcome.get("value")
     if value is None:
         reason = "timeout" if thread.is_alive() else f"read-failed:{outcome.get('error', 'unknown')}"
-        return {"schema_version": 1, "available": False, "reason": reason, "observed_at": observed, "source": None, "providers": []}
+        return {"schema_version": 1, "available": False, "reason": reason, "observed_at": observed, "source": None, "providers": [], "routes": []}
     return {"schema_version": 1, "available": True, "reason": None, "observed_at": observed,
-            "source": value["source"], "providers": value["providers"]}
+            "source": value["source"], "providers": value["providers"], "routes": value["routes"]}
 
 
 _SWITCH_PARAMS = frozenset({"hold", "requeue"})
@@ -741,7 +751,7 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
                        "unsupported_options": Param(list, default=[], item=str),
                        "auto_continue": Param(bool, default=False), "include_config": Param(bool, default=False),
-                       "verifier_name": Param(str), "verifier_timeout": Param(float, default=300.0),
+                       "verifier_name": Param(str), "verifier_timeout": Param(float),
                        "log_max_bytes": Param(int, default=4 * 1024 * 1024), "log_rotations": Param(int, default=3),
                        "log_retained_runs": Param(int, default=20), "capacity_refresh_seconds": Param(int, default=60)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,

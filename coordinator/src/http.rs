@@ -2064,8 +2064,33 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
     )?;
     let (worker, placement) = match params.get("worker") {
         None | Some(Value::Null) => {
-            let (name, placement) = place_worker(&st, &p, &params).await?;
-            (name, Some(("placement", placement)))
+            // A retry with the same Idempotency-Key repeats the original placement, whatever the
+            // usage snapshots say now.
+            let key = headers.get("idempotency-key").and_then(|value| value.to_str().ok()).filter(|key| valid_id(key));
+            let earlier = match key {
+                Some(key) => st.db.command_get(key)?.filter(|row| row.operation == "mission.create"),
+                None => None,
+            };
+            if let Some(row) = earlier {
+                if !p.allows_worker(&row.worker) {
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "token-worker-denied",
+                        "request is outside this token's allowed workers",
+                    ));
+                }
+                let placement = key
+                    .and_then(|key| st.db.placement_get(key).transpose())
+                    .transpose()?
+                    .unwrap_or_else(|| json!({"worker": row.worker, "reason": "placed by an earlier request with this key"}));
+                (row.worker, Some(("placement", placement)))
+            } else {
+                let (name, placement) = place_worker(&st, &p, &params).await?;
+                if let Some(key) = key {
+                    st.db.placement_put(key, &placement)?;
+                }
+                (name, Some(("placement", placement)))
+            }
         }
         Some(Value::String(name)) => {
             if !p.allows_worker(name) {
@@ -2101,12 +2126,24 @@ async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, he
 
 /// A usage snapshot younger than this is used as it is; an older one is fetched again.
 const PLACEMENT_USAGE_MAX_AGE_SECS: i64 = 300;
-const PLACEMENT_USAGE_WAIT_MS: u64 = 5_000;
+/// Total time to wait for all usage snapshots a placement fetches. It matches the worker's own
+/// bound for `usage.snapshot`. `BRIDGE_PLACEMENT_USAGE_WAIT_MS` shortens it for tests.
+const PLACEMENT_USAGE_WAIT_MS: u64 = 20_000;
+/// A fetch started by an earlier placement that is younger than this is waited for, not repeated.
+const PLACEMENT_FETCH_REUSE_SECS: i64 = 25;
 const ACTIVE_MISSION_STATUSES: [&str; 4] = ["CREATED", "RUNNING", "PAUSED", "STOPPING"];
 
-fn requested_providers(params: &Map<String, Value>) -> Vec<String> {
+fn placement_usage_wait() -> Duration {
+    let ms = std::env::var("BRIDGE_PLACEMENT_USAGE_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(PLACEMENT_USAGE_WAIT_MS);
+    Duration::from_millis(ms)
+}
+
+fn split_names(params: &Map<String, Value>, key: &str) -> Vec<String> {
     params
-        .get("providers")
+        .get(key)
         .and_then(Value::as_str)
         .map(|text| {
             text.split(',')
@@ -2117,15 +2154,39 @@ fn requested_providers(params: &Map<String, Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The providers that the worker's latest usage snapshot reports as ready, or `None` when it has
-/// no snapshot younger than [`PLACEMENT_USAGE_MAX_AGE_SECS`] and one could not be fetched in time.
-async fn ready_providers(st: &St, worker: &crate::db::WorkerRow) -> Result<Option<Vec<String>>, ApiError> {
+/// True when `cwd` is inside one of `roots`, compared by path components, and has no `..` part.
+fn folder_allowed(cwd: &str, roots: &[&str]) -> bool {
+    let path = std::path::Path::new(cwd);
+    if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return false;
+    }
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// The latest usage snapshot result (`{providers, routes, ...}`) of each worker in `workers`.
+/// A snapshot at most [`PLACEMENT_USAGE_MAX_AGE_SECS`] old is used as it is. For the others one
+/// fetch per worker is started (or an unfinished fetch of an earlier placement is reused), all
+/// workers are waited for together, and the whole wait is bounded by [`placement_usage_wait`].
+async fn usage_snapshots(st: &St, workers: &[&crate::db::WorkerRow]) -> Result<HashMap<String, Value>, ApiError> {
     let now = crate::now();
-    let mut row = st
-        .db
-        .latest_done_command(&worker.name, "usage.snapshot")?
-        .filter(|row| now - row.updated_at <= PLACEMENT_USAGE_MAX_AGE_SECS);
-    if row.is_none() && worker.capability("usage.snapshot").is_some() {
+    let mut found: HashMap<String, Value> = HashMap::new();
+    let mut pending: Vec<(String, String)> = Vec::new();
+    for worker in workers {
+        let fresh = st
+            .db
+            .latest_done_command(&worker.name, "usage.snapshot")?
+            .filter(|row| now - row.updated_at <= PLACEMENT_USAGE_MAX_AGE_SECS);
+        if let Some(result) = fresh.and_then(|row| row.result).and_then(|result| result.get("result").cloned()) {
+            found.insert(worker.name.clone(), result);
+            continue;
+        }
+        if worker.capability("usage.snapshot").is_none() {
+            continue;
+        }
+        if let Some(open) = st.db.open_command(&worker.name, "usage.snapshot", now - PLACEMENT_FETCH_REUSE_SECS)? {
+            pending.push((worker.name.clone(), open.request_id));
+            continue;
+        }
         let request_id = format!("placement-{}", auth::random_token());
         let request = json!({
             "schema_version": protocol::COMMAND_SCHEMA_VERSION, "operation": "usage.snapshot", "params": {},
@@ -2136,41 +2197,97 @@ async fn ready_providers(st: &St, worker: &crate::db::WorkerRow) -> Result<Optio
             let mut payload = request.as_object().cloned().unwrap_or_default();
             payload.insert("target".into(), json!("local"));
             let _ = st.hub.send_command(&worker.name, Value::Object(payload), &request_id);
-            let deadline = Instant::now() + Duration::from_millis(PLACEMENT_USAGE_WAIT_MS);
-            while Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                if let Some(found) = st.db.command_get(&request_id)?.filter(|found| found.state == "done") {
-                    row = Some(found);
-                    break;
-                }
-            }
+            pending.push((worker.name.clone(), request_id));
         }
     }
-    let Some(row) = row else { return Ok(None) };
-    let providers = row
-        .result
-        .as_ref()
-        .and_then(|result| result.pointer("/result/providers"))
-        .and_then(Value::as_array);
-    Ok(providers.map(|list| {
-        list.iter()
+    let deadline = Instant::now() + placement_usage_wait();
+    while !pending.is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let mut still = Vec::new();
+        for (name, id) in pending {
+            match st.db.command_get(&id)?.filter(|row| row.state == "done") {
+                Some(row) => {
+                    if let Some(result) = row.result.and_then(|result| result.get("result").cloned()) {
+                        found.insert(name, result);
+                    }
+                }
+                None => still.push((name, id)),
+            }
+        }
+        pending = still;
+    }
+    Ok(found)
+}
+
+/// What a usage snapshot says about the request: `Err(reason)` excludes the worker, `Ok(notes)`
+/// keeps it. Routes the snapshot has no row for are unknown and never exclude the worker.
+fn judge_usage(snapshot: Option<&Value>, providers: &[String], routes: &[String]) -> Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    let rows = |key: &str| snapshot.and_then(|value| value.get(key)).and_then(Value::as_array).cloned().unwrap_or_default();
+    let provider_rows = rows("providers");
+    if !providers.is_empty() {
+        if snapshot.is_none() {
+            return Err("no usage snapshot available".into());
+        }
+        let ready: Vec<String> = provider_rows
+            .iter()
             .filter(|entry| entry.get("ready").and_then(Value::as_bool) == Some(true))
             .filter_map(|entry| entry.get("provider").and_then(Value::as_str).map(str::to_ascii_lowercase))
-            .collect()
-    }))
+            .collect();
+        match providers.iter().find(|provider| ready.contains(provider)) {
+            Some(provider) => notes.push(format!("{provider} ready")),
+            None => return Err(format!("none of {} is ready", providers.join(", "))),
+        }
+    }
+    if !routes.is_empty() {
+        let route_rows = rows("routes");
+        let mut available = Vec::new();
+        let mut unavailable = 0;
+        let mut unknown = 0;
+        for route in routes {
+            let by_route = route_rows
+                .iter()
+                .find(|entry| entry.get("route").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() == Some(route));
+            let verdict = match by_route {
+                Some(entry) => entry.get("available").and_then(Value::as_bool),
+                None => provider_rows
+                    .iter()
+                    .find(|entry| entry.get("provider").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() == Some(route))
+                    .and_then(|entry| entry.get("ready").and_then(Value::as_bool)),
+            };
+            match verdict {
+                Some(true) => available.push(route.clone()),
+                Some(false) => unavailable += 1,
+                None => unknown += 1,
+            }
+        }
+        if let Some(route) = available.first() {
+            notes.push(format!("route {route} available"));
+        } else if unknown > 0 {
+            notes.push("route readiness unknown".into());
+        } else if unavailable > 0 {
+            return Err(format!("no requested route is available ({})", routes.join(", ")));
+        }
+    }
+    if notes.is_empty() {
+        notes.push("no provider requested".into());
+    }
+    Ok(notes)
 }
 
 /// Choose the worker for a `mission create` that names none.
 ///
 /// A worker is eligible when it is online, the token may use it, it allows control and mission
-/// creation, and, when the request names providers, its latest usage snapshot reports one of them
-/// ready. Among the eligible workers the one with the fewest active missions wins, ties going to
-/// the lowest worker name. When no worker is eligible the answer is 409 with one reason per worker.
+/// creation, the request `cwd` is inside one of its allowed roots (by path component), and, when
+/// the request names providers or routes, its latest usage snapshot does not rule them out. Among
+/// the eligible workers the one with the fewest active missions wins, ties going to the lowest
+/// worker name. When no worker is eligible the answer is 409 with one reason per worker.
 async fn place_worker(st: &St, p: &Principal, params: &Map<String, Value>) -> Result<(String, Value), ApiError> {
-    let wanted = requested_providers(params);
-    let missions = st.db.missions_list()?;
+    let providers = split_names(params, "providers");
+    let routes = split_names(params, "routes");
+    let cwd = params.get("cwd").and_then(Value::as_str);
     let mut active: HashMap<String, usize> = HashMap::new();
-    for (worker, info) in &missions {
+    for (worker, info) in &st.db.missions_list()? {
         if info
             .get("status")
             .and_then(Value::as_str)
@@ -2179,59 +2296,61 @@ async fn place_worker(st: &St, p: &Principal, params: &Map<String, Value>) -> Re
             *active.entry(worker.clone()).or_default() += 1;
         }
     }
-    let mut eligible: Vec<(usize, String, String)> = Vec::new();
     let mut reasons = Map::new();
-    for worker in st.db.workers_list()? {
-        if !p.allows_worker(&worker.name) {
-            continue;
-        }
-        let name = worker.name.clone();
+    let all = st.db.workers_list()?;
+    let mut candidates: Vec<&crate::db::WorkerRow> = Vec::new();
+    for worker in all.iter().filter(|worker| p.allows_worker(&worker.name)) {
         let policy = worker.worker_policy.as_ref();
         let flag = |key: &str| policy.and_then(|value| value.get(key)).and_then(Value::as_bool).unwrap_or(false);
-        let refusal = if !st.hub.online(&name) {
+        let roots: Vec<&str> = policy
+            .and_then(|value| value.get("allow_root"))
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let refusal = if !st.hub.online(&worker.name) {
             Some("offline")
         } else if !flag("allow_control") {
             Some("does not allow control")
         } else if !flag("allow_create") || worker.capability("mission.create").is_none() {
             Some("does not allow mission creation")
+        } else if cwd.is_some_and(|cwd| !folder_allowed(cwd, &roots)) {
+            Some("folder-not-allowed")
         } else {
             None
         };
-        if let Some(refusal) = refusal {
-            reasons.insert(name, json!(refusal));
-            continue;
-        }
-        let mut ready_note = "no provider requested".to_string();
-        if !wanted.is_empty() {
-            match ready_providers(st, &worker).await? {
-                None => {
-                    reasons.insert(name, json!("no usage snapshot available"));
-                    continue;
-                }
-                Some(ready) => match wanted.iter().find(|provider| ready.contains(provider)) {
-                    None => {
-                        reasons.insert(name, json!(format!("none of {} is ready", wanted.join(", "))));
-                        continue;
-                    }
-                    Some(provider) => ready_note = format!("{provider} ready"),
-                },
+        match refusal {
+            Some(reason) => {
+                reasons.insert(worker.name.clone(), json!(reason));
             }
+            None => candidates.push(worker),
         }
-        let count = active.get(&name).copied().unwrap_or(0);
-        eligible.push((count, name, ready_note));
+    }
+    let snapshots = if providers.is_empty() && routes.is_empty() {
+        HashMap::new()
+    } else {
+        usage_snapshots(st, &candidates).await?
+    };
+    let mut eligible: Vec<(usize, String, String)> = Vec::new();
+    for worker in candidates {
+        match judge_usage(snapshots.get(&worker.name), &providers, &routes) {
+            Err(reason) => {
+                reasons.insert(worker.name.clone(), json!(reason));
+            }
+            Ok(notes) => eligible.push((active.get(&worker.name).copied().unwrap_or(0), worker.name.clone(), notes.join(", "))),
+        }
     }
     eligible.sort();
-    let Some((count, name, ready_note)) = eligible.first().cloned() else {
+    let Some((count, name, notes)) = eligible.first().cloned() else {
         let mut error = err(
             StatusCode::CONFLICT,
             "no-eligible-worker",
-            "no online worker allows control and has a requested provider ready; name a worker or see the reasons",
+            "no online worker allows control and creation in this folder with a requested provider ready; name a worker or see the reasons",
         );
         error.details = Some(json!({"workers": reasons}));
         return Err(error);
     };
     let reason = format!(
-        "{ready_note}; {count} active mission{}; fewest of {} eligible worker{}",
+        "{notes}; {count} active mission{}; fewest of {} eligible worker{}",
         if count == 1 { "" } else { "s" },
         eligible.len(),
         if eligible.len() == 1 { "" } else { "s" }

@@ -1921,6 +1921,34 @@ impl Db {
             .optional()
     }
 
+    /// An unfinished command of `operation` for `worker` created at or after `since`.
+    pub fn open_command(&self, worker: &str, operation: &str, since: i64) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state!='done' AND created_at>=? ORDER BY created_at DESC LIMIT 1"),
+                params![worker, operation, since],
+                command_row,
+            )
+            .optional()
+    }
+
+    /// The placement answer given to a create request with this idempotency key.
+    pub fn placement_get(&self, request_id: &str) -> R<Option<Value>> {
+        let text: Option<String> = self
+            .r_after_writes()?
+            .query_row("SELECT value FROM meta WHERE key=?", params![format!("placement:{request_id}")], |row| row.get(0))
+            .optional()?;
+        Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    pub fn placement_put(&self, request_id: &str, placement: &Value) -> R<()> {
+        self.c()?.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("placement:{request_id}"), placement.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
         let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let request_json = request.to_string();

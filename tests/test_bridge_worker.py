@@ -875,3 +875,11 @@ def test_worker_config_validates_verifier_declarations(tmp_path, monkeypatch):
         _write_config(tmp_path, monkeypatch, text)
         with pytest.raises(SystemExit):
             toolconfig.load_config()
+
+
+def test_an_explicit_verifier_timeout_wins_even_when_it_equals_the_default(state, tmp_path, monkeypatch):
+    directory, _ = state
+    session, root = _create_session(tmp_path, directory)
+    _write_config(tmp_path, monkeypatch, '[bridge.verifiers.unit]\nargv = ["true"]\ntimeout_seconds = 90\n')
+    _, created = _command(session, CommandRequest("mission.create", {"prompt": "x", "cwd": str(root), "providers": "codex", "verifier_name": "unit", "verifier_timeout": 300}))
+    assert created.payload["result"]["mission"]["config"]["verifier"]["timeout_seconds"] == 300.0

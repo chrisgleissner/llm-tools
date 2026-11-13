@@ -1398,9 +1398,9 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
         argv = after_dashes
     if not argv:
         return None
-    timeout = float(getattr(args, "verifier_timeout", 300))
-    if named_timeout is not None and timeout == 300:
-        timeout = named_timeout  # the declared timeout applies unless the request names its own
+    requested = getattr(args, "verifier_timeout", None)
+    # An explicit timeout wins over the declared one, even when it equals the default.
+    timeout = float(requested) if requested is not None else (named_timeout if named_timeout is not None else 300.0)
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
     if any("\x00" in arg for arg in argv):
@@ -1486,7 +1486,7 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--verifier-name", dest="verifier_name", metavar="NAME", default=None, help="a verifier declared as [bridge.verifiers.NAME] in the llm-tools config of the machine that runs the mission (the only verifier form a remote request may use)")
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the verifier command, for exact control of quoting; repeat per argument (--verifier-arg=-m for one that starts with a dash)")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
-    create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")
+    create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=None, help="seconds before a verifier run is treated as failed (default: 300, or the timeout declared for --verifier-name)")
     create.add_argument("--log-max-bytes", metavar="BYTES", type=_db_int, default=4 * 1024 * 1024, help="size at which one provider log file rotates (default: 4194304, 4 MiB)")
     create.add_argument("--log-rotations", metavar="COUNT", type=_db_int, default=3, help="rotated log files kept per provider run (default: 3)")
     create.add_argument("--log-retained-runs", metavar="COUNT", type=_db_int, default=20, help="newest provider-run log directories kept; older ones are pruned (default: 20)")
