@@ -40,20 +40,26 @@
     {
       "version": 7,
       "kind": "derived",
-      "source": "schema 10 without the objects added for versions above 7",
+      "source": "schema 10 (76260ba9) without the objects added for versions above 7",
       "file": "schema-v7.sqlite3"
     },
     {
       "version": 8,
       "kind": "derived",
-      "source": "schema 10 without the objects added for versions above 8",
+      "source": "schema 10 (76260ba9) without the objects added for versions above 8",
       "file": "schema-v8.sqlite3"
     },
     {
       "version": 9,
       "kind": "derived",
-      "source": "schema 10 without the objects added for versions above 9",
+      "source": "schema 10 (76260ba9) without the objects added for versions above 9",
       "file": "schema-v9.sqlite3"
+    },
+    {
+      "version": 10,
+      "kind": "history",
+      "source": "76260ba9:llm_tools/bridge_store.py",
+      "file": "schema-v10.sqlite3"
     }
   ]
 }
