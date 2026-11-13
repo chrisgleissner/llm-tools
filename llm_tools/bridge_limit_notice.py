@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
+from . import bridge_providers
+
 # Only the last lines of the screen are searched: the notice sits just above the input box.
 SCREEN_TAIL_LINES = 40
 # Lines after the notice that may continue a wrapped sentence.
@@ -24,22 +26,6 @@ CONTINUATION_LINES = 2
 # A reset further away than this is a misparse, not a quota window.
 MAX_RESET_SECONDS = 8 * 24 * 3600
 NOTICE_CHARS = 240
-
-_DECORATION = r"^[\s■●⎿✻▐│|>*•·]*"
-_APOSTROPHE = "['’]"
-_CLAUDE_START = re.compile(
-    _DECORATION + r"(?:"
-    r"(?:claude )?usage limit reached\b"
-    r"|(?:\d+-hour|weekly|monthly|session|opus|sonnet)(?: \w+)? limit reached\b"
-    rf"|you{_APOSTROPHE}ve hit your (?:(?:usage|session|weekly|\d+-hour) )?limit\b"
-    r")",
-    re.IGNORECASE,
-)
-_CODEX_START = re.compile(
-    _DECORATION + rf"you(?:{_APOSTROPHE}ve| have) (?:hit|reached) your usage limit\b",
-    re.IGNORECASE,
-)
-_START = {"claude": _CLAUDE_START, "codex": _CODEX_START}
 
 _UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 _DURATION = re.compile(
@@ -133,14 +119,15 @@ def detect_usage_limit(provider: str, screen: str, *, now: float, tz: tzinfo | N
 
     Only a line that begins with the provider's limit phrase counts; the most recent such line wins.
     """
-    start = _START.get(provider)
+    spec = bridge_providers.get(provider)
+    start = spec.limit_notice_pattern if spec is not None else None
     if start is None or not screen:
         return None
     lines = [line.rstrip() for line in screen.splitlines() if line.strip()][-SCREEN_TAIL_LINES:]
     for index in range(len(lines) - 1, -1, -1):
         if not start.match(lines[index]):
             continue
-        sentence = " ".join(re.sub(_DECORATION, "", line) for line in lines[index:index + 1 + CONTINUATION_LINES])
+        sentence = " ".join(re.sub(bridge_providers._DECORATION, "", line) for line in lines[index:index + 1 + CONTINUATION_LINES])
         reset_text, reset_epoch = parse_reset(sentence, now, tz)
         return UsageLimitNotice(provider, sentence[:NOTICE_CHARS], reset_text, reset_epoch)
     return None

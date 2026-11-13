@@ -400,6 +400,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--after-task` | Local `pause`/`stop` timing (steering intent `pause-after-iteration` or `stop-after-task`). Refused with `--target`; use `steer` remotely. |
 | `--background` | Internal controller launch flag; never remote. |
 | `--bundle` | Local `doctor` diagnostic archive written to this host; no remote equivalent. |
+| `--capabilities` | Local `doctor` provider capability matrix from the registry and the evidence files on this host; no remote equivalent. |
 | `--colour` | Local terminal rendering for `theme`; no API field. |
 | `--hold` | `task.reject` typed field `hold`. |
 | `--mode` | `mission.create` and `mission.start` typed fields `headless` and `native_tui`, set by the client from the one choice. |
