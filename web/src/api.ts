@@ -107,26 +107,7 @@ export function onPasswordChangeRequired(fn: () => void): void {
   passwordChangeHandler = fn;
 }
 
-/**
- * Requests that have been sent and not yet answered. The page publishes "no request in flight" as `data-requests="0"` on the root element
- * (`settled()` in `settle.ts` reads it), so a test or a screenshot can wait for the data to arrive instead of for a delay.
- */
-let inFlight = 0;
-const trackRequest = (delta: number): void => {
-  inFlight += delta;
-  document.documentElement.setAttribute("data-requests", String(inFlight));
-};
-
 async function request<T>(method: string, path: string, body?: unknown, quiet401 = false, extraHeaders: Record<string, string> = {}): Promise<T> {
-  trackRequest(1);
-  try {
-    return await send<T>(method, path, body, quiet401, extraHeaders);
-  } finally {
-    trackRequest(-1);
-  }
-}
-
-async function send<T>(method: string, path: string, body?: unknown, quiet401 = false, extraHeaders: Record<string, string> = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json", ...extraHeaders };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET") headers["X-CSRF-Token"] = csrfToken;

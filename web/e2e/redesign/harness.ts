@@ -25,21 +25,16 @@ export async function openApp(page: Page, opts: MockOptions = IN, path = "/"): P
 }
 
 /**
- * Wait until the page has loaded its data and drawn it. The signals are set by the page itself, not guessed from a delay:
- * `data-requests` on the root element is the number of /api/v1 requests in flight (src/api.ts), the Inbox badge carries
- * `data-partial="true"` while some mission's attention is still unread (it reads "13+" until then), and `aria-busy="true"` marks
- * a panel that is still loading. Fonts must be ready and two frames drawn. The condition is checked again after the frames, because
- * a read that started when the previous one finished (the status reads, then the lines) can begin between the two checks.
+ * Wait until the page has loaded its data and drawn it. The signals are ones the page already exposes, so the production bundle carries no test hook:
+ * the network is idle, the Inbox badge has no title (its title says "Checked N of M active missions" while some mission's attention is unread and the
+ * text reads "13+"), no panel is `aria-busy="true"`, fonts are ready and two frames were drawn. The condition is checked again after the frames,
+ * because a read that starts when the previous one finishes (the status reads, then the lines) can begin between two checks.
  * Every screenshot spec calls this before it captures.
  */
 export async function settle(page: Page): Promise<void> {
-  const loaded = () =>
-    page.waitForFunction(() => {
-      const requests = document.documentElement.getAttribute("data-requests");
-      return (requests === null || requests === "0") && !document.querySelector('[data-partial="true"], [aria-busy="true"]:not(.btn)');
-    });
-  await page.waitForLoadState("networkidle").catch(() => {});
+  const loaded = () => page.waitForFunction(() => !document.querySelector('.nav-count:not([hidden])[title]:not([title=""]), [aria-busy="true"]:not(.btn)'));
   for (let pass = 0; pass < 2; pass += 1) {
+    await page.waitForLoadState("networkidle").catch(() => {});
     await loaded();
     await page.evaluate(() => document.fonts.ready.then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))));
   }

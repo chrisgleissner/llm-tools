@@ -453,7 +453,6 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     count = all.n;
     needBadge.hidden = count === 0;
     needBadge.title = all.note;
-    needBadge.setAttribute("data-partial", String(all.partial)); // "true" while some mission's attention is unread: the text reads "13+"
     needBadge.replaceChildren(all.text, h("span", { class: "sr-only" }, " need you"));
     syncTitle();
     if (iconLink) iconLink.href = faviconHref(count > 0);
