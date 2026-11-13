@@ -3034,6 +3034,13 @@
    "subprocess"
   ]
  },
+ "tests/test_scheduler_tmux_final_line.py": {
+  "test_a_final_line_printed_just_before_an_immediate_exit_stays_in_the_pane": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
  "tests/test_security_module_launch.py": {
   "test_copilot_refresh_child_ignores_a_hostile_working_directory": [
    "subprocess"

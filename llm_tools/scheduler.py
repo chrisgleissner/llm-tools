@@ -1652,6 +1652,13 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
 # check only recovers a provider killed before it could write one.
 TMUX_PANE_CHECK_SECONDS = 10
 
+# Seconds the pane's shell stays alive after the provider has exited, before it reports the exit status.
+# tmux (3.4 and later) marks a pane dead and closes its pty without reading output that is still
+# pending, unless pipe-pane is active and has drained it. A provider that prints a final line and
+# exits at once would lose that line. The shell is the pane's process, so keeping it alive lets tmux
+# read the remaining output while the provider's exit status and the pane command stay unchanged.
+TMUX_EXIT_DRAIN_SECONDS = 0.3
+
 
 def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output_file: Path, status_file: Path) -> int:
     if not common.have_cmd("tmux"):
@@ -1697,6 +1704,7 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         "set +e\n"
         f"{command_line}\n"
         "status=$?\n"
+        f"sleep {TMUX_EXIT_DRAIN_SECONDS}\n"
         f"printf %s \"$status\" > {shlex.quote(str(status_file))}\n"
         "exit \"$status\"\n",
     )
