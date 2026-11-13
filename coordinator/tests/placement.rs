@@ -270,6 +270,7 @@ async fn placement_fetches_missing_snapshots_together_and_reuses_a_pending_fetch
     let answered = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let log = answered.clone();
     let responder = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         for _ in 0..400 {
             for (name, ready) in [("alpha", "codex"), ("beta", "claude")] {
                 if let Some(open) = db.open_command(name, "usage.snapshot", 0).unwrap() {
@@ -293,8 +294,9 @@ async fn placement_fetches_missing_snapshots_together_and_reuses_a_pending_fetch
         started.elapsed() < std::time::Duration::from_secs(2),
         "the fetches ran together and finished early"
     );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     responder.abort();
-    let answered = answered.lock().unwrap();
+    let answered = answered.lock().unwrap().clone();
     let alpha: Vec<&String> = answered.iter().filter(|(name, _)| name == "alpha").map(|(_, id)| id).collect();
     let beta: Vec<&String> = answered.iter().filter(|(name, _)| name == "beta").map(|(_, id)| id).collect();
     assert_eq!(alpha, vec!["pre-alpha"], "the pending fetch of alpha is reused, not repeated");
