@@ -20,7 +20,7 @@ import textwrap
 import time
 from typing import Any, Callable
 
-from . import bridge_hangup, bridge_redraw
+from . import bridge_composer, bridge_hangup, bridge_redraw
 from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_store import controller_running as _controller_running
 from .common import KNOWN_PROVIDERS
@@ -2111,9 +2111,9 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
                 state.recovery_source = result if state.recovery_draft is not None else None
                 state.cursors[0] = len(result)
                 state.error = ""
-            elif bridge_tui.LAST_RECOVERY_DRAFT is not None:
-                state.recovery_draft = bridge_tui.LAST_RECOVERY_DRAFT
-                state.error = f"Objective draft retained privately: {bridge_tui.LAST_RECOVERY_DRAFT}"
+            elif bridge_composer.LAST_RECOVERY_DRAFT is not None:
+                state.recovery_draft = bridge_composer.LAST_RECOVERY_DRAFT
+                state.error = f"Objective draft retained privately: {bridge_composer.LAST_RECOVERY_DRAFT}"
             continue
         if action in {"open", "attach", "start-selected"}:
             mission_id = str(state.view()[state.selected - 1]["id"])

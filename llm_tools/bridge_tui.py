@@ -8,14 +8,10 @@ dispatcher used by the CLI.
 from __future__ import annotations
 
 import ast
-import collections
 import curses
-import functools
 import inspect
 import json
-import math
 import os
-import re
 import shlex
 import shutil
 import stat
@@ -23,7 +19,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import textwrap
 import time
 import unicodedata
 from collections import deque
@@ -31,65 +26,40 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
-from .bridge_documents import DocumentViewer, heading_label, wrap_plain_lines
-from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
-from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
+from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice
+from .bridge_documents import DocumentViewer
+from .bridge_states import ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES
+from . import bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
-from .bridge_vocab import EventKind, MISSION_NEEDS_YOU_LABEL, status_label
-from . import bridge_format
-from .bridge_format import plain_reason
-from .bridge_glyphs import FINISHED_STATES, ascii_mode, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
-from .common import fmt_duration
+from .bridge_glyphs import glyph, localize
 from . import terminal
 from .terminal import TerminalAction
-from .bridge_actions import ACTIONS, Action, actions_for
-from .bridge_wording import NEXT_NOTHING, approval_row, controller_hint, finished_next, proposals_row
+from .bridge_actions import Action, actions_for
 from .bridge_event_text import (  # noqa: F401  (moved to bridge_event_text so the CLI can phrase events; other modules and tests reach these through bridge_tui)
     _HUMANIZERS,
-    _MISSION_STATE_WORDS,
-    _NO_VALUE,
-    _REVIEW_HOLD_EVENTS,
     _SEP,
     _TASK_STATE_WORDS,
-    _WINDOW_NAMES,
-    _EventContext,
     _age,
     _capacity_brief,
     _compact_pairs,
-    _decision_owner,
     _dict,
-    _event_kind,
     _event_summary,
     _humanize_event,
-    _humanizer,
     _int_or_none,
-    _known,
-    _percent_left,
     _relative_epoch,
-    _rotation_text,
     _short_id,
     _span,
     _text,
-    _window_brief,
-    _with_reason,
-    restoration_word,
 )
 from . import bridge_draw
 from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests reach these through bridge_tui)
-    QUIET,
     VIEWS,
     ControlViewAction,
     Segment,
-    _clip_segments,
-    _merge_segments,
     _put,
     _put_segments,
-    _scrub,
     _segments_text,
-    _segments_width,
     _split_hint,
-    _VIEW_ALIASES,
     initialize_colors,
     normalize_view,
     role_attr,
@@ -97,1644 +67,300 @@ from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests 
 )
 
 
+from . import bridge_composer
+from .bridge_console_rows import _ViewRows
+from .bridge_composer import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    _WHEEL_ROWS,
+    _caret_view,
+    _clipboard_argv,
+    _composer_status,
+    _set_escape_delay,
+    compose_document,
+)
+from .bridge_console_commands import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    PALETTE_COMMANDS,
+    _ACTIVITY_POLL_SECONDS,
+    _BRIDGE_LABEL,
+    _CONSOLE_ALIASES,
+    _CommandResult,
+    _FILE_VIEWER_KEYS,
+    _FULL_REFRESH_SECONDS,
+    _IDLE_BACKOFF_SECONDS,
+    _IDLE_REFRESH_SECONDS,
+    _MAX_COMMAND_CHARS,
+    _MAX_DETAIL_ITEMS,
+    _MAX_DETAIL_TEXT,
+    _MAX_OUTPUT_LINES,
+    _MAX_RESPONSE_LINES,
+    _OUTPUT_IDLE_THRESHOLD_SECONDS,
+    _RECALL_HINT,
+    _REFRESH_SECONDS,
+    _SELECTABLE_VIEWS,
+    _STATUS_SECONDS,
+    _TASK_PAGE_SIZE,
+    _VIEW_COMMANDS,
+    _approval_summary,
+    _approval_task,
+    _command_completions,
+    _command_feedback,
+    _confirmation_reason,
+    _cut_text,
+    _evidence_text,
+    _expand_console_alias,
+    _is_reject_command,
+    _items,
+    _slash_table,
+    _strip_slash,
+    _task_ref,
+    task_number,
+)
+from .bridge_console_snapshot import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    _bounded_event_data,
+    _bounded_snapshot,
+    _bounded_task_value,
+    _project_capacity,
+    _project_events,
+    _station_projection,
+)
+from .bridge_console_style import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    _duration_seconds,
+    _idle_role,
+    _inline_segments,
+    _percent_role,
+    _plain_words,
+    _status_role,
+)
+from .bridge_console_text import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    _COLLAPSED_EVENTS,
+    _REFLOW_CACHE,
+    _activity_entries,
+    _activity_role,
+    _activity_row_segments,
+    _age_paths_for,
+    _aged_snapshot,
+    _capacity_summaries,
+    _clip,
+    _controller_line,
+    _count_phrase,
+    _idle_phrase,
+    _local_clock,
+    _mission,
+    _mission_role_of,
+    _nav_index_at,
+    _nav_labels,
+    _nav_layout,
+    _nav_line,
+    _needs_you_rows,
+    _order_list_rows,
+    _order_list_segments,
+    _order_preview_lines,
+    _order_preview_rows,
+    _order_separator,
+    _orders_list_height,
+    _owner_label,
+    _provider_state,
+    _recent_event_rows,
+    _recent_operation_segments,
+    _reflow_markdown,
+    _reflow_markdown_rows,
+    _review_hold_task,
+    _station_idle_phrase,
+    _station_label,
+    _station_status_context,
+    _station_status_parts,
+    _station_status_segments,
+    _status_strip,
+    _task_numbers,
+    _waiting_on,
+    _window_summary,
+)
+from .bridge_console_draw import (  # noqa: F401  (moved out of bridge_tui; re-exported so other modules and tests reach them here)
+    _command_display,
+    _draw_compact,
+    _draw_document,
+    _draw_full,
+    _draw_navigation,
+    _draw_response_overlay,
+    _handle_mouse_event,
+    _header,
+    _header_segments,
+    _hint,
+    _hint_items,
+    _labelled_segments,
+    _mission_status_role,
+    _orders_summary,
+    _placeholder,
+    _response_rows,
+    _scroll_start,
+    _status_line,
+    _strip_segments,
+    _value_segments,
+    _working_text,
+    _wrap_row,
+)
+
+
 def __getattr__(name: str) -> object:
     """Answer reads of the colour state, which lives in ``bridge_draw``, so ``bridge_tui._CURRENT_THEME`` still resolves."""
     if name in {"_ROLE_ATTRS", "_ROLE_PAIRS", "_CURRENT_THEME", "_COLOR_ROLES"}:
         return getattr(bridge_draw, name)
+    if name == "LAST_RECOVERY_DRAFT":  # lives in ``bridge_composer``, which assigns it
+        return bridge_composer.LAST_RECOVERY_DRAFT
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 Snapshot = Callable[..., dict[str, object]]
 Dispatch = Callable[[str, str], object]
-LAST_RECOVERY_DRAFT: Path | None = None
 # Set by the home screen when it opens the controls of a mission it just saved,
 # so the console can say once which id to type on the command line.
 JUST_SAVED_MISSION: str | None = None
 
 
-_ESCDELAY_MS = 50
-_WHEEL_ROWS = 3
-def _set_escape_delay() -> None:
-    """Make a lone Esc register in 50 ms instead of ncurses' default one second."""
-    try:
-        curses.set_escdelay(_ESCDELAY_MS)
-    except (AttributeError, curses.error):
-        pass
-
-
-def compose_document(
-    initial: str = "",
-    *,
-    title: str = "Bridge document",
-    window: curses.window | None = None,
-    placeholder: str = "",
-    restored_from: Path | None = None,
-    draft_prefix: str = "composer-recovery-",
-) -> str | None:
-    """Full-screen UTF-8 composer with a private crash checkpoint and recovery action.
-
-    ``placeholder`` is dim guidance shown while the buffer is empty. ``restored_from``
-    names a retained draft whose text is ``initial``: it is deleted once this
-    composer has its own checkpoint, and the notice line says when it was written.
-    ``draft_prefix`` names the kept draft's file, so a kind of draft can be found again.
-    """
-    curses.use_env(False)
-    global LAST_RECOVERY_DRAFT
-    import termios
-
-    from .bridge_store import default_state_dir
-
-    buffer = TextBuffer(initial, len(initial))
-    paste_decoder = BracketedPaste(buffer.max_bytes)
-    escape_pending = False
-    escape_at = 0.0
-    paste_activity = 0.0
-    preferred_column: int | None = None
-    notice = ""  # transient warnings only; the status line below carries the keys
-    if restored_from is not None:
-        try:
-            notice = f"Restored draft from {time.strftime('%H:%M', time.localtime(restored_from.stat().st_mtime))} · Ctrl-X discard"
-        except OSError:
-            notice = "Restored draft · Ctrl-X discard"
-    draft_dir = default_state_dir() / "drafts"
-    draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(draft_dir, 0o700)
-    checkpoint_fd, checkpoint_name = tempfile.mkstemp(prefix=draft_prefix, suffix=".md", dir=draft_dir)
-    os.close(checkpoint_fd)
-    checkpoint_path = Path(checkpoint_name)
-    os.chmod(checkpoint_path, 0o600)
-    LAST_RECOVERY_DRAFT = checkpoint_path
-    last_checkpoint = 0.0
-    checkpointed: str | None = None  # text last written to the recovery file
-    write_lock = threading.Lock()  # one recovery write at a time, newest snapshot wins
-    snapshot_seq = 0  # numbers the snapshots handed to a write
-    written_seq = 0  # the newest snapshot already on disk
-    discarded = False
-    background: list[threading.Thread] = []  # at most one periodic write in flight
-    background_errors: list[OSError] = []
-
-    def write_recovery(text: str, seq: int) -> None:
-        """Atomically replace the recovery file with `text` (temp file, fsync, rename)."""
-        nonlocal checkpointed, written_seq
-        with write_lock:
-            if discarded or seq < written_seq:
-                return  # the draft was discarded, or a newer snapshot is already on disk
-            fd, name = tempfile.mkstemp(prefix=".composer-", suffix=".tmp", dir=draft_dir)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(text.encode("utf-8"))
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.chmod(name, 0o600)
-                os.replace(name, checkpoint_path)
-                os.chmod(checkpoint_path, 0o600)
-                checkpointed = text
-                written_seq = seq
-            except BaseException:
-                try:
-                    os.unlink(name)
-                except OSError:
-                    pass
-                raise
-
-    def checkpoint() -> None:
-        """Atomically refresh the bounded private crash-recovery source, before returning."""
-        nonlocal snapshot_seq
-        snapshot_seq += 1
-        write_recovery(buffer.text, snapshot_seq)
-
-    def checkpoint_in_background() -> bool:
-        """Start the same write on a worker thread unless one is still running."""
-        nonlocal snapshot_seq
-        if background and background[0].is_alive():
-            return False
-        snapshot_seq += 1
-        text, seq = buffer.text, snapshot_seq
-
-        def run() -> None:
-            try:
-                write_recovery(text, seq)
-            except OSError as exc:
-                background_errors.append(exc)
-
-        background[:] = [threading.Thread(target=run, name="llm-bridge-composer-checkpoint", daemon=True)]
-        background[0].start()
-        return True
-
-    def retain_draft() -> Path:
-        checkpoint()
-        return checkpoint_path
-
-    checkpoint()
-    if restored_from is not None and restored_from != checkpoint_path:
-        restored_from.unlink(missing_ok=True)  # the new checkpoint holds the same text
-
-    def loop(window: curses.window) -> str | None:
-        nonlocal preferred_column, notice, escape_pending, escape_at, paste_activity, buffer, last_checkpoint, discarded
-        global LAST_RECOVERY_DRAFT
-        window.keypad(True)
-        paste_keypad = True
-        _set_escape_delay()
-        bridge_mouse.enable_mouse()
-        replay: deque[object] = deque()
-        try:
-            curses.nonl()
-        except curses.error:
-            pass
-        bridge_hangup.set_timeout(window, 30)
-        redraw = True
-        drawn_size: tuple[int, int] | None = None
-        try:
-            fd = sys.stdin.fileno()
-            original = termios.tcgetattr(fd)
-            changed = original.copy()
-            changed[0] &= ~(
-                getattr(termios, "IXON", 0)
-                | getattr(termios, "ICRNL", 0)
-                | getattr(termios, "INLCR", 0)
-                | getattr(termios, "IGNCR", 0)
-            )
-            termios.tcsetattr(fd, termios.TCSANOW, changed)
-        except (OSError, termios.error, AttributeError):
-            original = None
-        try:
-            while True:
-                wanted_keypad = not paste_decoder.active
-                if wanted_keypad != paste_keypad:
-                    window.keypad(wanted_keypad)
-                    paste_keypad = wanted_keypad
-                now = time.monotonic()
-                if background_errors:
-                    notice = f"Recovery checkpoint failed: {_text(background_errors.pop(), 100)}"
-                    background_errors.clear()
-                    redraw = True
-                if now - last_checkpoint >= 0.8 and buffer.text != checkpointed and checkpoint_in_background():
-                    last_checkpoint = now
-                sync_window_size(window)
-                height, width = window.getmaxyx()
-                if (height, width) != drawn_size:
-                    redraw = True
-                if redraw and (not paste_decoder.active or paste_decoder.interrupted):
-                    lines = buffer.text.split("\n")
-                    before = buffer.text[:buffer.cursor]
-                    line_no = before.count("\n")
-                    column = len(before.rsplit("\n", 1)[-1])
-                    top = max(0, min(line_no, max(0, len(lines) - max(1, height - 3))))
-                    window.erase()
-                    _put(window, 0, 0, f"{title} · full source", width, role="heading")
-                    caret_x = 0
-                    for row, value in enumerate(lines[top:top + max(1, height - 3)], 1):
-                        if row - 1 + top == line_no:
-                            value, caret_x = _caret_view(value, column, width)
-                        _put(window, row, 0, value, width, preserve_spacing=True)
-                    _put(window, height - 2, 0, notice, width,
-                         role="warn" if notice.startswith(("Paste rejected", "Input rejected", "Incomplete", "Recovery")) else "dim")
-                    if not buffer.text and placeholder:
-                        # A no-break space keeps a quoted example such as "- criterion" on one row.
-                        hint_rows = wrap_plain_lines((localize(placeholder).replace('"- ', '"-\xa0'),), max(1, width))
-                        for offset, hint_row in enumerate(hint_rows[:max(1, height - 3)]):
-                            _put(window, 1 + offset, 0, hint_row.replace("\xa0", " "), width, role="dim", attr=curses.A_DIM)
-                    _put(window, height - 1, 0, _composer_status(buffer.size_bytes, buffer.max_bytes, len(lines)), width, role="dim")
-                    visible_row = line_no - top + 1
-                    try:
-                        curses.curs_set(1)
-                        window.move(min(height - 2, visible_row), min(max(0, width - 1), caret_x))
-                    except curses.error:
-                        pass
-                    window.refresh()
-                    redraw = False
-                    drawn_size = (height, width)
-                if not replay:
-                    # Wake for input, the escape/paste timers, or the next recovery checkpoint; nothing else changes.
-                    busy = escape_pending or paste_decoder.active or paste_decoder.waiting
-                    bridge_hangup.set_timeout(window, 30 if busy else 250)
-                try:
-                    key = replay.popleft() if replay else bridge_hangup.read_wch(window)
-                except curses.error:
-                    if paste_decoder.active and time.monotonic() - paste_activity >= 2.0:
-                        paste_decoder.interrupt()
-                        notice = "Incomplete paste quarantined; source unchanged. Ctrl-D keeps recovery and closes."
-                        redraw = True
-                    if paste_decoder.waiting and not paste_decoder.active and not escape_pending:
-                        paste_decoder.reset()
-                        notice = "Unknown or incomplete key sequence ignored."
-                        redraw = True
-                    if escape_pending and time.monotonic() - escape_at >= 0.06:
-                        escape_pending = False
-                        if paste_decoder.active:
-                            paste_decoder.reset()
-                            notice = "Incomplete paste discarded; source buffer unchanged."
-                            redraw = True
-                        else:
-                            retain_draft()
-                            return None
-                    continue
-                redraw = True  # any key may change the buffer, the caret or a notice
-                if paste_decoder.interrupted and key == "\x04":
-                    checkpoint()
-                    return None
-                if key == curses.KEY_MOUSE:
-                    mouse = bridge_mouse.read_mouse()
-                    delta = bridge_mouse.wheel_delta(mouse[2]) if mouse else None
-                    if delta and delta[0] and not paste_decoder.active:
-                        # The wheel moves the caret, which scrolls the view: three lines per notch.
-                        replay.extend([curses.KEY_UP if delta[0] < 0 else curses.KEY_DOWN] * _WHEEL_ROWS)
-                    continue
-                if key == "\x1b" and not paste_decoder.active:
-                    escape_pending = True
-                    escape_at = time.monotonic()
-                    continue
-                if escape_pending:
-                    paste_decoder.feed(b"\x1b")
-                    escape_pending = False
-                if paste_decoder.active or paste_decoder.waiting or (isinstance(key, str) and key.startswith(("[200~", "\x1b[200~"))):
-                    if paste_decoder.active or (isinstance(key, str) and key.startswith(("[200~", "\x1b[200~"))):
-                        paste_activity = time.monotonic()
-                    chunk = key.encode("utf-8") if isinstance(key, str) else b""
-                    pasted = paste_decoder.feed(chunk)
-                    if pasted is not None:
-                        accepted, received = buffer.paste(pasted)
-                        notice = "" if accepted else f"Paste rejected: received {received} bytes; limit is 1 MiB. Previous source is unchanged. Use an editor or import a file."
-                        if accepted:
-                            try:
-                                checkpoint()
-                                last_checkpoint = time.monotonic()
-                            except OSError as exc:
-                                notice = f"Paste loaded, but recovery checkpoint failed: {_text(exc, 100)}"
-                    elif paste_decoder.done and paste_decoder.error:
-                        notice = paste_decoder.error + "; previous source is unchanged"
-                        paste_decoder.reset()
-                    preferred_column = None
-                    continue
-                if key == "\x13":  # F-keys only switch views, so F2 does not save here
-                    checkpoint()
-                    return buffer.text
-                if key == "\x0f":
-                    editor_setting = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-                    editor = shlex.split(editor_setting)
-                    if not editor:
-                        notice = "VISUAL/EDITOR must name an executable."
-                        continue
-                    draft_dir = default_state_dir() / "drafts"
-                    draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    os.chmod(draft_dir, 0o700)
-                    fd, editor_path = tempfile.mkstemp(prefix="composer-", suffix=".md", dir=draft_dir)
-                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
-                        stream.write(buffer.text)
-                    os.chmod(editor_path, 0o600)
-                    curses.def_prog_mode()
-                    curses.endwin()
-                    try:
-                        edited = subprocess.run([*editor, editor_path], check=False, timeout=300, cwd=draft_dir)
-                    except (OSError, subprocess.SubprocessError) as exc:
-                        notice = f"Editor failed; source retained at {editor_path}: {_text(exc, 100)}"
-                        continue
-                    finally:
-                        curses.reset_prog_mode()
-                        window.clear()
-                        window.refresh()
-                    loaded = False
-                    if edited.returncode == 0:
-                        with Path(editor_path).open("r", encoding="utf-8", newline="") as editor_file:
-                            candidate = editor_file.read()
-                        if len(candidate.encode("utf-8")) <= buffer.max_bytes:
-                            buffer = TextBuffer(candidate, len(candidate))
-                            loaded = True
-                            notice = "Editor changes loaded; Ctrl-S saves to the caller."
-                        else:
-                            notice = f"Editor result exceeds 1 MiB; original source retained at {editor_path}."
-                    else:
-                        notice = f"Editor exited {edited.returncode}; source retained at {editor_path}."
-                    if loaded:
-                        Path(editor_path).unlink(missing_ok=True)
-                    continue
-                if key == "\x1b":
-                    name = retain_draft()
-                    notice = f"Draft retained at {name}"
-                    return None
-                if key == "\x04":  # Ctrl-D closes like Esc and never discards; Ctrl-X discards
-                    name = retain_draft()
-                    notice = f"Draft retained at {name}"
-                    return None
-                if key == "\x18":
-                    with write_lock:  # an in-flight periodic write must not recreate the discarded draft
-                        discarded = True
-                        checkpoint_path.unlink(missing_ok=True)
-                    if LAST_RECOVERY_DRAFT == checkpoint_path:
-                        LAST_RECOVERY_DRAFT = None
-                    return None
-                if key in {curses.KEY_LEFT, "KEY_LEFT"}:
-                    buffer.move(buffer.cursor - 1)
-                elif key in {curses.KEY_RIGHT, "KEY_RIGHT"}:
-                    buffer.move(buffer.cursor + 1)
-                elif key in {curses.KEY_HOME, "\x01"}:
-                    buffer.move(buffer.text.rfind("\n", 0, buffer.cursor) + 1)
-                elif key in {curses.KEY_END, "\x05"}:
-                    end = buffer.text.find("\n", buffer.cursor)
-                    buffer.move(len(buffer.text) if end < 0 else end)
-                elif key in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN", curses.KEY_PPAGE, curses.KEY_NPAGE}:
-                    preferred_column = _advance_cells(0, lines[line_no][:column]) if preferred_column is None else preferred_column
-                    direction = -1 if key in {curses.KEY_UP, "KEY_UP", curses.KEY_PPAGE} else 1
-                    step = max(1, height-3) if key in {curses.KEY_PPAGE, curses.KEY_NPAGE} else 1
-                    target_line = min(len(lines)-1, max(0, line_no+direction*step))
-                    start = sum(len(item)+1 for item in lines[:target_line])
-                    buffer.move(start+offset_for_cells(lines[target_line], preferred_column))
-                elif key in {curses.KEY_BACKSPACE, "KEY_BACKSPACE", "\x7f", "\b"}:
-                    buffer.backspace()
-                elif key in {curses.KEY_DC, "KEY_DC"}:
-                    buffer.delete()
-                elif key == "\x15":
-                    buffer.clear()
-                elif key == "\x0b":
-                    end = buffer.text.find("\n", buffer.cursor)
-                    if end < 0:
-                        buffer.text = buffer.text[:buffer.cursor]
-                    else:
-                        buffer.text = buffer.text[:buffer.cursor] + buffer.text[end:]
-                elif key in {"\n", "\r", curses.KEY_ENTER}:
-                    notice = ""
-                    if not buffer.insert("\n"):
-                        notice = "Paste rejected: document exceeds the 1 MiB interactive limit"
-                elif key == "\t":
-                    if not buffer.insert("\t"):
-                        notice = "Input rejected: document exceeds the 1 MiB interactive limit"
-                elif isinstance(key, str) and key and key.isprintable():
-                    if len(key) > 1:
-                        accepted, received = buffer.paste(key)
-                        notice = "" if accepted else f"Paste rejected: received {received} bytes; limit is 1 MiB. Use an editor or import a file."
-                    elif not buffer.insert(key):
-                        notice = "Input rejected: document exceeds the 1 MiB interactive limit"
-                if key not in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN", curses.KEY_PPAGE, curses.KEY_NPAGE}:
-                    preferred_column = None
-        finally:
-            if original is not None:
-                try:
-                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, original)
-                except (OSError, termios.error):
-                    pass
-
-    try:
-        sys.stdout.write("\x1b[?2004h")
-        sys.stdout.flush()
-        return bridge_hangup.run_curses(loop) if window is None else loop(window)
-    except (KeyboardInterrupt, EOFError, curses.error, OSError):
-        retain_draft()
-        return None
-    finally:
-        sys.stdout.write("\x1b[?2004l")
-        sys.stdout.flush()
-
-
-def _composer_status(size_bytes: int, max_bytes: int, line_count: int) -> str:
-    """Composer footer: the keys, the line count, and the byte count only when the limit is near."""
-    parts = ["Ctrl-S Save", "Esc close (draft kept)", "Ctrl-X Discard", f"{line_count} {'line' if line_count == 1 else 'lines'}"]
-    if size_bytes * 5 > max_bytes * 4:
-        parts.append(f"{size_bytes}/{max_bytes} bytes")
-    return _SEP.join(parts)
-
-
-_NOT_PRINTABLE_ASCII = re.compile(r"[^ -~]")
-
-
-def _plain_cells(text: str) -> int:
-    """Cell width of `text` that has no tab; the sum of its characters' widths."""
-    if text.isascii() and text.isprintable():
-        return len(text)
-    odd = _NOT_PRINTABLE_ASCII.findall(text)
-    return len(text) - len(odd) + sum(cell_width(char) * count for char, count in collections.Counter(odd).items())
-
-
-def _advance_cells(cells: int, text: str) -> int:
-    """The cell column after drawing `text` from column `cells` (tab stops every 8 cells)."""
-    if text.isascii() and text.isprintable():
-        return cells + len(text)
-    for index, part in enumerate(text.split("\t")):
-        if index:
-            cells += 8 - cells % 8
-        cells += _plain_cells(part)
-    return cells
-
-
-def _caret_view(line: str, column: int, width: int) -> tuple[str, int]:
-    """The part of a composer line that is drawn, and the caret's column in it.
-
-    The view ends at the caret when the line is wider than the window, as before,
-    but only the text near the caret is measured: a 1 MiB single-line paste costs
-    the same as a short line. Tab stops repeat every 8 cells, so the column of
-    the first measured character only matters modulo 8.
-    """
-    room = max(0, width - 2)
-    back = width * 4 + 256
-    while True:
-        first = max(0, column - back)
-        offset = 0
-        if first and "\t" in line:
-            tab = line.rfind("\t", 0, first)
-            offset = _advance_cells(0, line[tab + 1:first] if tab >= 0 else line[:first]) % 8
-        caret = _advance_cells(offset, line[first:column])
-        if first == 0 or caret - offset >= room:
-            break  # the characters before `first` all end before the visible start
-        back *= 4  # zero-width characters left the measured text too narrow
-    start = max(offset, caret - room)
-    return _slice_display_cells(line[first:], start, max(1, width - 1), offset), caret - start
-
-
-def _slice_display_cells(value: str, start: int, width: int, cells: int = 0) -> str:
-    """Display a cell-width slice without splitting a wide UTF-8 character.
-
-    `cells` is the display column of the first character of `value`.
-    """
-    output: list[str] = []
-    visible = 0
-    for char in value:
-        if char == "\t":
-            amount = 8 - cells % 8
-            rendered = " " * amount
-        else:
-            amount = cell_width(char)
-            rendered = char
-        if cells + amount <= start:
-            cells += amount
-            continue
-        if cells < start:
-            cells += amount
-            continue
-        if visible + amount > width:
-            break
-        output.append(rendered)
-        visible += amount
-        cells += amount
-    return "".join(output)
-
-
-def _clipboard_argv() -> list[str] | None:
-    """Return a supported local clipboard command; never use OSC 52."""
-    if shutil.which("wl-copy"):
-        return ["wl-copy"]
-    if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard"]
-    if shutil.which("xsel"):
-        return ["xsel", "--clipboard", "--input"]
-    if shutil.which("pbcopy"):
-        return ["pbcopy"]
-    return None
-
-
-PALETTE_COMMANDS = tuple(action.command for action in ACTIONS)
-# F1-F9 select the views in this order. Activity and Sessions (history) sit
-# together after the working views; Health (diagnostics) is next to Actions.
-# Names used before the 1.3 rename stay accepted everywhere a view is named.
-# Words typed in the command line that switch view (the rest are CLI commands).
-_VIEW_COMMANDS = {
-    "overview": "Overview", "control": "Overview", "tasks": "Tasks", "orders": "Tasks", "providers": "Providers", "activity": "Activity",
-    "sessions": "Sessions", "health": "Health", "actions": "Actions", "usage": "Usage", "agents": "Agents",
-    "palette": "Actions", "log": "Activity", "systems": "Health", "stations": "Providers",
-}
-
-
-_REFRESH_SECONDS = 0.25
-_ACTIVITY_POLL_SECONDS = 2.0
-_FULL_REFRESH_SECONDS = 5.0  # a full snapshot at least this often: lock files, usage and clocks change without a database commit
-_IDLE_BACKOFF_SECONDS = 10.0  # without input for this long the change probe slows to once a second
-_IDLE_REFRESH_SECONDS = 1.0
-_STATUS_SECONDS = 8.0  # how long a command result stays in the bottom row
-_OUTPUT_IDLE_THRESHOLD_SECONDS = 30
-_RECALL_HINT = "Ctrl-P recalls the command"  # the command line is empty after a failure, so Up would move the body selection
-_MAX_COMMAND_CHARS = 4096
-_MAX_OUTPUT_LINES = 80
-_MAX_OUTPUT_LINE_CHARS = 2000
-_MAX_RESPONSE_CHARS = 24000
-_MAX_RESPONSE_LINES = _MAX_OUTPUT_LINES
-_MAX_TASK_ROWS = 200
-_TASK_PAGE_SIZE = _MAX_TASK_ROWS
-_MAX_STATION_ROWS = 32
-_MAX_EVENT_ROWS = 80
-_MAX_DETAIL_TEXT = 16000
-_MAX_DETAIL_ITEMS = 12
-_FILE_VIEWER_KEYS = frozenset({"s", "c", "e", "m", "w", "h", "KEY_LEFT", "KEY_RIGHT"})
-_SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions", "Agents"})
-_BRIDGE_LABEL = 12
-_SYSTEM_LABEL = 22
-_SESSION_COLUMNS = ("op", "task", "provider", "model", "status", "native session", "restoration")
-
-
-_TASK_VERB_PHRASES = {
-    "add": "added", "amend": "amended", "priority": "priority changed", "reorder": "reordered",
-    "dependencies": "dependencies updated", "pause": "paused", "resume": "resumed", "cancel": "cancelled",
-    "retry": "queued for another attempt", "verify": "verified", "approve": "approved", "reject": "sent back",
-}
-_TASK_ACK = re.compile(r"^task(?: \S+)? (?:" + "|".join(re.escape(item) for item in _TASK_VERB_PHRASES.values()) + r")")
-# Options whose value is a private path or an id the operator never typed.
-_PRIVATE_OPTIONS = frozenset({"--file", "--prompt-file", "--mission"})
-
-
-def task_number(task: dict[str, object]) -> object:
-    """The number the operator knows a task by: the per-mission ordinal when present, else its id."""
-    return task.get("ordinal", task.get("id"))
-
-
-def _task_ref(snapshot: dict[str, object], number: object) -> list[str]:
-    """CLI arguments naming the task shown as `number`.
-
-    `--task N` is the mission's own task number (the snapshot's `ordinal`). A
-    snapshot without ordinals can only name a task by its global id, so those
-    tasks are addressed with `--task-id`.
-    """
-    for task in _items(snapshot.get("tasks")):
-        if str(task_number(task)) == str(number):
-            if "ordinal" not in task and task.get("id") is not None:
-                return ["--task-id", str(task["id"])]
-            break
-    return ["--task", str(number)]
-
-
-def _applied_label(command: str, result: dict[str, object]) -> str:
-    """What was applied, in operator words; never a draft path or the mission id.
-
-    `task add --file /…/drafts/task-x.md` becomes `Task 4 added`, and an amend
-    becomes `Task 2 amended (revision 3)`. Other commands keep their words with
-    file and mission options removed.
-    """
-    try:
-        words = shlex.split(_strip_slash(command))
-    except ValueError:
-        words = _strip_slash(command).split()
-    if len(words) >= 2 and words[0] == "task" and words[1] in _TASK_VERB_PHRASES:
-        # The command's own `--task N` is the mission's number; a result's `task_id` or `id` is the global id.
-        number = words[words.index("--task") + 1] if "--task" in words and words.index("--task") + 1 < len(words) else result.get("ordinal")
-        if number is None and "--task-id" in words and words.index("--task-id") + 1 < len(words):
-            number = words[words.index("--task-id") + 1]
-        if number is None:
-            number = result.get("task_id", result.get("id"))
-        text = "Task" + (f" {_text(number, 12)}" if number is not None else "") + f" {_TASK_VERB_PHRASES[words[1]]}"
-        revision = result.get("revision")
-        if words[1] == "amend" and isinstance(revision, int) and not isinstance(revision, bool):
-            text += f" (revision {revision})"
-        return text
-    kept: list[str] = []
-    skip = False
-    for word in words:
-        if skip:
-            skip = False
-        elif word in _PRIVATE_OPTIONS:
-            skip = True
-        elif not word.startswith(tuple(f"{name}=" for name in _PRIVATE_OPTIONS)):
-            kept.append(word)
-    return " ".join(kept) or _text(command, 120)
-
-
-def _cut_text(value: object, limit: int) -> str:
-    """`_text` that marks a cut with an ellipsis, so clipped detail is never mistaken for the whole."""
-    clean = _text(value, limit + 1)
-    if len(clean) <= limit:
-        return clean
-    return clean[: max(0, limit - 1)].rstrip() + glyph("ellipsis")
-
-
-def _command_feedback(command: str, response: str) -> str:
-    """Turn known durable command envelopes into compact human acknowledgments."""
-    try:
-        payload = json.loads(response)
-    except (TypeError, json.JSONDecodeError):
-        payload = None
-    if isinstance(payload, dict) and "result" in payload and payload.get("status") in {"APPLIED", "REJECTED", "FAILED"}:
-        status = str(payload["status"])
-        result = _dict(payload.get("result"))
-        if status == "APPLIED":
-            detail = result.get("detail")
-            label = _text(_applied_label(command, result), 120)
-            if label.startswith("Task ") and not result.get("kind"):
-                return _text(f"{label} — {detail}" if detail else label, _MAX_OUTPUT_LINE_CHARS)
-            if result.get("kind"):
-                label = _text(result.get("kind"), 80) + " steering"
-            if detail:
-                return _text(f"Applied: {label} — {detail}", _MAX_OUTPUT_LINE_CHARS)
-            return _text(f"Applied: {label}", _MAX_OUTPUT_LINE_CHARS)
-        reason = result.get("error") or result.get("detail") or status.lower()
-        return _text(f"Rejected: {reason}", _MAX_OUTPUT_LINE_CHARS)
-
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2) if payload is not None else response
-    lines = rendered.splitlines() or [""]
-    bounded: list[str] = []
-    char_count = 0
-    truncated = False
-    for line in lines:
-        if len(bounded) >= _MAX_RESPONSE_LINES or char_count >= _MAX_RESPONSE_CHARS:
-            truncated = True
-            break
-        clean = "".join(
-            char if unicodedata.category(char) not in {"Cc", "Cs"} or char == "\t" else " "
-            for char in line
-        ).replace("\t", "    ")
-        remaining = _MAX_RESPONSE_CHARS - char_count
-        limit = min(_MAX_OUTPUT_LINE_CHARS, remaining)
-        if len(clean) > limit:
-            clean = clean[: max(0, limit - 1)] + "…"
-            truncated = True
-        bounded.append(clean)
-        char_count += len(clean) + 1
-        if truncated:
-            break
-    if len(bounded) < len(lines):
-        truncated = True
-    if truncated:
-        notice = "[response truncated to fit the Bridge console limit]"
-        if len(bounded) >= _MAX_RESPONSE_LINES:
-            bounded[-1] = notice
-        else:
-            bounded.append(notice)
-    return "\n".join(bounded)
-
-
-def console_words(command_line: str) -> list[str]:
-    """`bridge.console_words`, imported when first used (bridge imports this module lazily)."""
-    from .bridge import console_words as split
-
-    return split(command_line)
-
-
-def expand_reject_alias(words: list[str], waiting: Callable[[], list[int]]) -> tuple[list[str] | None, str | None]:
-    from .bridge import expand_reject_alias as expand
-
-    return expand(words, waiting)
-
-
-def _strip_slash(command: str) -> str:
-    """Drop the Codex/Claude-style `/` from a leading slash command."""
-    text = command.strip()
-    if len(text) > 1 and text[0] == "/" and (text[1].isalpha() or text[1] == "?"):
-        return text[1:]
-    return text
-
-
-def _confirmation_reason(command: str) -> str | None:
-    """Return the consequence that needs a deliberate second keystroke."""
-    try:
-        words = console_words(_strip_slash(command))
-    except ValueError:
-        return None
-    if words and words[0] == "cancel":
-        return "Cancel this mission and its unfinished tasks? This cannot be undone."
-    if words and words[0] == "stop" and "--force" in words:
-        return "Force stop this mission's owned active work?"
-    if words and words[0] == "finish":
-        return "Ask the provider to exit now? Unsaved provider state is lost; the task moves to verification."
-    if words[:2] == ["task", "cancel"]:
-        return "Cancel this task and discard its remaining work?"
-    if words[:2] == ["task", "reject"] and "--task" in words:
-        reason = next((word[len("--reason="):] for word in words if word.startswith("--reason=")), "")
-        return f"Send task {words[words.index('--task')+1]} back for another attempt? Reason: {reason[:120]}"
-    if _is_approval_command(words):
-        kind, value = _approval_target(words)
-        label = f"task {value}" if kind == "task" else f"task with id {value}" if kind == "id" else "(select a task)"
-        return f"Approve verification and mark {label} complete?"
-    return None
-
-
-def _is_reject_command(command: str) -> bool:
-    """Whether ``command`` is the expanded ``task reject --task N …`` the console confirms."""
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return False
-    return words[:2] == ["task", "reject"] and "--task" in words and "--hold" not in words
-
-
-def _is_approval_command(words: list[str]) -> bool:
-    """`task approve …`, or the deprecated spelling `task verify … --approve`."""
-    return words[:2] == ["task", "approve"] or (words[:2] == ["task", "verify"] and "--approve" in words)
-
-
-def _approval_target(words: list[str]) -> tuple[str, str]:
-    """(`task`, number), (`id`, global id) or (``, ``) for the task an approval command names."""
-    for option, kind in (("--task", "task"), ("--task-id", "id")):
-        if option in words and words.index(option) + 1 < len(words):
-            return kind, words[words.index(option) + 1]
-    return "", ""
-
-
-def _approval_task(command: str) -> tuple[str, str] | None:
-    """(kind, value) of the task an approval command (`task approve …`) names, else None."""
-    try:
-        words = console_words(_strip_slash(command))
-    except ValueError:
-        return None
-    if _is_approval_command(words):
-        target = _approval_target(words)
-        return target if target[0] else None
-    return None
-
-
-def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], width: int = 100) -> list[str]:
-    """What the operator is about to approve: title, latest evidence, the last run's exit status and workspace change.
-
-    Only facts the projection holds are shown. The workspace line comes from the
-    repository fingerprints recorded before and after the task's last provider
-    run, with the changed file names the controller recorded when the run
-    ended (none for a folder that is not a repository).
-    """
-    kind, value = target
-    task = next((item for item in _items(snapshot.get("tasks"))
-                 if (str(item.get("id")) if kind == "id" else str(task_number(item))) == value), None)
-    if task is None:
-        return [f"Task {value} is not in the loaded list; check Tasks before approving."]
-    number = str(task_number(task))
-    lines = [f"Task {number}: {_cut_text(task.get('title') or task.get('prompt') or 'Untitled task', width)}"]
-    raw_evidence = task.get("evidence")
-    evidence = [item for item in raw_evidence if _known(item)] if isinstance(raw_evidence, list) else []
-    if evidence:
-        shown = evidence[-3:]
-        lines.append(f"Evidence ({len(evidence)}):" if len(evidence) == len(shown) else f"Evidence (latest {len(shown)} of {len(evidence)}):")
-        lines += [f"  {_cut_text(_evidence_text(item), width)}" for item in shown]
-    else:
-        lines.append("Evidence: none recorded; read the provider output before approving.")
-    task_id = str(task.get("id"))
-    runs = [op for op in _items(snapshot.get("operations")) if str(op.get("task_id")) == task_id]
-    if runs:
-        last = max(runs, key=lambda op: str(op.get("created_at") or ""))
-        who = _text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)
-        code = last.get("exit_code")
-        lines.append(f"Last run: {who}" + (f", {bridge_format.exit_short(_text(code, 8))}" if code is not None else "") + (f", {_text(last['status'], 20).lower()}" if _known(last.get("status")) else ""))
-    progress = [
-        _dict(event.get("data")) for event in _items(snapshot.get("events"))
-        if _event_kind(event) == "operation-progress"
-        and task_id in {str(event.get("task_id")), str(_dict(event.get("data")).get("task_id"))}
-    ]
-    known = [data for data in progress if data.get("before") and data.get("after")]
-    if known:
-        lines.append(_cut_text(_workspace_line(known[-1]), width))
-    return lines
-
-
-_WORKSPACE_FILES_SHOWN = 5
-
-
-def _workspace_line(progress: dict[str, object]) -> str:
-    """`Workspace: 1 file changed: hello.txt`, or the plain change/no-change verdict when no names were recorded."""
-    if progress["before"] == progress["after"]:
-        return "Workspace: unchanged by the run"
-    names = progress.get("changed_files")
-    total = _int_or_none(progress.get("changed_total"))
-    if not isinstance(names, list) or not total:
-        return "Workspace: changed during the run"
-    shown = [_text(name, 80) for name in names[:_WORKSPACE_FILES_SHOWN]]
-    more = total - len(shown)
-    line = f"Workspace: {total} file{'s' if total != 1 else ''} changed: {', '.join(shown)}" + (f" and {more} more" if more > 0 else "")
-    earlier = _int_or_none(progress.get("already_modified"))
-    return line + (f" ({earlier} already modified before the run)" if earlier else "")
-
-
-def _last_run(snapshot: dict[str, object], task: dict[str, object]) -> dict[str, object] | None:
-    """The newest operation the projection holds for ``task``."""
-    task_id = str(task.get("id"))
-    runs = [op for op in _items(snapshot.get("operations")) if str(op.get("task_id")) == task_id]
-    return max(runs, key=lambda op: str(op.get("created_at") or "")) if runs else None
-
-
-def _last_run_line(snapshot: dict[str, object], task: dict[str, object]) -> str | None:
-    """`Last run: claude · exit 0 · 12s · o output · d diff` for the Tasks inspect pane, or None before any run."""
-    from . import common
-
-    last = _last_run(snapshot, task)
-    if last is None:
-        return None
-    parts = [_text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)]
-    if last.get("exit_code") is not None:
-        parts.append(bridge_format.exit_short(_text(last["exit_code"], 8)))
-    started = common.parse_epoch(last.get("created_at"), use_date=False)
-    ended = common.parse_epoch(last.get("updated_at"), use_date=False)
-    if started is not None and ended is not None and ended >= started and str(last.get("status")) not in {"RUNNING", "PREPARED", "INTENT"}:
-        parts.append(_age(int(ended - started), note=False))
-    return "Last run: " + _SEP.join([*parts, "o output", "d diff"])
-
-
-# Console-only shortcuts that expand to public commands.
-_CONSOLE_ALIASES = ("approve", "reject", "leave", "overview", "providers", "activity", "health", "actions", "sessions", "home")
-
-
-def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[str, str | None]:
-    """Expand `approve [N]` to `task approve --task N`.
-
-    Returns the command to run and an error message. Without N the single
-    task that awaits verification is used.
-    """
-    try:
-        words = console_words(_strip_slash(command))
-    except ValueError:
-        return command, None
-    if words and words[0] == "reject":
-        expanded, problem = expand_reject_alias(
-            words, lambda: [int(str(task_number(task))) for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() == "VERIFYING"]
-        )
-        if expanded is None:
-            return command, problem
-        if "--task" in expanded:  # name the task by id when the snapshot has no task numbers
-            position = expanded.index("--task")
-            expanded[position:position + 2] = _task_ref(snapshot, expanded[position + 1])
-        return shlex.join(expanded), None
-    if not words or words[0] != "approve":
-        return command, None
-    if len(words) > 2 or (len(words) == 2 and not words[1].isdecimal()):
-        return command, "error: usage: approve [TASK-NUMBER]"
-    if len(words) == 2:
-        task_id = words[1]
-    else:
-        waiting = [str(task_number(task)) for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() == "VERIFYING"]
-        if len(waiting) != 1:
-            hint = f"tasks awaiting review: {', '.join(waiting)}" if waiting else "no task awaits review"
-            return command, f"error: approve needs a task number · {hint}"
-        task_id = waiting[0]
-    return shlex.join(["task", "approve", *_task_ref(snapshot, task_id)]), None
-
-
-def _command_completions(command: str) -> list[str]:
-    """Complete public command/option names from the authoritative parser.
-
-    A leading `/` (Codex/Claude style) is accepted and kept: `/pa` completes
-    to `/pause`.
-    """
-    if command.startswith("/"):
-        return ["/" + item for item in _command_completions(command[1:])]
-    import argparse
-    from .bridge import _build_parser
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return []
-    trailing = bool(command) and command[-1].isspace()
-    prefix = "" if trailing or not words else words[-1]
-    complete = words if trailing else words[:-1]
-    parser = _build_parser(default_mission="current")
-    for word in complete:
-        groups = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
-        if groups and word in groups[0].choices:
-            parser = groups[0].choices[word]
-        elif word.startswith("-"):
-            break
-    groups = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
-    candidates = list(groups[0].choices) if groups and not prefix.startswith("-") else list(parser._option_string_actions)
-    if not complete and groups and not prefix.startswith("-"):
-        candidates.extend(name for name in _CONSOLE_ALIASES if name not in candidates)
-    base = command if trailing else command[:-len(prefix)] if prefix else command
-    return [base + value for value in candidates if value.startswith(prefix) and value not in {"console", "_controller"} and not value.startswith("_")]
-
-
-# Commands that lead the list shown when `/` is typed; the rest follow in parser order.
-_SLASH_FIRST = ("start", "approve", "reject", "resume", "pause", "stop", "status", "attach", "task", "steer", "help")
-_SLASH_ALIAS_TEXT = {
-    "approve": "Approve a task that awaits review (asks first)",
-    "reject": "Send a task back with a reason",
-    "leave": "Leave the provider terminal; work keeps running",
-    "resume": "Continue after a pause or a stop",
-    "overview": "Show the Overview view",
-    "providers": "Show the Providers view",
-    "activity": "Show the Activity view",
-    "sessions": "Show the Sessions view",
-    "health": "Show the Health view",
-    "actions": "Show the Actions view",
-    "home": "Pick another mission",
-    "backup": "Copy the Bridge database to a file",
-    "restore": "Replace the Bridge database from a backup",
-    "worker": "Connect this host to a coordinator (optional)",
-    "remote": "Reach other hosts through a coordinator",
-    "theme": "Show the colour theme and a swatch per role",
-}
-
-
-@functools.lru_cache(maxsize=1)
-def _slash_table() -> tuple[tuple[str, str], ...]:
-    """Every slash command with its one-line description, the most used first.
-
-    Names come from the same completion source the Tab key uses. A description is
-    the command table of `llm-bridge help`, else the Actions registry, else the
-    console-only shortcut text.
-    """
-    from .bridge_help import COMMANDS
-
-    effects = {action.command.split()[0]: action.effect for action in ACTIONS if action.command.split()[0] != "task"}  # "task" has one action row but many subcommands
-    names = [item[1:] for item in _command_completions("/")]
-    ordered = [name for name in _SLASH_FIRST if name in names] + [name for name in names if name not in _SLASH_FIRST]
-    return tuple(
-        ("/" + name, effects.get(name) or _SLASH_ALIAS_TEXT.get(name) or COMMANDS.get(name, ("",))[0].split(";")[0])
-        for name in ordered
-    )
-
-
-def _slash_matches(command: str) -> list[tuple[str, str]] | None:
-    """The slash commands whose names start with the typed text, or None when no command name is being typed."""
-    if not command.startswith("/") or any(char.isspace() for char in command):
-        return None
-    return [(name, text) for name, text in _slash_table() if name.startswith(command)]
-
-
-@dataclass(frozen=True)
-class _CommandResult:
-    """Dispatcher feedback plus a positive durable-ack bit for draft cleanup."""
-
-    text: str
-    outcome: str = "unknown"
-
-
-def _items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [_dict(item) for item in value if isinstance(item, dict)]
-
-
-def _station_projection(value: object) -> tuple[list[dict[str, object]], dict[str, object]]:
-    if isinstance(value, list):
-        return (
-            _projected_rows(value, _MAX_STATION_ROWS, ("id", "name", "provider", "model", "observed_model", "status", "restoration_state")),
-            {},
-        )
-    station_data = _dict(value)
-    if not station_data:
-        return [], {}
-    configured = _dict(station_data.get("configured"))
-    observed = _dict(station_data.get("observed"))
-    providers = configured.get("providers") if isinstance(configured.get("providers"), list) else []
-    routes = configured.get("routes") if isinstance(configured.get("routes"), list) else []
-    models = _dict(configured.get("models"))
-    efforts = _dict(configured.get("efforts"))
-    names = list(dict.fromkeys(str(name) for name in [*providers, *routes]))  # type: ignore[misc]  # providers and routes come from a projection typed object
-    observed_name = _text(observed.get("station") or "unknown", 80)
-    if observed_name not in names and observed_name != "unknown":
-        names.append(observed_name)
-    rows = [
-        {
-            "name": name,
-            "id": name,
-            "model": _text(models.get(name) or "unknown", 80),
-            "effort": _text(efforts.get(name) or "unknown", 24),
-            "observed_model": _text(observed.get("model") or "unknown", 80) if name == observed_name else "unknown",
-            "status": _text(observed.get("status") or "configured", 24) if name == observed_name else "configured",
-        }
-        for name in names[:_MAX_STATION_ROWS]
-    ]
-    context = {
-        "mode": _text(configured.get("mode") or "unknown", 24),
-        "executing_operation": _text(station_data.get("executing_operation") or "none", 80),
-        "viewed_station": _text(station_data.get("viewed_station") or "unknown", 80),
-        "observed_station": observed_name,
-        "last_launched_station": _text(station_data.get("last_launched_station") or "unknown", 80),
-        "observed_model": _text(observed.get("model") or "unknown", 80),
-        "observed_effort": _text(observed.get("effort") or "unknown", 24),
-        "operation_status": _text(observed.get("operation_status") or "unknown", 24),
-        "provider_liveness": _text(station_data.get("provider_liveness") or "unknown", 24),
-    }
-    return rows, context  # type: ignore[return-value]  # dict[str, str] rows are accepted as dict[str, object] (invariant value type only)
-
-
-def _projected_rows(value: object, limit: int, fields: tuple[str, ...]) -> list[dict[str, object]]:
-    rows = _items(value)
-    return [{key: _text(row[key], 200) for key in fields if row.get(key) is not None} for row in rows[:limit]]
-
-
-def _bounded_task_value(value: object, *, limit: int = _MAX_DETAIL_ITEMS, preserve_newlines: bool = False) -> object:
-    """Keep useful task detail while preventing arbitrary nested payload growth."""
-    if isinstance(value, str):
-        if preserve_newlines:
-            # Per-character cleaning keeps the length, so only the first limit + 1 characters matter.
-            clean = _scrub(value[: _MAX_DETAIL_TEXT + 1], keep_newline=True, drop_format=False)
-            return clean if len(value) <= _MAX_DETAIL_TEXT else clean[: _MAX_DETAIL_TEXT - 1] + glyph("ellipsis")
-        return _cut_text(value, _MAX_DETAIL_TEXT)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    if isinstance(value, list):
-        return [_bounded_task_value(item) for item in value[:limit]]
-    if isinstance(value, dict):
-        allowed = {"prompt", "title", "priority", "acceptance", "evidence", "revision", "status", "changes", "created_at", "text", "source", "at"}
-        return {
-            _text(key, 48): _bounded_task_value(item, preserve_newlines=key == "prompt")
-            for key, item in list(value.items())[:limit]
-            if key in allowed
-        }
-    return _text(value, 200)
-
-
-def _project_tasks(value: object, limit: int = _MAX_TASK_ROWS) -> list[dict[str, object]]:
-    output: list[dict[str, object]] = []
-    for task in _items(value)[:limit]:
-        item: dict[str, object] = {}
-        for key in ("id", "ordinal", "title", "status", "priority", "ordering", "revision", "updated_at", "origin", "proposal_status", "proposed_by_operation"):
-            if key in task:
-                item[key] = _text(task[key], 120)
-        for key in ("prompt", "acceptance", "evidence", "pending", "depends_on", "amendments"):
-            if key in task:
-                item[key] = _bounded_task_value(task[key], preserve_newlines=key == "prompt")
-        output.append(item)
-    return output
-
-
-def _scalar(value: object, limit: int) -> str:
-    """Project a scalar for display; a missing value is empty text, never the string "None"."""
-    return "" if value is None else _text(value, limit)
-
-
-def _project_capacity(value: object) -> dict[str, object]:
-    capacity = _dict(value)
-    selection = _dict(capacity.get("selection"))
-    result: dict[str, object] = {
-        _text(key, 48): _scalar(item, 180)
-        for key, item in capacity.items()
-        if isinstance(item, (str, int, float, bool, type(None)))
-    }
-    if selection:
-        selected: dict[str, object] = {
-            _text(key, 48): _scalar(item, 180)
-            for key, item in selection.items()
-            if key != "decisions" and isinstance(item, (str, int, float, bool, type(None)))
-        }
-        raw_decision = _dict(selection.get("decision"))
-        selected["decision"] = {
-            _text(key, 48): _scalar(item, 120)
-            for key, item in raw_decision.items()
-            if isinstance(item, (str, int, float, bool, type(None)))
-        }
-        decisions: list[dict[str, object]] = []
-        raw_decisions = selection.get("decisions")
-        for raw in raw_decisions[:8] if isinstance(raw_decisions, list) else []:
-            row = _dict(raw)
-            decision: dict[str, object] = {
-                _text(key, 48): _scalar(item, 120)
-                for key, item in row.items()
-                if key != "windows" and isinstance(item, (str, int, float, bool, type(None)))
-            }
-            windows: list[dict[str, object]] = []
-            raw_windows = row.get("windows")
-            for raw_window in raw_windows[:8] if isinstance(raw_windows, list) else []:
-                window = _dict(raw_window)
-                windows.append({
-                    _text(key, 48): _scalar(item, 120)
-                    for key, item in window.items()
-                    if isinstance(item, (str, int, float, bool, type(None)))
-                })
-            decision["windows"] = windows
-            decisions.append(decision)
-        selected["decisions"] = decisions
-        result["selection"] = selected
-    wait = _dict(capacity.get("wait"))
-    if wait:
-        result["wait"] = {
-            _text(key, 48): _scalar(item, 120)
-            for key, item in wait.items()
-            if isinstance(item, (str, int, float, bool, type(None)))
-        }
-    return result
-
-
-def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
-    """Retain only the small projection needed for one UI refresh."""
-    result: dict[str, object] = {}
-    mission = _dict(data.get("mission"))
-    result["mission"] = {
-        key: _text(mission.get(key, ""), 240 if key == "objective" else 100)
-        for key in ("id", "name", "objective", "status", "cwd", "updated_at")
-        if key in mission
-    }
-    result["mission"]["role"] = bridge_theme.mission_role(mission.get("id"), _dict(mission.get("config")))  # type: ignore[index]  # projection values are typed object; the surrounding code builds them as dicts
-    from .bridge_policy import effective_settings
-
-    result["mission"]["execution_policy"] = effective_settings(_dict(mission.get("config")))  # type: ignore[index]
-    result["tasks"] = _project_tasks(data.get("tasks"))
-    current_task = _dict(data.get("current_task"))
-    if current_task:
-        result["current_task"] = {
-            key: _text(current_task.get(key, ""), 180)
-            for key in ("id", "ordinal", "title", "status", "revision")
-            if key in current_task
-        }
-    station_rows, station_context = _station_projection(data.get("stations"))
-    result["stations"] = station_rows
-    if not station_context:
-        station_config = _dict(data.get("station_config"))
-        station_observation = _dict(data.get("station_observation"))
-        raw_station_context = _dict(data.get("station_context"))
-        station_context = {
-            "mode": _text(station_config.get("configured_mode") or station_config.get("mode") or "unknown", 24),
-            "executing_operation": _text(raw_station_context.get("executing_operation") or "none", 80),
-            "operation_status": _text(raw_station_context.get("operation_status") or "unknown", 24),
-            "last_launched_station": _text(raw_station_context.get("last_launched_station") or "unknown", 80),
-            "provider_liveness": _text(raw_station_context.get("provider_liveness") or "unknown", 24),
-            "viewed_station": _text(raw_station_context.get("viewed_station") or "unknown", 80),
-            "observed_station": _text(station_observation.get("station") or "unknown", 80),
-            "observed_model": _text(station_observation.get("model") or "unknown", 80),
-            "observed_effort": _text(station_observation.get("effort") or "unknown", 24),
-        }
-    result["station_context"] = station_context
-    result["events"] = _project_events(data.get("events"))
-    if "operator_events" in data:
-        result["operator_events"] = _project_events(data.get("operator_events"))
-    waiting = _dict(data.get("waiting"))
-    if waiting:
-        result["waiting"] = {
-            "reason": _text(waiting.get("reason"), 24),
-            "providers": [_text(item, 60) for item in waiting.get("providers", [])[:8]] if isinstance(waiting.get("providers"), list) else [],  # type: ignore[index]  # projection values are typed object; this line checks the list
-            "entries": [
-                {key: item.get(key) if isinstance(item.get(key), (int, float, type(None))) else _text(item.get(key), 100)
-                 for key in ("name", "window", "remaining_percent", "reset_epoch", "reason", "provider") if key in item}
-                for item in _items(waiting.get("entries"))[:8]
-            ],
-            "until_epoch": waiting.get("until_epoch") if isinstance(waiting.get("until_epoch"), (int, float)) else None,
-            "detail": _text(waiting.get("detail"), 240),
-        }
-    result["operations"] = _projected_rows(
-        data.get("operations"),
-        20,
-        ("id", "operation_id", "task_id", "task_ordinal", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at", "updated_at"),
-    )
-    pending = data.get("pending_commands")
-    result["pending_command_count"] = len(pending) if isinstance(pending, list) else 0
-    result["task_counts"] = {
-        _text(key, 32): count
-        for key, count in _dict(data.get("task_counts")).items()
-        if isinstance(count, (int, float)) and math.isfinite(count)
-    }
-    result["proposal_counts"] = {
-        _text(key, 32): count
-        for key, count in _dict(data.get("proposal_counts")).items()
-        if isinstance(count, (int, float)) and math.isfinite(count)
-    }
-    total_tasks = data.get("task_total")
-    if isinstance(total_tasks, int):
-        result["task_total"] = total_tasks
-    for key in ("controller", "routes", "execution"):
-        if key in data:
-            if key == "execution" and isinstance(data[key], dict):
-                result[key] = {
-                    _text(field, 48): _text(item, 180) if isinstance(item, str) else item
-                    for field, item in data[key].items()  # type: ignore[attr-defined]  # projection values are typed object; the shape is checked by the surrounding code
-                    if isinstance(item, (str, int, float, bool, type(None)))
-                }
-            else:
-                result[key] = _text(data[key], 240)
-    station_mode = _dict(data.get("station_mode"))
-    if station_mode:
-        result["station_mode"] = {
-            _text(field, 48): _text(value, 120)
-            for field, value in station_mode.items()
-            if isinstance(value, (str, int, float, bool, type(None)))
-        }
-    lifecycle = _dict(data.get("lifecycle"))
-    if lifecycle:
-        lifecycle_projection: dict[str, object] = {
-            _text(field, 48): value if isinstance(value, bool) else _text(value, 180)
-            for field, value in lifecycle.items()
-            if field != "heartbeat"
-            if isinstance(value, (str, int, float, bool, type(None)))
-        }
-        heartbeat = _dict(lifecycle.get("heartbeat"))
-        heartbeat_fields = (
-            "reported_state",
-            "observed_at",
-            "age_seconds",
-            "owner_lock_held",
-            "desired_mission_status",
-            "current_liveness",
-            "source",
-        )
-        if heartbeat:
-            lifecycle_projection["heartbeat"] = {
-                field: _text(heartbeat[field], 100)
-                for field in heartbeat_fields
-                if field in heartbeat and isinstance(heartbeat[field], (str, int, float, bool, type(None)))
-            }
-        result["lifecycle"] = lifecycle_projection
-    capacity = _project_capacity(data.get("capacity"))
-    if capacity:
-        result["capacity"] = capacity
-    for key in ("health", "persistence", "criteria", "last_meaningful_progress", "suspend"):
-        value = _dict(data.get(key))
-        if value:
-            result[key] = {
-                _text(field, 48): _text(item, 180)
-                for field, item in value.items()
-                if isinstance(item, (str, int, float, bool, type(None)))
-            }
-    usage = _dict(data.get("usage"))
-    if usage:
-        result["usage"] = usage
-    agent_map = _dict(data.get("agent_map"))
-    if agent_map:
-        agents = []
-        for item in _items(agent_map.get("agents"))[:200]:
-            agent: dict[str, object] = {
-                key: (_text(item.get(key), limit) if isinstance(item.get(key), str) else item.get(key))
-                for key, limit in (
-                    ("id", 160), ("provider", 60), ("kind", 40), ("mission_id", 80), ("mission_name", 100),
-                    ("operation_id", 80), ("station", 60), ("native_id", 160), ("identity_source", 60),
-                    ("native_parent_id", 160), ("native_root_id", 160), ("lifecycle_source", 60),
-                    ("name", 100), ("parent_id", 160), ("root_id", 160), ("created_at", 80),
-                    ("finished_at", 80), ("status", 40), ("activity", 180), ("model", 100),
-                    ("role", 80), ("role_source", 24),
-                    ("native_status", 40), ("last_activity_at", 80),
-                    ("model_source", 24), ("configured_model", 100), ("reasoning_effort", 40),
-                    ("effort_source", 24), ("configured_effort", 40), ("freshness", 40),
-                    ("activity_freshness", 24), ("lifecycle_freshness", 24),
-                ) if key in item
-            }
-            for key in ("age_seconds", "activity_age_seconds", "lifecycle_age_seconds"):
-                age_value = item.get(key)
-                agent[key] = age_value if isinstance(age_value, (int, float)) and not isinstance(age_value, bool) else None
-            capabilities = _dict(item.get("capabilities"))
-            agent["capabilities"] = {
-                "inspect": capabilities.get("inspect") is True,
-                "navigate": capabilities.get("navigate") is True,
-                "reason": _text(capabilities.get("reason") or "unavailable", 160),
-            }
-            agents.append(agent)
-        result["agent_map"] = {
-            "observed_at": agent_map.get("observed_at") if isinstance(agent_map.get("observed_at"), (int, float)) else 0,
-            "age_tick": 0,
-            "freshness": _text(agent_map.get("freshness") or "unknown", 24),
-            "agents": agents,
-            "errors": {str(key): _text(value, 180) for key, value in _dict(agent_map.get("errors")).items()},
-            "total": len(agents),
-        }
-    return result
-
-
-def _mission(snapshot: dict[str, object]) -> dict[str, object]:
-    nested = _dict(snapshot.get("mission"))
-    return nested or snapshot
-
-
-def _review_pending(snapshot: dict[str, object]) -> bool:
-    """True when a task of this mission awaits the operator (stored status VERIFYING), whatever page of tasks is loaded."""
-    counts = _dict(snapshot.get("task_counts"))
-    if any(str(name).upper() == "VERIFYING" and isinstance(count, int) and count > 0 for name, count in counts.items()):
-        return True
-    shown = [*_items(snapshot.get("tasks")), _dict(snapshot.get("current_task"))]
-    return any(str(task.get("status") or "").upper() == "VERIFYING" for task in shown)
-
-
-def _mission_state_word(snapshot: dict[str, object], status: str) -> str:
-    """The mission's state word: ``NEEDS YOU`` replaces RUNNING while a task awaits review."""
-    return MISSION_NEEDS_YOU_LABEL if status.upper() == "RUNNING" and _review_pending(snapshot) else status
-
-
-def _mission_role_of(snapshot: dict[str, object], mission_id: str = "") -> str:
-    """`mission_N` identity role of the mission in a snapshot (pinned colour, else a stable hash)."""
-    mission = _mission(snapshot)
-    explicit = mission.get("role")
-    if isinstance(explicit, str) and explicit in bridge_theme.MISSION_ROLES:
-        return explicit
-    return bridge_theme.mission_role(mission.get("id") or mission_id, _dict(mission.get("config")))
-
-
-_ESTIMATE_MISSING = _NO_VALUE | {"no rate data"}
-
-
-def _clip(text: str, width: int) -> str:
-    """Clip to terminal cells, marking the cut with an ellipsis."""
-    if width <= 0:
-        return ""
-    if cell_width(text) <= width:
-        return text
-    mark = glyph("ellipsis")
-    return cell_slice(text, 0, max(0, width - cell_width(mark))) + mark
-
-
-def _clock_epoch() -> float:
-    """Wall-clock epoch for text that is re-derived from the current time on every frame.
-
-    The caller cannot say how soon that text changes, so the frame is repainted each second.
-    """
-    from . import common
-
-    bridge_redraw.note_wall(1.0)
-    return common.now_epoch()
-
-
-def _local_clock(value: object) -> str:
-    """Local time of an ISO/epoch timestamp: `HH:MM:SS` today, `Mon 03:13` within the last week, else `2026-11-06 03:13`."""
-    from . import common
-
-    epoch = common.parse_epoch(value, use_date=False)
-    if epoch is None:
-        return "--:--:--"
-    try:
-        moment = time.localtime(epoch)
-        now = common.now_epoch()
-        if time.localtime(now)[:3] == moment[:3]:
-            return time.strftime("%H:%M:%S", moment)
-        if 0 <= now - epoch < 7 * 86400:
-            return time.strftime("%a %H:%M", moment)
-        return time.strftime("%Y-%m-%d %H:%M", moment)
-    except (OverflowError, OSError, ValueError):  # a timestamp outside the platform's range
-        return "--:--:--"
-
-
-def _percent_value(value: object) -> float | None:
-    try:
-        return float(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
-_DURATION_PART = re.compile(r"(\d+)\s*([dhms])\b")
-_DURATION_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
-
-
-def _duration_seconds(value: object) -> int | None:
-    """Seconds in text like `2d 10h 35m`, or None when it is not a plain duration."""
-    text = str(value).strip().lstrip("~").strip()
-    if len(text) > 80:  # far longer than any duration; the pattern is quadratic on a long run of digits
-        return None
-    parts = _DURATION_PART.findall(text)
-    if not parts or _DURATION_PART.sub("", text).strip():
-        return None
-    return sum(int(number) * _DURATION_UNITS[unit] for number, unit in parts)
-
-
-def _window_summary(window: dict[str, object], now: float) -> str:
-    """One capacity scope in plain words, without developer placeholders."""
-    from . import common
-
-    name = _text(window.get("name") or window.get("kind") or "scope", 20)
-    if window.get("kind") == "opaque":
-        return f"{name} quota unmeasured"
-    percent = _percent_left(window.get("remaining_percent"))
-    amount = window.get("remaining_amount")
-    if percent is not None:
-        text = f"{name} {percent} left"
-    elif _known(amount):
-        text = f"{name} {_text(amount, 20)} {_text(window.get('currency') or '', 8)}".rstrip() + " left"
-    else:
-        text = f"{name} remaining unknown"
-    estimate = window.get("estimated_remaining")
-    reset = common.parse_epoch(window.get("reset_epoch"), use_date=False)
-    if _known(estimate) and str(estimate).strip().lower() not in _ESTIMATE_MISSING and any(char.isdigit() for char in str(estimate)):
-        runout = _duration_seconds(estimate)
-        if runout is not None and reset is not None and reset > now and runout > reset - now:
-            # A runout after the window resets is not a forecast of exhaustion.
-            text += ", lasts past reset"
-        else:
-            text += f", empty in ~{_text(estimate, 24)} at this pace"
-    if reset is not None:
-        text += ", resets now" if reset <= now else f", resets {_span(reset - now)}"
-    if _known(window.get("reason")):
-        text += f" ({_text(window.get('reason'), 60)})"
-    return text
-
-
-def _capacity_summaries(snapshot: dict[str, object]) -> list[str]:
-    """Plain-language capacity per route; the active route is listed first."""
-
-    capacity = _dict(snapshot.get("capacity"))
-    selection = _dict(capacity.get("selection"))
-    station_context = _dict(snapshot.get("station_context"))
-    operation_id = str(station_context.get("executing_operation") or "")
-    operation_status = str(station_context.get("operation_status") or "").upper()
-    active_owner = ""
-    if operation_id and operation_status == "RUNNING":
-        active_owner = str(station_context.get("last_launched_station") or "")
-    now = _clock_epoch()
-    selected_owner = str(selection.get("route") or selection.get("provider") or "")
-    rows = _items(selection.get("decisions"))
-    owners = [str(row.get("route") or row.get("provider") or "unknown") for row in rows]
-    # "last selected" needs a recorded operation for that owner; the snapshot lists the recent ones.
-    ran = {str(op.get(key) or "") for op in _items(snapshot.get("operations")) for key in ("route_id", "station", "provider")}
-    # Rotation order is the decisions order; "next" is the first other entry that is not known to be unusable.
-    next_owner = next((owner for row, owner in zip(rows, owners) if owner != active_owner and str(row.get("usable")).lower() != "false"), "")
-    summaries: list[tuple[bool, str]] = []
-    for row, owner in zip(rows, owners):
-        scopes = [_window_summary(window, now) for window in _items(row.get("windows"))]
-        if active_owner and owner == active_owner:
-            label = "active"
-        elif owner == selected_owner and owner in ran:
-            label = "last selected"
-        elif str(row.get("usable")).lower() == "false":
-            label = "not ready"
-        elif owner == next_owner:
-            label = "next"
-        else:
-            label = ""
-        label_text = f" ({label})" if label else ""
-        model = f" / {_text(row['selected_model'], 40)}" if _known(row.get("selected_model")) else ""
-        summaries.append((label == "active", f"{_text(owner, 40)}{model}{label_text}{_SEP}" + (_SEP.join(scopes) or "capacity unavailable")))
-    return [text for _, text in sorted(summaries, key=lambda item: not item[0])]
-
-
-def _usage_rows_for(snapshot: dict[str, object], provider: str, model: str = "") -> list[dict[str, object]]:
-    """Rows of the embedded llm-usage dashboard that describe `provider` (and `model`, when both name one)."""
-    wanted = provider.strip().lower()
-    chosen = []
-    for row in _items(_dict(snapshot.get("usage")).get("rows")):
-        if str(row.get("provider") or "").strip().lower() != wanted:
-            continue
-        row_model = str(row.get("model") or "").strip().lower()
-        if row_model and model and row_model not in model.lower() and model.lower() not in row_model:
-            continue
-        chosen.append(row)
-    return chosen
-
-
-def _usage_window_lines(rows: list[dict[str, object]], now: float) -> list[str]:
-    """One plain-words capacity line per usage scope (`5h 48% left, resets 3h 43m`)."""
-    return [
-        _window_summary({
-            "name": row.get("scope"), "kind": "reset_window", "remaining_percent": row.get("remaining_percent"),
-            "estimated_remaining": row.get("estimated_remaining"), "reset_epoch": row.get("reset_epoch"),
-        }, now)
-        for row in rows
-    ]
-
-
-def _usage_capacity_lines(snapshot: dict[str, object]) -> list[str]:
-    """`■ claude · 5h 48% left, … · week 79% left, …` per provider, from the embedded usage dashboard."""
-
-    now = _clock_epoch()
-    providers: dict[str, list[dict[str, object]]] = {}
-    for row in _items(_dict(snapshot.get("usage")).get("rows")):
-        providers.setdefault(str(row.get("provider") or "").strip().lower(), []).append(row)
-    return [
-        _with_square(f"{_text(name, 40)}{_SEP}" + _SEP.join(_usage_window_lines(rows, now)))
-        for name, rows in providers.items() if name
-    ]
-
-
-# Percent points two capacity readings of the same window may differ before they are reported as a disagreement.
-_USAGE_AGREEMENT_TOLERANCE = 5.0
-
-
-def _usage_disagreements(snapshot: dict[str, object]) -> list[str]:
-    """One line per provider whose Usage rows contradict the controller's last capacity observation.
-
-    The dashboard is a live llm-usage read; Overview, Providers and `status` show what the
-    controller last observed. When they differ for a window, say so and give the controller's
-    figures and their age instead of leaving two screens that answer differently.
-    """
-    usage = _dict(snapshot.get("usage"))
-    if not isinstance(usage.get("rows"), list):
-        return []
-    capacity = _dict(snapshot.get("capacity"))
-    age = _int_or_none(capacity.get("source_age_seconds"))
-    now = _clock_epoch()
-    lines: list[str] = []
-    reported: set[str] = set()
-    for decision in _items(_dict(capacity.get("selection")).get("decisions")):
-        provider = str(decision.get("capacity_provider") or decision.get("provider") or "").strip().lower()
-        windows = [window for window in _items(decision.get("windows")) if _percent_value(window.get("remaining_percent")) is not None]
-        rows = _usage_rows_for(snapshot, provider)
-        if not provider or provider in reported or not windows or not rows:
-            continue
-
-        def agrees(window: dict[str, object]) -> bool:
-            """True when the dashboard has no row for this window or a row within the tolerance."""
-            wanted = _percent_value(window.get("remaining_percent"))
-            same = [row for row in rows if row.get("scope") == window.get("name")]
-            return not same or any(
-                (seen := _percent_value(row.get("remaining_percent"))) is not None and wanted is not None
-                and abs(seen - wanted) <= _USAGE_AGREEMENT_TOLERANCE
-                for row in same
-            )
-
-        if all(agrees(window) for window in windows):
-            continue
-        reported.add(provider)
-        observed = _SEP.join(_window_summary(window, now).split(", resets")[0] for window in windows)
-        lines.append(f"{provider} differs from the controller's last observation" + (f" ({_age(age)} ago)" if age is not None else "") + f": {observed}")
-    return lines
-
-
-def _with_square(text: str) -> str:
-    """Put the provider square in front of a capacity line (`■ codex (active) · 5h 95% left`)."""
-    return f"{glyph('square')} {text}"
-
-
-def _task_label(task: dict[str, object]) -> str:
-    identifier = _text(task_number(task) if task_number(task) is not None else "?", 40)
-    title = _cut_text(task.get("title") or task.get("prompt") or "Untitled task", 90)
-    state = _text(task.get("status", "unknown"), 24)
-    return f"{identifier}  {_state_text(state)}  {title}"
-
-
-_ORDER_STATE_RANK = {
-    name: rank
-    for rank, name in enumerate(("RUNNING", "VERIFYING", "READY", "QUEUED", "BLOCKED", "PAUSED", "FAILED", "COMPLETED", "CANCELLED"))
-}
-
-
-def _count_phrase(counts: dict[str, object]) -> str:
-    """`1 running · 2 queued` in lifecycle order, skipping zero counts."""
-    pairs = [
-        (str(state).upper(), count)
-        for state, count in counts.items()
-        if isinstance(count, (int, float)) and count and math.isfinite(count)
-    ]
-    pairs.sort(key=lambda item: (_ORDER_STATE_RANK.get(item[0], 99), item[0]))
-    return _SEP.join(f"{int(count)} {_text(state, 12).lower()}" for state, count in pairs)
-
-
-def _controller_line(data: dict[str, object]) -> str:
-    """What the controller is doing, derived from lifecycle + heartbeat."""
-    mission = _mission(data)
-    status = str(mission.get("status") or "").upper()
-    lifecycle = _dict(data.get("lifecycle"))
-    if not status and lifecycle:
-        status = str(lifecycle.get("status") or "").upper()
-    heartbeat = _dict(lifecycle.get("heartbeat"))
-    if not status:
-        return "status not loaded yet"
-    if status == "FAILED" and _known(lifecycle.get("failure_reason")):
-        return f"failed — {_text(lifecycle.get('failure_reason'), 160)}"
-    if status in ENDED_MISSION_STATUSES:
-        return f"mission {status.lower()} — controller finished"
-    if status == "STOPPING":
-        return "stopping after the current step"
-    hint = controller_hint(status, "console")
-    if hint:
-        return hint
-    if status in STARTED_MISSION_STATUSES and lifecycle.get("controller_running") is False:
-        return "not running — type /resume"
-    if status == "PAUSED":
-        context = _dict(data.get("station_context"))
-        if context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
-            return "pausing after the current provider invocation"
-    age = _int_or_none(heartbeat.get("age_seconds"))
-    reported = str(heartbeat.get("reported_state") or "").upper()
-    lead = "paused, controller " if status == "PAUSED" else ""
-    if reported == "ACTIVE" and age is not None and age <= 30:
-        return f"{lead}active · heartbeat {_age(age)} ago"
-    if age is not None:
-        return f"silent for {_age(age)} — controller may have stopped (type status or resume)"
-    return "no heartbeat recorded yet"
-
-
-def _review_hold_task(data: dict[str, object]) -> str | None:
-    """Number of the reviewed task the mission is holding the next task for, else None."""
-    hold = _dict(data.get("hold"))
-    if hold.get("reason") != "review" or not _known(hold.get("task_ordinal")):
-        return None
-    return _text(hold["task_ordinal"], 12)
-
-
-def _review_hold_text(number: str) -> str:
-    return f"task {number} awaits your review{_SEP}/approve {number}{_SEP}/reject {number} reason{_SEP}/continue"
-
-
-def _needs_you_rows(data: dict[str, object]) -> list[str]:
-    """Items that wait for the operator, most urgent first."""
-    tasks = _items(data.get("tasks"))
-    rows: list[str] = []
-    held = _review_hold_task(data)
-    waiting = _dict(data.get("waiting"))
-    if waiting:
-        from .bridge_monitor import waiting_message
-
-        rows.append(waiting_message(waiting, _clock_epoch(), console=True))
-    for task in tasks:
-        if str(task.get("status", "")).upper() == "VERIFYING":
-            number = _text(task_number(task) if task_number(task) is not None else "?", 12)
-            if number == held:
-                rows.append(_review_hold_text(number))
-                continue
-            rows.append(approval_row("console", [number]))
-    pending = _dict(data.get("proposal_counts")).get("PENDING")
-    if isinstance(pending, (int, float)) and pending:
-        rows.append(proposals_row("console", int(pending)))
-    provider_wait = _dict(data.get("provider_wait"))
-    question_count = provider_wait.get("question_count")
-    if isinstance(question_count, (int, float)) and 1 <= question_count <= 32:
-        provider = _text(provider_wait.get("provider") or "Provider", 40)
-        mission_id = _text(_dict(data.get("mission")).get("id") or "?", 64)
-        attach = f"llm-bridge attach --mission {mission_id}"
-        questions = provider_wait.get("questions")
-        first = questions[0] if isinstance(questions, list) and questions and isinstance(questions[0], dict) else None
-        question = first.get("question") if first else None
-        options = first.get("options") if first else None
-        if isinstance(question, str) and isinstance(options, list) and options and all(isinstance(option, str) for option in options):
-            choices = "; ".join(f"{index}. {_text(option, 200)}" for index, option in enumerate(options[:8], 1))
-            rows.append(f"{provider} asks: {_text(question, 800)} — choices: {choices} — take control of the terminal to answer: {attach}")
-        else:
-            noun = "question" if question_count == 1 else "questions"
-            rows.append(f"{provider} has {int(question_count)} queued {noun} — take control of the terminal and press Shift+Left to answer: {attach}")
-    from .bridge_format import declined_message, declined_provider
-
-    stuck = []
-    for task in tasks:
-        if str(task.get("status", "")).upper() not in {"BLOCKED", "FAILED"}:
-            continue
-        declined = declined_provider(data, task) if str(task.get("status", "")).upper() == "BLOCKED" else ""
-        if declined:
-            rows.append(declined_message(declined))
-            continue
-        asked = _dict(data.get("awaiting_answer"))
-        if asked.get("question") and asked.get("task_id") == task.get("id") and str(task.get("status", "")).upper() == "BLOCKED":
-            number = _text(task_number(task) if task_number(task) is not None else "?", 12)
-            rows.append(f'task {number} asked: "{_text(asked["question"], 160)}"{_SEP}/amend {number} FILE then /retry {number}{_SEP}/retry {number}{_SEP}/cancel {number}')
-            continue
-        stuck.append(f"task {_text(task_number(task) if task_number(task) is not None else '?', 12)} {str(task.get('status')).upper()}")
-    if stuck:
-        rows.append(_SEP.join(stuck[:3]) + (f" (+{len(stuck) - 3} more)" if len(stuck) > 3 else "") + " — inspect in Tasks")
-    return rows[:5]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # --- tmux policy lives in ``terminal``; these thin names keep the console's call sites and the
 # tests that replace them (``_execute_terminal_action``, ``_read_provider_activity``) unchanged.
 _ACTIVITY_SEEN = terminal.ACTIVITY_SEEN
-_inside_station = terminal.inside_station
 _outside_tmux_client = terminal.outside_tmux_client
 _is_bridge_station_socket = terminal.is_bridge_station_socket
 
@@ -1756,1005 +382,127 @@ def _execute_terminal_action(source_mission: str, action: TerminalAction) -> Non
     terminal.execute_terminal_action(source_mission, action, _load_handle)
 
 
-def _idle_phrase(snapshot: dict[str, object]) -> str:
-    """Observation text such as `no output for 2m`, or empty when output is recent."""
-    idle = snapshot.get("output_idle_seconds")
-    if not isinstance(idle, (int, float)) or isinstance(idle, bool) or idle < _OUTPUT_IDLE_THRESHOLD_SECONDS:
-        return ""
-    if idle < 60:
-        return f"no output for {int(idle)}s"
-    # Whole minutes rounded down, so the indicator never overstates.
-    return f"no output for {fmt_duration(int(idle // 60) * 60)}"
-
-
-def _station_idle_phrase(snapshot: dict[str, object]) -> str:
-    """The idle phrase for the tmux status line, in coarser steps than the console's own.
-
-    Every change of the status text repaints every attached client, so the
-    station shows `no output for 30s`, then 40s and 50s, then whole minutes,
-    instead of a new value each second.
-    """
-    idle = snapshot.get("output_idle_seconds")
-    if isinstance(idle, (int, float)) and not isinstance(idle, bool) and _OUTPUT_IDLE_THRESHOLD_SECONDS <= idle < 60:
-        snapshot = {**snapshot, "output_idle_seconds": int(idle // 10) * 10}
-    return _idle_phrase(snapshot)
-
-
-def _station_status_is_implied(mission_status: str, task: dict[str, object]) -> bool:
-    """True when the task text already says what the mission state would add.
-
-    An ordinary RUNNING mission with a current task needs no mission word, and neither does
-    ``NEEDS YOU`` when the current task is the one that awaits review (its own ``REVIEW`` says so).
-    """
-    if mission_status == "UNKNOWN":
-        return True
-    if not task:
-        return False
-    return mission_status == "RUNNING" or (mission_status == MISSION_NEEDS_YOU_LABEL and str(task.get("status") or "").upper() == "VERIFYING")
-
-
-def _strip_task_status(snapshot: dict[str, object], task: dict[str, object]) -> str:
-    """The task status the tmux strip shows.
-
-    The provider's operation row turns EXITED before the controller moves the task on, so a
-    RUNNING task whose newest operation exited with status 0 is shown as VERIFYING, the state
-    the controller records next, in step with the "Provider exited" message in the pane.
-    """
-    status = str(task.get("status") or "unknown")
-    if status.upper() != "RUNNING" or _known(_dict(snapshot.get("station_context")).get("executing_operation")):
-        return status
-    operations = _items(snapshot.get("operations"))
-    last = operations[-1] if operations else {}
-    same_task = str(last.get("task_id")) == str(task.get("id")) if last.get("task_id") is not None and task.get("id") is not None else True
-    if same_task and str(last.get("status") or "").upper() == "EXITED" and str(last.get("exit_code")) == "0":
-        return "VERIFYING"
-    return status
-
-
-def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
-    """`(mission label, task/state text)` for the tmux status line.
-
-    The task comes first in the state text; the mission state is appended unless
-    a task is running in an ordinary RUNNING mission. The label (repository
-    folder or mission name, at most 14 cells) says which mission this station is.
-    """
-    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
-    task = _dict(snapshot.get("current_task"))
-    if task:
-        task_status = _strip_task_status(snapshot, task)
-        idle = _station_idle_phrase(snapshot) if task_status.upper() == "RUNNING" else ""
-        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or status_label(_text(task_status, 12).upper()))
-    else:
-        label = "No task"
-    if not _station_status_is_implied(mission_status, task):
-        label = f"{label}{_SEP}{mission_status}"
-    from .bridge_switcher import mission_label
-
-    mission = _mission(snapshot)
-    return mission_label(mission.get("name"), mission.get("cwd")), label
-
-
-def _station_status_segments(snapshot: dict[str, object]) -> list[Segment]:
-    """The state text of the tmux status line with the state words in their theme colours.
-
-    Same content as `_station_status_parts` plus the state glyph: `Task 6 ● RUNNING`.
-    A silent provider shows its idle phrase (`muted`, `warn` after ten minutes) instead.
-    """
-    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
-    task = _dict(snapshot.get("current_task"))
-    out: list[Segment] = []
-    if task:
-        status = _strip_task_status(snapshot, task)
-        idle = _station_idle_phrase(snapshot) if status.upper() == "RUNNING" else ""
-        out.append((f"Task {_text(task_number(task) or '?', 8)} ", "info"))
-        out.append((idle, _idle_role(idle)) if idle else _state_segment(_text(status, 12)))
-    else:
-        out.append(("No task", "muted"))
-    if not _station_status_is_implied(mission_status, task):
-        out += [(_SEP, "dim"), _state_segment(mission_status)]
-    return out
-
-
-def _station_status_context(snapshot: dict[str, object]) -> str:
-    """Compact, most-important-first state for the tmux status line, led by the mission label."""
-    where, label = _station_status_parts(snapshot)
-    return f"{where}{_SEP}{label}" if where else label
-
-
-def _station_label(station: dict[str, object]) -> str:
-    name = _text(station.get("name") or station.get("provider") or station.get("id") or "Station", 60)
-    configured_model = _text(station.get("model"), 50) if _known(station.get("model")) else "default"
-    observed_model = _text(station.get("observed_model"), 50) if _known(station.get("observed_model")) else "-"
-    state = _text(station.get("restoration_state") or station.get("status") or "", 24)
-    state = "" if not _known(state) else f"  {state}"
-    return f"{name}  model {configured_model}  observed {observed_model}{state}"
-
-
-def _bounded_event_data(value: object, depth: int = 3) -> object:
-    """Keep event data structured but bounded in depth, width and text size."""
-    if isinstance(value, dict):
-        if depth <= 0:
-            return f"{len(value)} fields"
-        return {
-            _text(key, 48): _bounded_event_data(item, depth - 1)
-            for key, item in list(value.items())[:_MAX_DETAIL_ITEMS]
-        }
-    if isinstance(value, list):
-        if depth <= 0:
-            return f"{len(value)} items"
-        return [_bounded_event_data(item, depth - 1) for item in value[:6]]
-    if isinstance(value, str):
-        return _text(value, 160)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return _text(value, 80)
-
-
-def _project_events(value: object, limit: int = _MAX_EVENT_ROWS) -> list[dict[str, object]]:
-    """Project events with their data kept as a bounded dict (never a repr)."""
-    projected: list[dict[str, object]] = []
-    for event in _items(value)[:limit]:
-        row: dict[str, object] = {
-            key: _text(event[key], 200)
-            for key in ("id", "event_type", "type", "kind", "summary", "created_at", "task_id", "task_ordinal", "operation_id")
-            if key in event
-        }
-        for key in ("data", "payload"):
-            if key not in event:
-                continue
-            data = _bounded_event_data(event[key])
-            if len(json.dumps(data, default=str)) > 2400 and isinstance(data, dict):
-                data = {name: item for name, item in data.items() if isinstance(item, (str, int, float, bool, type(None)))}
-            source = event[key]
-            if isinstance(data, dict) and isinstance(source, dict) and isinstance(source.get("decisions"), list):
-                # Window lists fall below the depth bound; keep the remaining percentages as text.
-                brief = _capacity_brief(source["decisions"], str(source.get("route") or source.get("provider") or ""))
-                if brief:
-                    data["capacity_brief"] = brief
-            row["data"] = data
-            break
-        projected.append(row)
-    return projected
-
-
-# Derived from the event registry (`bridge_events.EVENTS`), which holds the classification of every kind.
-_COLLAPSED_EVENTS = bridge_events.collapsed_kinds()
-_PLUMBING_EVENTS = bridge_events.plumbing_kinds()
-
-
-def _task_numbers(snapshot: dict[str, object]) -> dict[str, str]:
-    """Task id to displayed number for the tasks on this page (differs once tasks carry an ordinal)."""
-    return {str(task["id"]): str(task_number(task)) for task in _items(snapshot.get("tasks")) if task.get("id") is not None}
-
-
-@dataclass(frozen=True)
-class _ActivityEntry:
-    clock: str
-    text: str
-    plumbing: bool
-    kind: str = ""
-
-
-def _activity_entries(events: list[dict[str, object]], numbers: dict[str, str] | None = None) -> list[_ActivityEntry]:
-    """Chronological rows. Runs of heartbeat/refresh events collapse to one row per kind.
-
-    A collapsed row sits at the time of the first event it replaces and reports
-    the count and the time of the last one. Other events between runs split them.
-    """
-    entries: list[_ActivityEntry] = []
-    index = 0
-    while index < len(events):
-        event = events[index]
-        kind = _event_kind(event)
-        if kind not in _COLLAPSED_EVENTS:
-            text, plumbing = _humanize_event(event, numbers)
-            entries.append(_ActivityEntry(_local_clock(event.get("created_at")), text, plumbing, kind))
-            index += 1
-            continue
-        end = index
-        while end + 1 < len(events) and _event_kind(events[end + 1]) in _COLLAPSED_EVENTS:
-            end += 1
-        groups: dict[str, list[dict[str, object]]] = {}
-        for item in events[index:end + 1]:
-            groups.setdefault(_event_kind(item), []).append(item)
-        for group_kind, items in groups.items():
-            base, _ = _humanize_event(items[-1], numbers)
-            count = len(items)
-            first, last = _local_clock(items[0].get("created_at")), _local_clock(items[-1].get("created_at"))
-            if count > 1:
-                noun = "heartbeats" if group_kind == "controller-heartbeat" else "times" if group_kind.endswith("error") else "refreshes"
-                base += f" ({count} {noun}, last {last})"
-            entries.append(_ActivityEntry(first, base, True, group_kind))
-        index = end + 1
-    return entries
-
-
-def _active_owner(snapshot: dict[str, object]) -> str:
-    """Name of the provider/route whose operation is running now, else empty."""
-    context = _dict(snapshot.get("station_context"))
-    if _known(context.get("executing_operation")) and str(context.get("operation_status") or "").upper() == "RUNNING":
-        owner = context.get("last_launched_station")
-        return _text(owner, 60) if _known(owner) else ""
-    return ""
-
-
-def _station_model(snapshot: dict[str, object], owner: str) -> str:
-    """The model seen live for `owner`, else its configured model, else empty."""
-    for station in _items(snapshot.get("stations")):
-        if owner in {str(station.get("name") or ""), str(station.get("provider") or ""), str(station.get("id") or "")}:
-            for key in ("observed_model", "model"):
-                if _known(station.get(key)):
-                    return _text(station[key], 40)
-    return ""
-
-
-def _owner_windows(snapshot: dict[str, object], owner: str) -> list[str]:
-    """`['5h 95%', 'week 21%']` for the owner's measurable capacity windows."""
-    selection = _dict(_dict(snapshot.get("capacity")).get("selection"))
-    for row in _items(selection.get("decisions")):
-        if _decision_owner(row) == owner:
-            return [brief for brief in (_window_brief(window) for window in _items(row.get("windows"))) if brief]
-    return []
-
-
-def _next_task(snapshot: dict[str, object]) -> dict[str, object] | None:
-    """The first task waiting to start. A READY current task counts: while nothing runs it is the next task."""
-    return next(
-        (task for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() in {"READY", "QUEUED"}),
-        None,
-    )
-
-
-def _owner_label(owner: str, model: str) -> str:
-    """The route and model once: the model alone when it already names the route, else `route (model)`."""
-    if not model or model == owner or owner in model:
-        return model or owner
-    return owner if model in owner else f"{owner} ({model})"
-
-
-def _waiting_parts(waiting: dict[str, object]) -> list[str]:
-    """Strip parts for a mission waiting on providers: why, which quota, until when."""
-    from . import common
-
-    subject = "capacity" if waiting.get("reason") == "capacity" else "a usable provider"
-    blocked = []
-    for entry in _items(waiting.get("entries"))[:2]:
-        text = _text(entry.get("name"), 30)
-        if _known(entry.get("window")):
-            text += f" {_text(entry['window'], 12)}"
-            if isinstance(entry.get("remaining_percent"), (int, float)):
-                text += f" {entry['remaining_percent']:g}%"
-        blocked.append(text)
-    until = waiting.get("until_epoch")
-    resume = _relative_epoch(until, common.now_epoch()) if isinstance(until, (int, float)) else None
-    return [part for part in (f"waiting for {subject}", ", ".join(blocked), f"resumes {resume}" if resume else "") if part]
-
-
-def _status_strip(snapshot: dict[str, object], width: int = 0) -> tuple[str, str]:
-    """(text, role) for line 1 of the control view: what is happening, most important first.
-
-    Running: `codex gpt-5 · task 6 running 4m · no output 1m · 5h 95% left · week 21% left`.
-    Otherwise the state, the next task and the command that moves it forward.
-    Lower-value parts are dropped, then clipped, to fit `width` (0 = no limit).
-    """
-    if not snapshot:
-        return "loading…", "dim"
-    status = str(_mission(snapshot).get("status") or "").upper()
-    if status in ENDED_MISSION_STATUSES:
-        tasks = _items(snapshot.get("tasks"))
-        done = sum(1 for task in tasks if str(task.get("status", "")).upper() == "COMPLETED")
-        reason = _dict(snapshot.get("lifecycle")).get("failure_reason")
-        if status == "FAILED" and _known(reason):
-            return _fit_strip([f"mission failed — {_text(reason, 160)}"], width), "error"
-        summary = f"mission {status.lower()}" + (f"{_SEP}{done}/{len(tasks)} tasks completed" if tasks else "")
-        return _fit_strip([summary], width), "ok" if status == "COMPLETED" else "error"
-    current = _dict(snapshot.get("current_task"))
-    if str(current.get("status") or "").upper() == "RUNNING":
-        owner = _active_owner(snapshot)
-        model = _station_model(snapshot, owner) if owner else ""
-        elapsed = _dict(snapshot.get("execution")).get("operation_elapsed_seconds")
-        seconds = _int_or_none(elapsed)
-        task = f"task {_text(task_number(current) if task_number(current) is not None else '?', 12)} running" + (
-            "" if seconds is None else f" {max(0, seconds)}s" if seconds < 60 else f" {_span(seconds, 1)}"
-        )
-        idle = _idle_phrase(snapshot).replace("no output for ", "no output ")
-        windows = _owner_windows(snapshot, owner) if owner else []
-        variants = []
-        for with_model, with_left, with_capacity, with_idle in (
-            (True, True, True, True), (False, True, True, True), (False, False, True, True),
-            (False, False, False, True), (False, False, False, False),
-        ):
-            who = _owner_label(owner, model if with_model else "")
-            capacity = [f"{item} left" if with_left else item for item in windows] if with_capacity else []
-            variants.append([part for part in (who, task, idle if with_idle else "", *capacity) if part])
-        text = _fit_strip_variants(variants, width)
-        return text, "warn" if idle else "ok"
-    blocked_on = _dict(snapshot.get("waiting"))
-    if blocked_on and status == "RUNNING":
-        return _fit_strip(_waiting_parts(blocked_on), width), "warn"
-    waiting = [task for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() == "VERIFYING"]
-    if waiting and status != "CREATED":
-        number = _text(task_number(waiting[0]) if task_number(waiting[0]) is not None else "?", 12)
-        more = f" (+{len(waiting) - 1} more)" if len(waiting) > 1 else ""
-        held = _review_hold_task(snapshot)
-        if held is not None:
-            return _fit_strip_variants([
-                [f"task {held} awaits your review{more}", f"/approve {held}", f"/reject {held} reason", "/continue"],
-                [f"task {held} awaits your review", f"/approve {held}", "/continue"],
-                [f"task {held} awaits your review", "/continue"],
-            ], width), "warn"
-        return _fit_strip([f"task {number} awaits your review{more}", f"type /approve {number}"], width), "warn"
-    following = _next_task(snapshot)
-    upcoming = f"task {_text(task_number(following) if task_number(following) is not None else '?', 12)} ready" if following else "no task waiting · Ctrl-E adds one"
-    if status == "STOPPING":
-        return _fit_strip(["stopping after the current step"], width), "warn"
-    if status in {"CREATED", "STOPPED"}:
-        label = "not started" if status == "CREATED" else "stopped"
-        return _fit_strip([label, upcoming, "type /start"] if following else [label, upcoming], width), "dim"
-    if status == "PAUSED":
-        return _fit_strip(["paused", upcoming, "type /resume"] if following else ["paused", upcoming], width), "warn"
-    wait = _dict(_dict(snapshot.get("capacity")).get("wait"))
-    if wait:
-        until = _relative_epoch(wait.get("target_epoch"))
-        return _fit_strip(["waiting for capacity"] + ([f"resumes {until}"] if until else []), width), "warn"
-    return _fit_strip(["idle", upcoming], width), "dim"
-
-
-def _fit_strip(parts: list[str], width: int) -> str:
-    return _fit_strip_variants([parts], width)
-
-
-def _fit_strip_variants(variants: list[list[str]], width: int) -> str:
-    """The first variant that fits `width`; otherwise the last one, clipped."""
-    for parts in variants:
-        text = _SEP.join(parts)
-        if width <= 0 or cell_width(text) <= width:
-            return text
-    return _clip(_SEP.join(variants[-1]), width)
-
-
-_PALETTE_NOTE = "No actions match; / edits the filter, Backspace clears it."
-
-_USAGE_HEADER = re.compile(r"^Provider\s{2,}\S")
-# Columns dropped, in this order, before the table has to be panned.
-_USAGE_OPTIONAL_COLUMNS = ("Source", "Remaining Time")
-
-
-def _split_usage_text(lines: list[str]) -> tuple[list[str] | None, list[str]]:
-    """(table lines, legend lines) of the llm-usage dashboard text; the table is None if it has no header row.
-
-    The dashboard prints a title and a legend before the table. The table comes
-    first in the view, so the legend moves behind a toggle.
-    """
-    for index, line in enumerate(lines):
-        if _USAGE_HEADER.match(line):
-            legend = [item for item in lines[1:index] if item.strip()]
-            table = list(lines[index:])
-            while table and not table[-1].strip():
-                table.pop()
-            return table, legend
-    return None, []
-
-
-def _fit_usage_table(table: list[str], width: int) -> list[str]:
-    """The table within `width` cells when dropping the optional columns (Source, then Remaining Time) is enough.
-
-    Columns are cut by their start positions in the header row, so every row
-    stays aligned. With `width` 0, or when the table still does not fit, the
-    remaining columns are kept whole and the view pans.
-    """
-    lines = list(table)
-
-    def widest() -> int:
-        return max((cell_width(line.rstrip()) for line in lines), default=0)
-
-    if width > 0 and widest() > width:
-        for name in _USAGE_OPTIONAL_COLUMNS:
-            columns = [(match.start(), match.group()) for match in re.finditer(r"\S+(?: \S+)*", lines[0])]
-            names = [label for _start, label in columns]
-            if name not in names:
-                continue
-            position = names.index(name)
-            begin = columns[position][0]
-            end = columns[position + 1][0] if position + 1 < len(columns) else None
-            lines = [line[:begin] + (line[end:] if end is not None else "") for line in lines]
-            if widest() <= width:
-                break
-        if len(lines) > 1 and lines[1].strip() and set(lines[1].strip()) <= {"─", "-", " "}:
-            lines[1] = lines[1][: len(lines[0].rstrip())]  # the rule ends where the header text ends
-    return [line.rstrip() for line in lines]
-
-
-def _remove_segment_range(segments: list[Segment], begin: int, end: int | None) -> list[Segment]:
-    """Remove a header-indexed text range from styled usage columns."""
-    output: list[Segment] = []
-    offset = 0
-    for text, role in segments:
-        stop = offset + len(text)
-        left = text[:max(0, min(len(text), begin - offset))] if offset < begin else ""
-        right = text[max(0, min(len(text), (end or stop) - offset)):] if end is not None and stop > end else ""
-        if end is None and stop > begin:
-            right = ""
-        if left:
-            output.append((left, role))
-        if end is not None and right:
-            output.append((right, role))
-        offset = stop
-    return _merge_segments(output)
-
-
-def _fit_usage_segments(table: list[list[Segment]], width: int) -> list[list[Segment]]:
-    """Apply the usage table's existing optional-column fit to styled rows."""
-    lines = [_segments_text(line) for line in table]
-
-    def widest() -> int:
-        return max((cell_width(line.rstrip()) for line in lines), default=0)
-
-    if width > 0 and widest() > width:
-        for name in _USAGE_OPTIONAL_COLUMNS:
-            columns = [(match.start(), match.group()) for match in re.finditer(r"\S+(?: \S+)*", lines[0])]
-            names = [label for _start, label in columns]
-            if name not in names:
-                continue
-            position = names.index(name)
-            begin = columns[position][0]
-            end = columns[position + 1][0] if position + 1 < len(columns) else None
-            table = [_remove_segment_range(line, begin, end) for line in table]
-            lines = [_segments_text(line) for line in table]
-            if widest() <= width:
-                break
-        if len(lines) > 1 and lines[1].strip() and set(lines[1].strip()) <= {"─", "-", " "}:
-            table[1] = _remove_segment_range(table[1], len(lines[0].rstrip()), None)
-    fitted: list[list[Segment]] = []
-    for line in table:
-        remaining = len(_segments_text(line).rstrip())
-        parts: list[Segment] = []
-        for text, role in line:
-            piece = text[:remaining]
-            remaining -= len(piece)
-            if piece:
-                parts.append((piece, role))
-            if remaining <= 0:
-                break
-        fitted.append(parts)
-    return fitted
-
-
-def _slice_segments(segments: list[Segment], start: int, width: int) -> list[Segment]:
-    """Take a terminal-cell slice while preserving each segment's role."""
-    if width <= 0:
-        return []
-    skipped = 0
-    used = 0
-    result: list[Segment] = []
-    for text, role in segments:
-        size = cell_width(text)
-        if skipped + size <= start:
-            skipped += size
-            continue
-        local_start = max(0, start - skipped)
-        piece = cell_slice(text, local_start, local_start + width - used)
-        if piece:
-            result.append((piece, role))
-            used += cell_width(piece)
-        skipped += size
-        if used >= width:
-            break
-    return result
-
-
-def _nav_labels(view_index: int, numbered: bool = True) -> list[str]:
-    """Tab labels; the active one in brackets. Without numbers the F-key order still applies."""
-    return [
-        f"[{index + 1} {name}]" if index == view_index and numbered else f"[{name}]" if index == view_index
-        else f"{index + 1} {name}" if numbered else name
-        for index, name in enumerate(VIEWS)
-    ]
-
-
-def _nav_line(view_index: int, separator: str) -> str:
-    return separator.join(_nav_labels(view_index))
-
-
-def _nav_index_at(x: int, view_index: int, width: int, separator: str) -> int:
-    _, entries = _nav_layout(view_index, width, separator)
-    return min(entries, key=lambda item: min(abs(x-item[1]), abs(x-item[1]-len(item[2])+1)))[0] if entries else view_index
-
-
-def _nav_layout(view_index: int, width: int, separator: str) -> tuple[str, list[tuple[int, int, str]]]:
-    """The tab row and the (view, column, label) of each visible tab.
-
-    Tabs are always at least two spaces apart, so neighbours never read as one
-    label. The numbered form needs about 86 columns. Narrower rows drop the
-    numbers (F1-F9 and Tab still follow the same order); below about 72 columns
-    the row scrolls around the active tab and shows `<` / `>` for hidden tabs.
-    """
-    gap = separator if len(separator) >= 2 else "  "
-    for numbered in (True, False):
-        labels = _nav_labels(view_index, numbered)
-        if cell_width(gap.join(labels)) <= width:
-            entries: list[tuple[int, int, str]] = []
-            text = ""
-            for index, label in enumerate(labels):
-                if entries:
-                    text += gap
-                entries.append((index, len(text), label))
-                text += label
-            return text, entries
-    labels = _nav_labels(view_index, False)
-
-    def render(first: int) -> tuple[str, list[tuple[int, int, str]]]:
-        text = "< " if first else ""
-        shown: list[tuple[int, int, str]] = []
-        for index in range(first, len(labels)):
-            label = labels[index]
-            reserve = 2 if index < len(labels) - 1 else 0  # room for the closing " >"
-            if shown and len(text) + len(gap) + len(label) + reserve > width:
-                text += " >"
-                break
-            if shown:
-                text += gap
-            shown.append((index, len(text), label))
-            text += label
-        return text, shown
-
-    for first in range(view_index + 1):
-        text, shown = render(first)
-        if any(index == view_index for index, _offset, _label in shown):
-            return text, shown
-    return render(view_index)
-
-
-def _waiting_on(task: dict[str, object], tasks: list[dict[str, object]], status: dict[str, str] | None = None) -> str:
-    """`after 6, 8` for prerequisites that are not completed (unknown ones count as waiting).
-
-    ``status`` is the id-to-status map of ``tasks``; callers rendering many rows build it once.
-    """
-    dependencies = task.get("depends_on")
-    if not isinstance(dependencies, list) or not dependencies:
-        return ""
-    if status is None:
-        status = {str(item.get("id")): str(item.get("status", "")).upper() for item in tasks}
-    pending = [_text(item, 12) for item in dependencies if status.get(str(item)) != "COMPLETED"]
-    return "after " + ", ".join(pending) if pending else ""
-
-
-def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
-    """`id  ● STATE  prio 5  after 6  title` as segments, with the columns aligned.
-
-    The id, priority and dependencies are secondary (`muted`); the state is the
-    one coloured element; the title stays in the default foreground. Rows of
-    finished tasks recede: everything but the state word is `muted`.
-    """
-    ids = [_text(task_number(task) if task_number(task) is not None else "?", 40) for task in tasks]
-    states = [_text(task.get("status", "unknown"), 24).upper() for task in tasks]
-    shown = [_state_text(state) for state in states]
-    priorities = [f"prio {_text(task['priority'], 8)}" if _known(task.get("priority")) else "" for task in tasks]  # `P0` reads as "most urgent"; here a higher number runs first
-    task_status = {str(item.get("id")): str(item.get("status", "")).upper() for item in tasks}
-    waits = [_waiting_on(task, tasks, task_status) for task in tasks]
-    id_width = max((len(item) for item in ids), default=0)
-    state_width = max((len(item) for item in shown), default=0)
-    priority_width = max((len(item) for item in priorities), default=0)
-    wait_width = max((len(item) for item in waits), default=0)
-    rows: list[list[Segment]] = []
-    for task, identifier, state, text, priority, wait in zip(tasks, ids, states, shown, priorities, waits):
-        title = _cut_text(task.get("title") or task.get("prompt") or "Untitled task", 90)
-        finished = state in _FINISHED_STATES
-        look = _state_look(state)
-        row: list[Segment] = [
-            (f"{identifier:<{id_width}}", "muted"), ("  ", "info"),
-            (f"{text:<{state_width}}", look[1] if look else "muted" if finished else "info"),
-        ]
-        if priority_width:
-            row += [("  ", "info"), (f"{priority:<{priority_width}}", "muted")]
-        if wait_width:
-            row += [("  ", "info"), (f"{wait:<{wait_width}}", "muted")]
-        row += [("  ", "info"), (title, "muted" if finished else "info")]
-        rows.append(row)
-    return rows
-
-
-def _order_list_rows(tasks: list[dict[str, object]]) -> list[str]:
-    """`id  ● STATE  prio 5  after 6  title` with the id, state, priority and dependency columns aligned."""
-    return [_segments_text(row) for row in _order_list_segments(tasks)]
-
-
-_ORDERS_MIN_DETAIL = 8
-_ORDERS_MIN_WIDTH = 60
-
-
-def _orders_list_height(content_height: int, width: int, count: int) -> int | None:
-    """Rows for the Orders list when a live preview fits below it, else None.
-
-    The list takes the rows it needs, but always leaves the preview at least
-    `_ORDERS_MIN_DETAIL` rows plus the separator line.
-    """
-    if count <= 0 or width < _ORDERS_MIN_WIDTH:
-        return None
-    list_height = min(count, content_height - _ORDERS_MIN_DETAIL - 1)
-    return list_height if list_height >= min(count, 3) else None
-
-
-_FENCE = re.compile(r"^\s*(```|~~~)")
-_LIST_ITEM = re.compile(r"^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$")
-
-
-_REFLOW_CACHE: dict[tuple[str, int, int, str], tuple[tuple[str, str], ...]] = {}
-
-
-def _reflow_markdown(text: str, width: int, limit: int) -> list[tuple[str, str]]:
-    """`_reflow_markdown_rows`, remembered for the latest few (text, width, limit) because a frame repeats the call."""
-    key = (text, width, limit, glyph("ellipsis"))  # the ellipsis follows the locale, which changes the clipped rows
-    rows = _REFLOW_CACHE.get(key)
-    if rows is None:
-        if len(_REFLOW_CACHE) >= 16:
-            _REFLOW_CACHE.pop(next(iter(_REFLOW_CACHE)))
-        rows = _REFLOW_CACHE[key] = tuple(_reflow_markdown_rows(text, width, limit))
-    return list(rows)
-
-
-def _fit_cells(row: str, width: int, hang: str) -> list[str]:
-    """Split a row wider than `width` cells at a cell boundary; `textwrap` counts characters, so wide text overflows it."""
-    if cell_width(row) <= width:
-        return [row]
-    pieces: list[str] = []
-    current, used = "", 0
-    for char in row:
-        amount = cell_width(char)
-        if used and used + amount > width:
-            pieces.append(current)
-            current, used = hang, cell_width(hang)
-        current += char
-        used += amount
-    pieces.append(current)
-    return pieces
-
-
-def _reflow_markdown_rows(text: str, width: int, limit: int) -> list[tuple[str, str]]:
-    """Reflow Markdown into at most `limit` (line, role) rows of `width` cells.
-
-    Consecutive plain lines join into one paragraph and re-wrap. List items
-    keep their marker and wrap with a hanging indent. Headings lose their `#`
-    markers and use the heading role. Fenced code and table rows are never
-    re-wrapped; they are clipped instead. Blank lines only separate blocks.
-    More than `limit` rows ends in an ellipsis.
-    """
-    width = max(8, width)
-    out: list[tuple[str, str]] = []
-    paragraph: list[str] = []
-    item_prefix = ""
-
-    def flush() -> None:
-        nonlocal item_prefix
-        if paragraph:
-            joined = " ".join(paragraph)
-            hang = " " * len(item_prefix)
-            wrapped = textwrap.wrap(
-                joined, width=width, initial_indent=item_prefix, subsequent_indent=hang,
-                break_long_words=True, break_on_hyphens=False,
-            ) or [item_prefix + joined]
-            out.extend((piece, "info") for line in wrapped for piece in _fit_cells(line, width, hang))
-        paragraph.clear()
-        item_prefix = ""
-
-    in_fence = False
-    for raw in text.splitlines():
-        line = raw.expandtabs(4).rstrip()
-        if _FENCE.match(line):
-            flush()
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            out.append((_clip(line, width), "secondary"))
-            continue
-        stripped = line.strip()
-        if not stripped:
-            flush()
-            continue
-        if stripped.startswith("|"):
-            flush()
-            out.append((_clip(stripped, width), "secondary"))
-            continue
-        heading = heading_label(line)
-        if heading is not None:
-            flush()
-            out.append((_clip(heading, width), "heading"))
-            continue
-        item = _LIST_ITEM.match(line)
-        if item:
-            flush()
-            room = max(2, width // 2)  # at least half the row stays for the item's text
-            marker = item.group(2) + " "
-            item_prefix = (" " * min(len(item.group(1)), 6, max(0, room - len(marker))) + marker)[:room]
-            paragraph.append(item.group(3).strip())
-            continue
-        paragraph.append(stripped)
-    flush()
-    if len(out) > limit:
-        out = out[:limit]
-        if out:
-            out[-1] = (_clip(out[-1][0] + "…", width), out[-1][1])
-    return out
-
-
-def _evidence_text(item: object) -> str:
-    """One evidence item as text: its `text` when it is a record, else `key=value` words, else the text itself."""
-    value = item if isinstance(item, dict) else None
-    if value is None:
-        text = _cut_text(item, 240)
-        if text.startswith("{") and text.endswith("}"):
-            try:
-                parsed = json.loads(text)
-            except ValueError:
-                try:
-                    parsed = ast.literal_eval(text)
-                except Exception:  # any parser failure (MemoryError, RecursionError, TypeError, ...) leaves the text as is
-                    return text
-            value = parsed if isinstance(parsed, dict) else None
-        if value is None:
-            return text
-    recorded = value.get("text")
-    if isinstance(recorded, str) and recorded.strip():
-        return _cut_text(recorded, 240)
-    return " ".join(_compact_pairs(value, limit=6)) or _cut_text(item, 240)
-
-
-def _order_separator_segments(task: dict[str, object], width: int) -> list[Segment]:
-    """`── task 6 · ● RUNNING · priority 5 ────`: rule in `dim`, state in its own colour."""
-    rule = glyph("hbar")
-    sep = (_SEP, "dim")
-    status = _text(task.get("status", "unknown"), 24)
-    parts: list[Segment] = [
-        (f"{rule}{rule} ", "dim"), (f"task {_text(task_number(task) if task_number(task) is not None else '?', 12)}", "muted"), sep, _state_segment(status),
-    ]
-    if _known(task.get("priority")):
-        parts += [sep, (f"priority {_text(task['priority'], 8)}", "muted")]
-    parts.append((" ", "dim"))
-    used = _segments_width(parts)
-    parts.append((rule * max(2, width - used), "dim"))
-    return _clip_segments(parts, width, mark=False)
-
-
-def _order_separator(task: dict[str, object], width: int) -> str:
-    return _segments_text(_order_separator_segments(task, width))
-
-
-def _order_preview_lines(task: dict[str, object], width: int, height: int) -> list[tuple[str, str, str]]:
-    """(label, value, value role) rows previewing one task, at most `height` rows.
-
-    The title is not repeated: the list row above and the separator name the task.
-    """
-    if height <= 0:
-        return []
-    room = max(10, width - _BRIDGE_LABEL)
-    rows: list[tuple[str, str, str]] = []
-    if _known(task.get("revision")):
-        rows.append(("Revision", _text(task["revision"], 16), "info"))
-    dependencies = task.get("depends_on")
-    if isinstance(dependencies, list) and dependencies:
-        rows.append(("Depends on", _clip(", ".join(_text(item, 12) for item in dependencies), room), "info"))
-    raw_acceptance = task.get("acceptance")
-    acceptance = [item for item in raw_acceptance if _known(item)] if isinstance(raw_acceptance, list) else []
-    if acceptance:
-        shown = acceptance[:5]
-        for index, item in enumerate(shown):
-            rows.append(("Acceptance" if index == 0 else "", _clip(f"{index + 1}. {_cut_text(item, 240)}", room), "info"))
-        if len(acceptance) > len(shown):
-            rows.append(("", f"+{len(acceptance) - len(shown)} more", "info"))
-    else:
-        rows.append(("Acceptance", "none recorded", "info"))
-    raw_evidence = task.get("evidence")
-    evidence = [item for item in raw_evidence if _known(item)] if isinstance(raw_evidence, list) else []
-    if evidence:
-        count = f"{len(evidence)} item{'s' if len(evidence) != 1 else ''}"
-        rows.append(("Evidence", _clip(f"{count}{_SEP}latest: {_evidence_text(evidence[-1])}", room), "info"))
-    else:
-        rows.append(("Evidence", "none yet", "info"))
-    prompt = task.get("prompt")
-    if _known(prompt) and height > len(rows):
-        # The prompt gets every row that is left; the fixed fields above win when space is short.
-        for index, (line, role) in enumerate(_reflow_markdown(str(prompt), room, height - len(rows))):
-            rows.append(("Prompt" if index == 0 else "", line, role))
-    return rows[:height]
-
-
-def _order_preview_rows(task: dict[str, object], width: int, height: int) -> list[str]:
-    """Plain-text form of `_order_preview_lines`: label column plus value."""
-    return [f"{label:<{_BRIDGE_LABEL}}{value}" for label, value, _role in _order_preview_lines(task, width, height)]
-
-
-def _recent_event_rows(events: list[dict[str, object]], width: int, limit: int, numbers: dict[str, str] | None = None) -> list[str]:
-    """Newest-last `HH:MM:SS  what happened` lines of operator-level events for the Overview."""
-    if limit <= 0 or not events:
-        return []
-    entries = [entry for entry in _activity_entries(events, numbers) if not entry.plumbing][-limit:]
-    rows = []
-    for index, entry in enumerate(entries):
-        text = f"{entry.clock}  {entry.text}".rstrip()
-        rows.append(f"{'Recent' if index == 0 else '':<{_BRIDGE_LABEL}}" + _clip(text, max(10, width - _BRIDGE_LABEL)))
-    return rows
-
-
-def _provider_state(
-    name: str,
-    active: str,
-    current: dict[str, object],
-    elapsed: object,
-    decision: dict[str, object] | None,
-    now: float,
-    usage_rows: list[dict[str, object]] | None = None,
-) -> tuple[str, str]:
-    """(live state text, role) for one provider block header.
-
-    Before any capacity decision exists, the embedded usage dashboard's rows
-    (`usage_rows`) tell whether the provider has capacity left.
-    """
-    if name and name == active:
-        text = "running"
-        if current:
-            text += f" task {_text(task_number(current) if task_number(current) is not None else '?', 12)}"
-            if _int_or_none(elapsed) is not None:
-                text += f" {_span(elapsed, 1)}"
-        return text, "ok"
-    if decision is None and usage_rows:
-        percents = [_percent_value(row.get("remaining_percent")) for row in usage_rows]
-        empty = any(value is not None and value <= 0 for value in percents)
-        return ("not ready", "warn") if empty else ("ready", "ok")
-    if decision is None:
-        return "capacity not observed", "dim"
-    usable = str(decision.get("usable")).lower()
-    if usable == "true":
-        return "ready", "ok"
-    if usable != "false":
-        return "state unknown", "dim"
-    from . import common
-
-    resets = []
-    for window in _items(decision.get("windows")):
-        try:
-            exhausted = float(str(window.get("remaining_percent"))) <= 0
-        except ValueError:
-            exhausted = False
-        reset = common.parse_epoch(window.get("reset_epoch"), use_date=False)
-        if exhausted and reset is not None and reset > now:
-            resets.append(reset)
-    if resets:
-        return f"rate-limited, resets {_relative_epoch(max(resets), now)}", "warn"
-    reason = f" ({_text(decision['reason'], 60)})" if _known(decision.get("reason")) else ""
-    return f"not ready{reason}", "warn"
-
-
-_CLOCK_ROW = re.compile(r"^(?P<clock>[\d-]{2}:[\d-]{2}:[\d-]{2}|\w{2,4} \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2})  (?P<text>.*)$")
-
-
-def _activity_row_segments(row: str, role: str) -> list[Segment]:
-    """Clock `muted`; plumbing `dim`; operator events in the default colour; failures `error`."""
-    match = _CLOCK_ROW.match(row)
-    text_role = "error" + QUIET if role == "error" else "dim" if role == "dim" else "info"
-    if not match:
-        return [(row, text_role)]
-    return [
-        (match.group("clock"), "dim" if role == "dim" else "muted"), ("  ", "info"),
-        *([(match.group("text"), text_role)] if text_role != "info" else _inline_segments(match.group("text"), "info")),
-    ]
-
-
-def _activity_role(text: str) -> str:
-    """Role for an operator-level Activity row: problems stand out."""
-    lowered = text.lower()
-    if any(word in lowered for word in ("failed", "unknown", "out of handoffs", "unexpectedly", "rejected", "aborted")):
-        return "error"
-    if (lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)")) or lowered.startswith("provider stopped by bridge"):
-        return "error"
-    if any(word in lowered for word in ("awaiting approval", "awaiting review", "waiting for capacity", "paused", "blocked")):
-        return "warn"
-    return "info"
-
-
-def _provider_header_segments(name: str, model: str, state: str, role: str, flags: list[str]) -> list[Segment]:
-    """`■ codex  model gpt-5  ● running task 2 4m  [viewed]`: provider square, name, model, live state."""
-    state_role = {"ok": "state_running", "dim": "muted"}.get(role, role)
-    glyph_name = ""
-    if state.startswith("running"):
-        glyph_name = "running"
-    elif state == "ready":
-        glyph_name, state_role = "waiting", "state_waiting"
-    elif state.startswith("rate-limited"):
-        state_role = "capacity_empty"
-    state_text = f"{glyph(glyph_name)} {state}" if glyph_name else state
-    out: list[Segment] = [(glyph("square"), _provider_role(name)), (" " + name, "info"), ("  " + model, "muted"), ("  ", "info")]
-    if state.startswith("rate-limited"):  # only the word is capacity-coloured; the reset time is a muted fact
-        out += [("rate-limited", "capacity_empty"), (state[len("rate-limited"):], "muted")]
-    else:
-        out.append((state_text, state_role))
-    for flag in flags:
-        out += [("  ", "info"), (flag, "accent" if flag == "[viewed]" else "muted")]
-    return out
-
-
-def _finished_operation_text(data: dict[str, object]) -> str:
-    """`last operation exited 0 · 1m ago · awaiting review` when the newest operation is no longer running, else ``""``.
-
-    Reads the operation row that the Sessions view shows, so Health and Sessions agree.
-    """
-    if _known(_dict(data.get("station_context")).get("executing_operation")):
-        return ""
-    operations = _items(data.get("operations"))
-    last = operations[-1] if operations else {}
-    status = str(last.get("status") or "").upper()
-    if not status or status in ACTIVE_OPERATION_STATUSES:
-        return ""
-    exit_code = last.get("exit_code")
-    age = _relative_epoch(last.get("updated_at") or last.get("created_at"), _clock_epoch())
-    review = any(str(task.get("status") or "").upper() == "VERIFYING" for task in (*_items(data.get("tasks")), _dict(data.get("current_task"))))
-    return _SEP.join(part for part in (
-        f"last operation {status.lower()}" + ("" if exit_code is None else f" {_text(exit_code, 8)}"),
-        age or "",
-        "awaiting review" if review else "",
-    ) if part)
-
-
-def _recent_operation_segments(op: dict[str, object], age: str | None) -> list[Segment]:
-    """`  recent: task 3 · succeeded · exit 0 · 2m ago`: plumbing in `dim`, a failure in `error`."""
-    status = _text(op.get("status") or "-", 20).lower()
-    exit_code = _text(op.get("exit_code"), 16) if op.get("exit_code") is not None else "-"
-    failed = status in {"failed", "error"} or exit_code not in {"-", "0"}
-    return [
-        (f"  recent: task {_text(op.get('task_ordinal') or op.get('task_id') or '-', 12)}{_SEP}", "dim"),
-        (status, "error" + QUIET if failed else "dim"),
-        (_SEP, "dim"), (bridge_format.exit_short(exit_code), "error" + QUIET if exit_code not in {"-", "0"} else "dim"),
-        *([(f"{_SEP}{age}", "dim")] if age else []),
-    ]
-
-
-# Snapshot fields holding "seconds since X" computed when the snapshot was read. Between reads the
-# console advances them itself, so "heartbeat 3s ago" keeps counting without re-reading the database.
-_AGE_PATHS: tuple[tuple[str, ...], ...] = (
-    ("lifecycle", "heartbeat", "age_seconds"),
-    ("usage", "age_seconds"),
-    ("capacity", "source_age_seconds"),
-    ("execution", "seconds_since_verified_progress"),
-    ("execution", "operation_elapsed_seconds"),
-    ("agent_map", "age_tick"),
-)
-_RUNNING_AGE_PATH = ("execution", "operation_elapsed_seconds")  # grows only while an operation executes
-
-
-def _age_paths_for(snapshot: dict[str, object]) -> list[tuple[str, ...]]:
-    """The age fields present in ``snapshot`` that advance with time."""
-    running = bool(_dict(snapshot.get("station_context")).get("executing_operation"))
-    found: list[tuple[str, ...]] = []
-    for path in _AGE_PATHS:
-        if path == _RUNNING_AGE_PATH and not running:
-            continue
-        node: object = snapshot
-        for key in path:
-            node = node.get(key) if isinstance(node, dict) else None
-        if _int_or_none(node) is not None and not isinstance(node, bool):
-            found.append(path)
-    return found
-
-
-def _aged_snapshot(base: dict[str, object], seconds: int, paths: list[tuple[str, ...]] | None = None) -> dict[str, object]:
-    """A copy of ``base`` with its age fields advanced by ``seconds``; ``base`` is never modified."""
-    result = dict(base)
-    if seconds <= 0:
-        return result
-    for path in _age_paths_for(base) if paths is None else paths:
-        node = result
-        for key in path[:-1]:
-            node[key] = child = dict(_dict(node.get(key)))
-            node = child
-        value = node.get(path[-1])
-        advanced = _int_or_none(value)
-        if advanced is not None and not isinstance(value, bool):
-            # The bounded projection keeps scalars as text; keep whichever type the reader supplied.
-            node[path[-1]] = str(advanced + seconds) if isinstance(value, str) else advanced + seconds
-    return result
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @dataclass
-class _ConsoleState:
+class _ConsoleState(_ViewRows):
     mission_id: str
     dispatch: Dispatch
     snapshot_reader: Snapshot
@@ -2994,7 +742,6 @@ class _ConsoleState:
         )
 
     def refresh(self, now: float | None = None, *, force: bool = False) -> None:
-        global LAST_RECOVERY_DRAFT
         current = time.monotonic() if now is None else now
         with self._result_lock:
             snapshot_result, self._snapshot_result = self._snapshot_result, None
@@ -3082,8 +829,8 @@ class _ConsoleState:
                             cleanup_path.unlink(missing_ok=True)
                         except OSError as exc:
                             self.output.append(f"Could not remove accepted private draft: {_text(cleanup_path, 80)} · {_text(exc, 120)}")
-                    if LAST_RECOVERY_DRAFT in cleanup_paths:
-                        LAST_RECOVERY_DRAFT = None
+                    if bridge_composer.LAST_RECOVERY_DRAFT in cleanup_paths:
+                        bridge_composer.LAST_RECOVERY_DRAFT = None
                 self.pending_cleanup_path = None
                 self.pending_cleanup_paths = ()
             recall_hint = ""
@@ -4081,515 +1828,6 @@ class _ConsoleState:
             return self._session_table()[0]
         return None
 
-    def rows(self) -> list[str]:
-        view = self.view
-        if view == "Usage":
-            return self._usage_rows()
-        if view == "Overview":
-            return self._bridge_rows()
-        if view == "Tasks":
-            return self._order_rows()
-        if view == "Providers":
-            return self._station_rows()
-        if view == "Health":
-            return self._system_rows()
-        if view == "Activity":
-            return self._log_rows()
-        if view == "Sessions":
-            return self._session_rows() or [_station_label(station) for station in _items(self.snapshot.get("stations"))] or ["No session activity recorded."]
-        if view == "Agents":
-            return self._agent_rows()
-        if view == "Actions":
-            return self._palette_rows()
-        return []
-
-    def row_segments(self) -> list[list[Segment]] | None:
-        """Per-row coloured segments for the views that style elements, aligned with `rows()`."""
-        view = self.view
-        if view == "Usage":
-            return self._usage_segments()
-        if view == "Tasks" and not self.task_detail:
-            return self._order_list()[0] or None
-        if view == "Providers":
-            return self._provider_segments()[0]
-        if view == "Sessions":
-            return self._session_cells()[1] or None
-        if view == "Actions":
-            return self._palette_segments()
-        if view == "Activity":
-            rows, roles = self._activity_layout()
-            return [_activity_row_segments(row, role) for row, role in zip(rows, roles)]
-        return None
-
-    def row_roles(self) -> list[str] | None:
-        """Semantic role per row for views that style rows individually."""
-        if self.view == "Providers":
-            return self._provider_layout()[2]
-        if self.view == "Activity":
-            return self._activity_layout()[1]
-        return None
-
-    def _usage_segments(self) -> list[list[Segment]]:
-        """Render llm-usage's ANSI cell colors through Rich and Bridge's palette."""
-        from .bridge_documents import render_ansi_segments
-
-        usage = _dict(self.snapshot.get("usage"))
-        limited = "all_text" in usage  # the default text is the mission's rotation; `a` shows every provider
-        everything = limited and self.usage_all
-        text = str(usage.get("all_text" if everything else "text") or "Loading full llm-usage dashboard...")
-        styled = [[(localize_cells(part), role) for part, role in line] for line in render_ansi_segments(text)]
-        lines = [_segments_text(line) for line in styled]
-        parts = ["Usage", str(usage.get("status") or "refreshing")]
-        age = _int_or_none(usage.get("age_seconds"))
-        parts.append(f"updated {_age(age)} ago" if age is not None else "first sample pending")
-        if usage.get("error"):
-            parts.append(f"last refresh failed: {_text(usage.get('error'), 60)}")
-        if limited:
-            parts.append("all providers (a: rotation)" if everything else "rotation (a: all)")
-        parts.append("live llm-usage read")  # the source, so a difference from the controller's observation is explicable
-        status = [(_SEP.join(parts), _status_role(_SEP.join(parts)))]
-        differences = [[(localize_cells(line), "warn")] for line in _usage_disagreements(self.snapshot)]
-        table_start = next((index for index, line in enumerate(lines) if _USAGE_HEADER.match(line)), None)
-        if table_start is None:
-            return [status, *differences, *styled]
-        table = _fit_usage_segments(styled[table_start:], self.content_width)
-        while table and not _segments_text(table[-1]).strip():
-            table.pop()
-        if table:
-            table[0] = [(_segments_text(table[0]), "heading")]
-        if len(table) > 1 and _segments_text(table[1]).strip() and set(_segments_text(table[1]).strip()) <= {"─", "-", " "}:
-            table[1] = [(_segments_text(table[1]), "dim")]
-        result = [status, *differences, *table]
-        legend = [line for line in styled[1:table_start] if _segments_text(line).strip()]
-        if legend:
-            result.extend([[], *(legend if self.usage_legend else [[("l shows the legend", "dim")]])])
-        return result
-
-    def _usage_rows(self) -> list[str]:
-        return [_segments_text(line) for line in self._usage_segments()]
-
-    def _bridge_rows(self) -> list[str]:
-        data = self.snapshot
-        tasks = _items(data.get("tasks"))
-        current_task = _dict(data.get("current_task"))
-
-        def row(label: str, value: str) -> str:
-            return f"{label:<{_BRIDGE_LABEL}}{value}"
-
-        if str(current_task.get("status") or "").upper() in {"READY", "QUEUED"}:
-            current_task = {}  # waiting to start: it is the Next task below, and nothing runs now
-        next_task = next((task for task in tasks if task.get("status") in {"READY", "QUEUED"}), None)
-        order_counts = _count_phrase(_dict(data.get("task_counts")))
-        proposals = _dict(data.get("proposal_counts"))
-        proposal_total = sum(count for count in proposals.values() if isinstance(count, (int, float)))
-        orders = order_counts or (f"{len(tasks)} visible" if tasks else "none yet — Ctrl-E adds a task")
-        if proposal_total:
-            orders += f"{_SEP}{int(proposal_total)} proposal{'s' if proposal_total != 1 else ''}"
-        rows = [
-            row("Controller", _controller_line(data)),
-            row("Now", ("task " + _task_label(current_task) + (_SEP + _idle_phrase(data) if _idle_phrase(data) else "")) if current_task else "idle"),
-            row("Next", "task " + _task_label(next_task) if next_task else finished_next(str(_mission(data).get("status") or "").upper(), "console") or NEXT_NOTHING),
-            row("Tasks", orders),
-        ]
-        policy = _dict(_dict(data.get("mission")).get("execution_policy"))
-        policy_text = bridge_format.LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
-        rows.append(row("Policy", policy_text))
-        needs = _needs_you_rows(data)
-        for index, text in enumerate(needs):
-            rows.append(row("Needs you" if index == 0 else "", text))
-        queued = data.get("pending_command_count") or 0
-        if isinstance(queued, int) and queued:
-            rows.append(row("Queue", f"{queued} command{'s' if queued != 1 else ''} waiting for the controller"))
-        criteria = _dict(data.get("criteria"))
-        total = _int_or_none(criteria.get("total"))
-        if total:
-            rows.append(row("Criteria", f"{_int_or_none(criteria.get('verified')) or 0}/{total} verified"))
-        for index, text in enumerate(_capacity_summaries(data)):
-            rows.append(row("Capacity" if index == 0 else "", _with_square(text)))
-        return rows
-
-    def _order_list(self) -> tuple[list[list[Segment]], list[str]]:
-        """Segments and text of the Tasks list; computed once per drawn frame."""
-        cache = self._draw_cache
-        if cache is not None and "orders" in cache:
-            return cache["orders"]  # type: ignore[return-value]
-        segments = _order_list_segments(_items(self.snapshot.get("tasks")))
-        result = (segments, [_segments_text(row) for row in segments])
-        if cache is not None:
-            cache["orders"] = result
-        return result
-
-    def _order_rows(self) -> list[str]:
-        if not self.task_detail:
-            return self._order_list()[1] or ["No tasks recorded."]
-        task = self.selected_task()
-        if task is None:
-            return ["No task selected."]
-        dependencies = task.get("depends_on", [])
-        acceptance = task.get("acceptance", [])
-        evidence = task.get("evidence", [])
-        pending = _dict(task.get("pending"))
-        amendments = task.get("amendments")
-        return [
-            f"Task {_text(task_number(task) if task_number(task) is not None else '?', 32)}: {_cut_text(task.get('title') or 'Untitled', 100)}",
-            f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
-            " | ".join(part for part in (
-                f"Origin {_text(task.get('origin') or 'operator', 24)}",
-                f"proposal {_text(task['proposal_status'], 32)}" if _known(task.get("proposal_status")) else "",
-                f"proposed by {_text(task['proposed_by_operation'], 32)}" if _known(task.get("proposed_by_operation")) else "",
-            ) if part),
-            *([line] if (line := _last_run_line(self.snapshot, task)) else []),
-            "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
-            "Acceptance criteria:",
-            *([f"  {index + 1}. {_cut_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),
-            "Verification evidence:",
-            *([f"  {index + 1}. {_evidence_text(item)}" for index, item in enumerate(evidence[:_MAX_DETAIL_ITEMS])] if isinstance(evidence, list) and evidence else ["  none recorded"]),
-            "Pending amendment: " + (_cut_text(bridge_format.amendment_text(pending), 400) if pending else "none"),
-            "Amendment history:",
-            *([
-                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20).lower()}: {_cut_text(bridge_format.amendment_text(item.get('changes', {})), 240)}"
-                for item in amendments[:5] if isinstance(item, dict)
-            ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
-            "Prompt preview (v opens full prompt): " + _cut_text(task.get("prompt") or "", 800),
-        ]
-
-    def _station_rows(self) -> list[str]:
-        return self._provider_layout()[0]
-
-    def _provider_layout(self) -> tuple[list[str], list[int], list[str]]:
-        """Rows of the Providers view, the first row of each selectable block, and a role per row."""
-        segments, starts, roles = self._provider_segments()
-        return [_segments_text(row) for row in segments], starts, roles
-
-    def _provider_segments(self) -> tuple[list[list[Segment]], list[int], list[str]]:
-        """Segments of each Providers row, the first row of each selectable block, and a role per row.
-
-        Each configured provider or route is one block: a header (name, model,
-        live state), one line per capacity window with remaining share, pace and
-        reset, then its most recent operations.
-        """
-
-        data = self.snapshot
-        stations = _items(data.get("stations"))
-        operations = _items(data.get("operations"))
-        if not stations:
-            observed = {
-                (_text(item.get("station") or item.get("provider") or "unknown", 60),
-                 _text(item.get("model"), 60) if _known(item.get("model")) else "default model",
-                 _text(item.get("status") or "unknown", 24))
-                for item in operations
-            }
-            fallback = [f"{station}  {model}  {status}" for station, model, status in sorted(observed)] or ["No providers recorded."]
-            return [[(row, "info")] for row in fallback], [], ["info"] * len(fallback)
-        context = _dict(data.get("station_context"))
-        viewed = _text(context.get("viewed_station") or "unknown", 80)
-        last_launched = _text(context.get("last_launched_station") or "unknown", 80)
-        executing = context.get("executing_operation")
-        summary = [
-            f"Viewing {viewed}" if _known(viewed) else "",
-            f"last launched {last_launched}" if _known(last_launched) else "",
-            f"operation {_short_id(executing)} {_text(context.get('operation_status') or '', 20)}".rstrip() if _known(executing) else "",
-        ]
-        header = _SEP.join(part for part in summary if part) or "No provider launched yet"
-        details = [
-            f"mode {_text(context.get('mode'), 20)}" if _known(context.get("mode")) else "",
-            f"liveness {_text(context.get('provider_liveness'), 20)}" if _known(context.get("provider_liveness")) else "",
-            f"effort {_text(context.get('observed_effort'), 20)}" if _known(context.get("observed_effort")) else "",
-        ]
-        detail_line = _SEP.join(part for part in details if part) or "Enter marks the highlighted provider as viewed"
-        rows: list[list[Segment]] = [_inline_segments(header, "muted"), _inline_segments(detail_line, "muted")]
-        roles: list[str] = ["dim", "dim"]
-        starts: list[int] = []
-        now = _clock_epoch()
-        selection = _dict(_dict(data.get("capacity")).get("selection"))
-        decisions = {_decision_owner(row): row for row in _items(selection.get("decisions"))}
-        active = _active_owner(data)
-        current = _dict(data.get("current_task"))
-        elapsed = _dict(data.get("execution")).get("operation_elapsed_seconds")
-        for item in stations:
-            name = _text(item.get("name") or item.get("provider") or item.get("id") or "Provider", 80)
-            decision = decisions.get(name) or decisions.get(_text(item.get("provider") or "", 80))
-            usage_rows = _usage_rows_for(data, _text(item.get("provider") or name, 60), _text(item.get("model"), 60) if _known(item.get("model")) else "")
-            state, role = _provider_state(name, active, current, elapsed, decision, now, usage_rows)
-            model = f"model {_text(item.get('model'), 50)}" if _known(item.get("model")) else "default model"
-            if _known(item.get("observed_model")) and item.get("observed_model") != item.get("model"):
-                model += f" (live {_text(item['observed_model'], 50)})"
-            flags = [flag for flag, shown in (("[viewed]", name == viewed), ("[historical]", item.get("status") == "historical")) if shown]
-            starts.append(len(rows))
-            rows.append(_provider_header_segments(name, model, state, role, flags))
-            roles.append(role)
-            windows = _items(decision.get("windows")) if decision else []
-            lines = [_window_summary(window, now) for window in windows] or _usage_window_lines(usage_rows, now) or [
-                "capacity: no observation yet" if decision is None else "capacity unavailable"]
-            for line in lines:
-                rows.append([("  ", "info"), *_inline_segments(line, "info")])
-                roles.append("info")
-            recent = [op for op in operations if name in {str(op.get("station") or ""), str(op.get("route_id") or "")}][-3:]
-            for op in reversed(recent):
-                age = _relative_epoch(op.get("created_at"), now)
-                rows.append(_recent_operation_segments(op, age))
-                roles.append("dim")
-            if not recent:
-                rows.append([("  recent: no operations yet", "dim")])
-                roles.append("dim")
-        return rows, starts, roles
-
-    def _session_rows(self) -> list[str]:
-        return self._session_table()[1]
-
-    def _session_table(self) -> tuple[str | None, list[str]]:
-        header, rows = self._session_cells()
-        return header, [_segments_text(row) for row in rows]
-
-    def _session_cells(self) -> tuple[str | None, list[list[Segment]]]:
-        operations = _items(self.snapshot.get("operations"))
-        if not operations:
-            return None, []
-
-        def cell(value: object, limit: int) -> str:
-            return _text(value, limit) if _known(value) else "-"
-
-        table = [
-            (
-                _short_id(item.get("id") or item.get("operation_id")),
-                cell(item.get("task_ordinal") if _known(item.get("task_ordinal")) else item.get("task_id"), 12),
-                cell(item.get("route_id") or item.get("route") or item.get("station") or item.get("provider"), 24),
-                cell(item.get("model"), 28),
-                _state_text(cell(item.get("status"), 20)),
-                _short_id(item.get("native_session_id")),
-                restoration_word(item.get("restoration_state")),
-            )
-            for item in operations
-        ]
-        widths = [
-            max(len(title), *(len(line[index]) for line in table))
-            for index, title in enumerate(_SESSION_COLUMNS)
-        ]
-        header = "  ".join(title.ljust(widths[index]) for index, title in enumerate(_SESSION_COLUMNS)).rstrip()
-        roles = ["muted", "muted", "info", "muted", "", "muted", "muted"]
-        rows: list[list[Segment]] = []
-        for line in table:
-            row: list[Segment] = []
-            for index, value in enumerate(line):
-                role = roles[index] or _state_segment(value.split()[-1])[1]
-                row.append((value.ljust(widths[index]) if index < len(line) - 1 else value, role))
-                if index < len(line) - 1:
-                    row.append(("  ", "info"))
-            rows.append(row)
-        return header, rows
-
-    def _agent_rows(self) -> list[str]:
-        from .bridge_agents import format_agent_map, ordered_agents
-
-        agent_map = _dict(self.snapshot.get("agent_map"))
-        if self.agent_inspector:
-            ordered = ordered_agents(agent_map)
-            if not ordered:
-                return ["No agent selected.", "Esc returns to the map."]
-            item, _depth = ordered[min(max(0, self.selected), len(ordered) - 1)]
-            model = item.get("model") if item.get("model_source") == "observed" else item.get("configured_model")
-            effort = item.get("reasoning_effort") if item.get("effort_source") == "observed" else item.get("configured_effort")
-            model_source = item.get("model_source") if item.get("model_source") == "observed" else ("configured" if _known(item.get("configured_model")) else "unknown")
-            effort_source = item.get("effort_source") if item.get("effort_source") == "observed" else ("configured" if _known(item.get("configured_effort")) else "unknown")
-            capability = _dict(item.get("capabilities"))
-            role = item.get("role") if item.get("role_source") == "observed" else None
-            activity_age = item.get("activity_age_seconds")
-            activity_age_text = f"age {int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else ""
-            lifecycle_age = item.get("lifecycle_age_seconds")
-            lifecycle_age_text = f"age {int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else ""
-            mission = item.get("mission_name") if _known(item.get("mission_name")) else item.get("mission_id")
-            # A field the provider did not report is left out of the list and named once on the last line.
-            fields: list[tuple[str, str]] = [
-                ("role", f"{_text(role, 80)} ({_text(item.get('role_source') or 'observed', 20)})" if _known(role) else ""),
-                ("mission", _text(mission, 100) if _known(mission) else ""),
-                ("age", _span(item.get("age_seconds"), 2) if _known(item.get("age_seconds")) else ""),
-                ("model", f"{_text(model, 100)} ({_text(model_source, 20)})" if _known(model) else ""),
-                ("reasoning effort", f"{_text(effort, 40)} ({_text(effort_source, 20)})" if _known(effort) else ""),
-                ("activity", _text(item.get("activity"), 180) if _known(item.get("activity")) else ""),
-                ("last observed", _text(item.get("last_activity_at"), 80) if _known(item.get("last_activity_at")) else ""),
-                ("native status", _text(item.get("native_status"), 40) if _known(item.get("native_status")) else ""),
-                ("activity freshness", _SEP.join(part for part in (_text(item["activity_freshness"], 24) if _known(item.get("activity_freshness")) else "", activity_age_text) if part)),
-                ("lifecycle freshness", _SEP.join(part for part in (_text(item["lifecycle_freshness"], 24) if _known(item.get("lifecycle_freshness")) else "", lifecycle_age_text) if part)),
-            ]
-            shown = {label: value for label, value in fields if value}
-            missing = [label for label, value in fields if not value]
-            identity = f"identity: {_text(item.get('identity_source') or 'provider metadata', 60)}"
-            rows = [f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status_label') or item.get('status'), 30)}"]
-            for label in ("role", "mission", "age", "model", "reasoning effort", "activity", "last observed", "native status"):
-                if label in shown:
-                    rows.append(f"{label}: {shown[label]}")
-            rows.append(f"parent: {_text(item.get('parent_id') or 'none', 100)}")
-            rows.append(f"freshness: {_text(item['freshness'], 40)} · {identity}" if _known(item.get("freshness")) else identity)
-            for label in ("activity freshness", "lifecycle freshness"):
-                if label in shown:
-                    rows.append(f"{label}: {shown[label]}")
-            rows.append(f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}")
-            if {"activity freshness", "lifecycle freshness"} <= set(missing):
-                missing = [label for label in missing if "freshness" not in label] + ["freshness"]
-            if missing:  # one statement, wrapped so a narrow terminal does not cut it
-                rows.extend(textwrap.wrap("Not reported by the provider: " + ", ".join(missing), 70, subsequent_indent="  "))
-            rows.append("Esc returns to the map.")
-            return rows
-        rows = format_agent_map(agent_map)
-        rows.append("↑↓ select · Enter inspect/switch · i inspect · /agents refresh")
-        return rows
-
-    def _system_rows(self) -> list[str]:
-        data = self.snapshot
-        out: list[str] = []
-        internals: list[str] = []  # implementation facts for diagnosing Bridge itself; shown on the last row
-
-        def add(label: str, value: str) -> None:
-            if value:
-                out.append(f"{label:<{_SYSTEM_LABEL}}{value}")
-
-        mode = _dict(data.get("station_mode"))
-        if mode:
-            actual = mode.get("actual_mode")
-            add("Mode", _SEP.join(part for part in (
-                f"configured {_text(mode['configured_mode'], 24)}" if _known(mode.get("configured_mode")) else "",
-                f"actual {_text(actual, 24)}" if _known(actual) else "actual unverified",
-            ) if part))
-        lifecycle = _dict(data.get("lifecycle"))
-        if lifecycle:
-            add("Lifecycle", _SEP.join(part for part in (
-                _text(lifecycle.get("status"), 20) if _known(lifecycle.get("status")) else "",
-                f"controller {_text(lifecycle['controller'], 24)}"
-                + (f" (verified {_relative_epoch(lifecycle.get('controller_event_at'))})" if _known(lifecycle.get("controller_event_at")) and _relative_epoch(lifecycle.get("controller_event_at")) else "")
-                if _known(lifecycle.get("controller")) else "",
-            ) if part))
-            heartbeat = _dict(lifecycle.get("heartbeat"))
-            if heartbeat:
-                age = _int_or_none(heartbeat.get("age_seconds"))
-                lock = heartbeat.get("owner_lock_held")
-                if str(lock).lower() in {"true", "false"}:
-                    internals.append("owner lock held" if str(lock).lower() == "true" else "owner lock not held")
-                add("Controller heartbeat", _SEP.join(part for part in (
-                    _text(heartbeat["reported_state"], 20).lower() if _known(heartbeat.get("reported_state")) else "",
-                    f"{_age(age)} ago" if age is not None else "",
-                    f"mission wants {_text(heartbeat['desired_mission_status'], 20)}" if _known(heartbeat.get("desired_mission_status")) else "",
-                    f"liveness {_text(heartbeat['current_liveness'], 20)}" if _known(heartbeat.get("current_liveness")) else "",
-                ) if part) or "none recorded")
-        add("Routes", _text(data["routes"], 220) if _known(data.get("routes")) else "")
-        controller = data.get("controller")
-        add("Controller", _text(controller, 220) if _known(controller) else "")
-        execution = data.get("execution")
-        if isinstance(execution, dict):
-            elapsed = _int_or_none(execution.get("operation_elapsed_seconds"))
-            verified = _int_or_none(execution.get("seconds_since_verified_progress"))
-            finished = _finished_operation_text(data)
-            add("Execution", _SEP.join(part for part in (
-                f"iteration {_text(execution['iteration'], 8)}" if _known(execution.get("iteration")) else "",
-                finished or (f"operation running {_span(elapsed)}" if elapsed is not None else ""),
-                f"last verified progress {_age(verified)} ago" if verified is not None else "no verified progress yet",
-            ) if part))
-        elif _known(execution):
-            add("Execution", _text(execution, 220))
-        health = data.get("health")
-        if isinstance(health, dict):
-            failed = _int_or_none(health.get("consecutive_failed_operations")) or 0
-            limit = _int_or_none(health.get("max_provider_failures"))
-            warning = health.get("stall_warning")
-            add("Health", _SEP.join(part for part in (
-                _text(health["status"], 24) if _known(health.get("status")) else "",
-                f"{failed} consecutive failed operation{'s' if failed != 1 else ''}" + (f" (limit {limit})" if limit is not None else "") if failed else "",
-                _text(warning, 200) if _known(warning) else "",
-            ) if part) or "no problems reported")
-        elif _known(health):
-            add("Health", _text(health, 220))
-        persistence = _dict(data.get("persistence"))
-        internals.extend(part for part in (
-            f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
-            f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
-            _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
-        ) if part)
-        criteria = _dict(data.get("criteria"))
-        if criteria and _int_or_none(criteria.get("total")):
-            add("Criteria", f"{_int_or_none(criteria.get('verified')) or 0}/{_int_or_none(criteria.get('total'))} verified")
-        progress = _dict(data.get("last_meaningful_progress"))
-        if progress:
-            when = _relative_epoch(progress.get("at"))
-            add("Last progress", _SEP.join(part for part in (
-                _text(progress["kind"], 40) if _known(progress.get("kind")) else "",
-                f"{_local_clock(progress.get('at'))} ({when})" if when else "",
-            ) if part))
-        suspend = _dict(data.get("suspend"))
-        if suspend and (_known(suspend.get("status")) or _known(suspend.get("target_epoch"))):
-            until = _relative_epoch(suspend.get("target_epoch"))
-            add("Suspend", _SEP.join(part for part in (
-                _text(suspend["status"], 40) if _known(suspend.get("status")) else "",
-                f"until {until[3:] if until and until.startswith('in ') else until}" if until else "",
-                _text(suspend["reason"], 80) if _known(suspend.get("reason")) else "",
-            ) if part))
-        capacity = _dict(data.get("capacity"))
-        summaries = _capacity_summaries(data)
-        fallback = [] if summaries else _usage_capacity_lines(data)
-        if fallback and not any(_dict(capacity.get("selection")).get(key) for key in ("route", "provider")):
-            # Nothing has run yet: show what llm-usage reports instead of "no capacity observation".
-            age = _int_or_none(_dict(data.get("usage")).get("age_seconds"))
-            add("Capacity", "from llm-usage" + (f", updated {_age(age)} ago" if age is not None else ""))
-            for line in fallback:
-                out.append(f"{'':<{_SYSTEM_LABEL}}{line}")
-        elif capacity:
-            selection = _dict(capacity.get("selection"))
-            owner = selection.get("route") or selection.get("provider")
-            age = _int_or_none(capacity.get("source_age_seconds"))
-            header = _SEP.join(part for part in (
-                f"{_text(capacity['source'], 40)}" + (f" ({_age(age)} old)" if age is not None else "") if _known(capacity.get("source")) else "",
-                f"selected {_text(owner, 40)}" + (f" / {_text(selection['selected_model'], 40)}" if _known(selection.get("selected_model")) else "") if _known(owner) else "",
-                _text(plain_reason(selection["rotation_reason"]), 60) if _known(selection.get("rotation_reason")) else "",
-                "all routes rate-limited" if str(selection.get("all_rate_limited")).lower() == "true" else "",
-            ) if part)
-            wait = _dict(capacity.get("wait"))
-            if wait:
-                until = _relative_epoch(wait.get("target_epoch"))
-                header = _SEP.join(part for part in (header, f"waiting {until}" if until else "waiting", _text(wait["reason"], 60) if _known(wait.get("reason")) else "") if part)
-            add("Capacity", header or "no capacity observation")
-            for line in summaries:
-                out.append(f"{'':<{_SYSTEM_LABEL}}{_with_square(line)}")
-        add("Internals", _SEP.join(internals))
-        return out or ["System and capacity status is not available in this snapshot."]
-
-    def _log_rows(self) -> list[str]:
-        return self._activity_layout()[0]
-
-    def _activity_layout(self) -> tuple[list[str], list[str]]:
-        """Rows of the Activity view and a role per row (plumbing is dim, problems are errors)."""
-        events = _items(self.snapshot.get("events"))
-        if not events:
-            return ["No recent mission events."], ["dim"]
-        entries = _activity_entries(events, _task_numbers(self.snapshot))
-        shown = [entry for entry in entries if not (self.hide_plumbing and entry.plumbing)]
-        if not shown:
-            return [f"Only controller bookkeeping on this page ({len(entries)} rows); Ctrl-T shows it."], ["dim"]
-        rows = [f"{entry.clock}  {entry.text}".rstrip() for entry in shown]
-        roles = ["dim" if entry.plumbing else _activity_role(entry.text) for entry in shown]
-        return rows, roles
-
-    def _palette_rows(self) -> list[str]:
-        return [_segments_text(row) for row in self._palette_segments()]
-
-    def _palette_segments(self) -> list[list[Segment]]:
-        """Action rows: the name in default text, its typed command in `key`, the effect `muted`."""
-        actions = self.palette_actions()
-        self.selected = min(max(0, self.selected), max(0, len(actions) - 1))
-        if not actions:
-            return [[(_PALETTE_NOTE, "info")]]
-        label_width = max(len(action.label) for action in actions)
-        typed_width = max(len(action.typed) for action in actions)
-        rows: list[list[Segment]] = []
-        for action in actions:
-            unavailable = self.action_unavailable(action)
-            if unavailable:  # disabled items recede
-                text = f"{action.label:<{label_width}}  {action.typed:<{typed_width}}  {action.effect}"
-                rows.append([(text + f"{_SEP}unavailable: {unavailable}", "dim")])
-                continue
-            rows.append([
-                (f"{action.label:<{label_width}}", "info"), ("  ", "info"),
-                (f"{action.typed:<{typed_width}}", "key"), ("  ", "info"), (action.effect, "muted"),
-            ])
-        return rows
-
     def action_note(self, avail: int) -> str:
         """The selected action's full description, when its row is cut at ``avail`` columns; else ``""``."""
         actions = self.palette_actions()
@@ -4643,879 +1881,104 @@ class _ConsoleState:
                 self.selected = row_index
 
 
-_FINISHED_STATES = FINISHED_STATES
-_state_look = state_look
-_state_text = state_text
-
-
-def _state_segment(status: object) -> Segment:
-    look = _state_look(status)
-    return (_state_text(status), look[1] if look else "info")
-
-
-_provider_role = provider_role
-
-
-def _percent_role(percent: float) -> str:
-    """Capacity role for a share of quota remaining: 0 is empty, up to 25% is low."""
-    if percent <= 0:
-        return "capacity_empty"
-    return "capacity_low" if percent <= 25 else "capacity_ok"
-
-
-_IDLE_WARN_SECONDS = 600
-_DURATION = r"\d+[dhms](?: \d+[dhms])*"
-_STATE_WORDS = "NEEDS YOU|RUNNING|READY|QUEUED|VERIFYING|REVIEW|COMPLETED|FAILED|BLOCKED|CANCELLED|PAUSED|PAUSING|STOPPED|STOPPING|CREATED|ACTIVE"
-
-
-@functools.lru_cache(maxsize=4)
-def _token_pattern(square: str, glyphs: tuple[str, ...]) -> re.Pattern[str]:
-    state_glyphs = "|".join(re.escape(item) for item in glyphs)
-    return re.compile(
-        "|".join([
-            rf"(?P<square>{re.escape(square)} )(?P<owner>[^\s/,;()]+)",
-            r"(?P<cmd>(?<![\w/])/[a-z][a-z-]*(?![\w/.]))",
-            r"(?P<key>\bCtrl-\S|\bF\d{1,2}\b)",
-            rf"(?P<idle>\bno output(?: for)? {_DURATION})",
-            rf"(?P<time>\b{_DURATION} ago\b|\bin {_DURATION}|\bresets (?:now|{_DURATION})|empty in ~{_DURATION} at this pace)",
-            r"(?P<pct>\b\d+(?:\.\d+)?%)",
-            r"(?P<past>\blasts past reset\b)",
-            r"(?P<limited>\brate-limited\b)",
-            rf"(?P<state>(?:(?:{state_glyphs}) )?\b(?:{_STATE_WORDS})\b)",
-            r"(?P<taskid>(?<=\btask )\d+\b)",
-            r"(?P<hexid>\b[0-9a-f]{8}\b)",
-        ])
-    )
-
-
-_LOWER_STATES = r"(?<!not )\b(?:running|queued|ready|verifying|blocked|failed|completed|cancelled|paused|stopped|stopping)\b"
-_CONTROLLER_WARN = r"silent for|not running|not started|no heartbeat recorded yet|pausing after the current provider invocation"
-_PLAIN_PATTERNS = {
-    "tasks": re.compile(_LOWER_STATES),
-    "controller": re.compile(rf"{_LOWER_STATES}|\bactive\b|{_CONTROLLER_WARN}"),
-    "strip": re.compile(rf"{_LOWER_STATES}|awaits approval|awaits your review|waiting for capacity|stopping after the current step"),
-}
-
-
-def _idle_role(text: str) -> str:
-    """`muted`, or `warn` once the provider has been silent for ten minutes."""
-    tail = text.split("no output", 1)[1].replace("for ", "", 1).strip()
-    seconds = _duration_seconds(tail)
-    return "warn" if seconds is not None and seconds >= _IDLE_WARN_SECONDS else "muted"
-
-
-def _plain_words(text: str, base: str, context: str) -> list[Segment]:
-    """Colour the lowercase state words and phrases that only some contexts use."""
-    pattern = _PLAIN_PATTERNS.get(context)
-    if pattern is None or not text:
-        return [(text, base)]
-    out: list[Segment] = []
-    position = 0
-    for match in pattern.finditer(text):
-        out.append((text[position:match.start()], base))
-        word = match.group(0)
-        if word == "active":
-            role = "state_running"
-        elif word in {"awaits approval", "awaits your review"}:
-            role = "state_review"
-        elif word in {"waiting for capacity", "stopping after the current step"} or re.fullmatch(_CONTROLLER_WARN, word):
-            role = "warn"
-        else:
-            look = _state_look(word)
-            role = look[1] if look else base
-            if context == "tasks" and role in {"state_review", "state_failed"}:
-                role = base  # the Needs-you row is the one place that draws the eye
-        out.append((word, role))
-        position = match.end()
-    out.append((text[position:], base))
-    return out
-
-
-def _inline_segments(text: str, base: str = "info", *, context: str = "generic") -> list[Segment]:
-    """Colour the machine-generated parts of an informational line.
-
-    Only system-written phrasing is tokenised (percentages, ages, state words,
-    `/commands`, key names, ids and the provider square); user-written text such
-    as task titles never goes through here.
-    """
-    glyphs = tuple(dict.fromkeys(glyph(name) for name in ("running", "waiting", "review", "done", "failed", "paused")))
-    pattern = _token_pattern(glyph("square"), glyphs)
-    out: list[Segment] = []
-    position = 0
-    for match in pattern.finditer(text):
-        out.extend(_plain_words(text[position:match.start()], base, context))
-        kind = match.lastgroup
-        token = match.group(0)
-        if match.group("square"):
-            out.append((match.group("square").rstrip(), _provider_role(match.group("owner"))))
-            out.append((" " + match.group("owner"), base))
-        elif kind in {"cmd", "key"}:
-            out.append((token, "key"))
-        elif kind == "idle":
-            out.append((token, _idle_role(token)))
-        elif kind in {"time", "taskid", "hexid"}:
-            out.append((token, "muted"))
-        elif kind == "pct":
-            out.append((token, _percent_role(float(token.rstrip("%")))))
-        elif kind == "past":
-            out.append((token, "capacity_ok"))
-        elif kind == "limited":
-            out.append((token, "capacity_empty"))
-        else:  # state word, optionally behind its glyph
-            look = _state_look(MISSION_NEEDS_YOU_LABEL if token.endswith(MISSION_NEEDS_YOU_LABEL) else token.split()[-1])
-            role = look[1] if look else base
-            if context == "needs" and role in {"state_review", "state_failed"}:
-                role += QUIET
-            out.append((token, role))
-        position = match.end()
-    out.extend(_plain_words(text[position:], base, context))
-    return _merge_segments(out)
-
-
-def _status_role(value: str) -> str:
-    """Pick a semantic role for short status and response lines."""
-    lowered = value.lower()
-    if any(token in lowered for token in ("none ready", "no tasks ready")):
-        return "dim"
-    if any(token in lowered for token in ("not ready", "ready=false")):
-        return "warn"
-    if any(token in lowered for token in ("error", "failed", "rejected", "could not", "unavailable")):
-        return "error"
-    if any(token in lowered for token in ("warning", "blocked", "waiting", "rate limit", "paused", "retry")):
-        return "warn"
-    if _TASK_ACK.match(lowered) or any(token in lowered for token in ("applied:", "completed", "success", "usable", "ready", "passed")):
-        return "ok"
-    return "dim"
-
-
-def _draw_navigation(window: curses.window, index: int, separator: str, width: int) -> None:
-    """Tabs in `muted`; the active tab is the one `accent` element of the row."""
-    text, entries = _nav_layout(index, width, separator)
-    _put(window, 2, 0, text, width, role="muted", preserve_spacing=True)
-    for item, offset, label in entries:
-        if item == index:
-            _put(window, 2, offset, label, min(len(label), width-offset), role="accent")
-
-
-_LABEL_WIDTHS = {"Overview": _BRIDGE_LABEL, "Health": _SYSTEM_LABEL}
-
-
-def _mission_status_role(status: str) -> str:
-    """State role for a mission status word in the header."""
-    look = _state_look(status)
-    return look[1] if look else "muted" if status.upper() in {"LOADING"} else "info"
-
-
-def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """`LLM BRIDGE · ▌ name (ID) · ● STATE`: wordmark, mission chip, name and short ID, state glyph and word."""
-    mission = _mission(state.snapshot)
-    if state.snapshot:
-        status = _text(mission.get("status", "unknown"), 20).upper()
-    else:
-        status = "UNAVAILABLE" if state.snapshot_error else "LOADING"
-    context = _dict(state.snapshot.get("station_context"))
-    if status == "PAUSED" and context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
-        status = "PAUSING"
-    status = _mission_state_word(state.snapshot, status)
-    shown = _state_text(status)
-    badge = ""
-    if state.outside_station:
-        badge = "outside station" if status in ENDED_MISSION_STATUSES else f"outside station{_SEP}/attach"
-    room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2 - (len(badge) + len(_SEP) if badge else 0)
-    if badge and room < 12:  # no space for the mission name next to the badge: the name wins
-        badge = ""
-        room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
-    # The short ID tells two missions with the same name apart without relying on the identity colour (CLIUX-038).
-    id_text = f" ({_short_id(state.mission_id)})"
-    if room - len(id_text) < 12:
-        id_text = ""
-    name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room - len(id_text)))
-    chip_role = _mission_role_of(state.snapshot, state.mission_id)
-    # The identity bar carries colour only.  Its ASCII form is the same character as the ASCII
-    # separator (`| |`), so ASCII mode leaves it out of the header.
-    mark: list[Segment] = [] if ascii_mode() else [(glyph("chip"), chip_role)]
-    return [
-        ("LLM BRIDGE", "brand"), (_SEP, "dim"), *mark, ((" " if mark else "") + name, "info"), *([(id_text, "dim")] if id_text else []), (_SEP, "dim"),
-        (shown, _mission_status_role(status)),
-        *([(_SEP, "dim"), (badge, "warn")] if badge else []),
-    ]
-
-
-def _header(state: _ConsoleState, width: int) -> str:
-    return _segments_text(_header_segments(state, width))
-
-
-def _draw_header(window: curses.window, state: _ConsoleState, width: int) -> None:
-    _put_segments(window, 0, 0, _header_segments(state, width), width)
-
-
-def _scroll_start(selected: int, row_count: int, visible_rows: int) -> int:
-    return max(0, min(selected - visible_rows // 2, max(0, row_count - visible_rows)))
-
-
-def _orders_summary(state: _ConsoleState) -> str:
-    tasks = _items(state.snapshot.get("tasks"))
-    total = state.snapshot.get("task_total")
-    filtered = f"{_SEP}filter: {_text(state.search_query, 40)}{_SEP}Esc clears" if state.search_query else ""
-    if isinstance(total, int):
-        first = state.task_offset + 1 if tasks else 0
-        last = state.task_offset + len(tasks)
-        return f"Tasks: {total} total{filtered}{_SEP}showing {first}-{last}"
-    return f"Tasks: {len(tasks)} shown{filtered}"
-
-
-def _command_display(command: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    start = len(command)
-    while start > 0 and cell_width(command[start - 1:]) <= width:
-        start -= 1
-    return command[start:]
-
-
-def _input_prompt(state: _ConsoleState) -> str:
-    return "Filter: " if state.palette_filter_editing else "/? " if state.search_editing else glyph("prompt") + " "
-
-
-def _placeholder(state: _ConsoleState) -> str:
-    """Dim guidance shown in an empty, unfocused command line."""
-    if state.command_pending:
-        return "running a command — wait for its result"
-    if state.view == "Actions":
-        return "type a command · Ctrl-K filters actions"
-    return "type a command · /help · Ctrl-K actions"
-
-
-def _display_input(state: _ConsoleState, width: int) -> tuple[str, int]:
-    source = state.palette_filter if state.palette_filter_editing else state.command
-    cursor = len(source) if state.palette_filter_editing else state.command_cursor
-    return input_view(source, cursor, width)
-
-
-def _draw_command_line(window: curses.window, y: int, state: _ConsoleState, width: int) -> None:
-    """`›` prompt: `accent` while the field has focus, `muted` otherwise; typed text stays default."""
-    prompt = _input_prompt(state)
-    focused = state.input_focused or state.palette_filter_editing
-    typed = state.palette_filter if state.palette_filter_editing else state.command
-    if typed or focused:
-        used = _put(window, y, 0, prompt, width, role="accent")
-        _put(window, y, used, _display_input(state, width - cell_width(localize(prompt)))[0], width - used, role="info")
-        return
-    used = _put(window, y, 0, prompt, width, role="muted")
-    if used < width:
-        _put(window, y, used, _placeholder(state), width - used, role="dim", attr=curses.A_DIM)
-
-
-def _slash_popup_rows(state: _ConsoleState, width: int, room: int) -> list[list[Segment]]:
-    """The rows of the slash-command list (at most `room`), or none when no command name is being typed."""
-    matches = _slash_matches(state.command)
-    if matches is None or room < 2:
-        return []
-    if not matches:
-        return [_inline_segments(f"No command starts with {_clip(state.command, 24)}", "warn") + [(f"{_SEP}/help lists them", "dim")]]
-    rows: list[list[Segment]] = [[("Commands", "heading"), (f"{_SEP}Tab completes{_SEP}type to narrow", "dim")]]
-    shown = room - 1
-    if len(matches) > shown:
-        shown -= 1
-    name_width = min(26, max(cell_width(name) for name, _ in matches[:shown]))
-    for name, text in matches[:shown]:
-        pad = " " * (name_width - min(name_width, cell_width(name)) + 2)
-        rows.append([("  ", "info"), (name, "key"), (pad, "info"), (text, "muted")])
-    if len(matches) > shown:
-        rows.append([(f"  {len(matches) - shown} more{_SEP}keep typing to narrow the list", "dim")])
-    return rows
-
-
-def _draw_slash_popup(window: curses.window, state: _ConsoleState, prompt_y: int, width: int, top: int) -> None:
-    """Draw the slash-command list in the rows just above the command line."""
-    if not state.input_focused or state.palette_filter_editing or state.search_editing:
-        return
-    rows = _slash_popup_rows(state, width, min(9, prompt_y - top))
-    for offset, segments in enumerate(rows):
-        y = prompt_y - len(rows) + offset
-        _put(window, y, 0, " " * width, width, role="info")
-        _put_segments(window, y, 0, _clip_segments(segments, width), width)
-
-
-def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
-    """Keys that work in the current view, most useful first, plus the closing hint."""
-    if state.palette_filter_editing:
-        if state.palette_quick:
-            return ["type to filter actions", "↑↓ choose", "Enter run", "Esc cancel"], ""
-        return ["type to filter actions", "Enter or Esc finishes"], ""
-    if state.search_editing:
-        return ["type text to find in tasks", "Enter search", "Esc cancel", "Ctrl-U clear"], ""
-    if state.input_focused:
-        matches = _slash_matches(state.command) if not state.full else None
-        if matches:  # a short pane has no room for the list: name the matches in the hint row
-            return [name for name, _ in matches[:6]], "Tab completes"
-        return ["Enter run", "Tab complete", "Ctrl-P/Ctrl-N history", "Ctrl-U clear", "Esc back to view"], "/help commands"
-    views = "Tab/F1-9 views"
-    # The empty command line already says "type a command or /help".
-    view = state.view
-    if view == "Overview":
-        items = ["o objective", "Ctrl-E add task", views, "Ctrl-D exit"]  # Ctrl-K is on the prompt line
-        if _inside_station():
-            items.insert(0, "Ctrl-] P provider")
-            if not state.full:
-                items.append("Ctrl-] z expand")
-    elif view == "Tasks" and state.task_detail:
-        items = ["Esc back", "↑↓ scroll", "v view prompt", "Ctrl-R amend", "PgUp/PgDn page", views, "Ctrl-D exit"]
-    elif view == "Tasks":
-        items = ["Enter inspect", "↑↓ select", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find", views, "Ctrl-D exit", "PgUp/PgDn page"]
-        if state.search_query:
-            items.insert(0, "Esc clear filter")
-    elif view == "Providers":
-        items = ["Enter mark viewed", "↑↓ select", views, "Ctrl-D exit"]
-    elif view == "Activity":
-        items = ["PgUp older", "PgDn newer", "Ctrl-T show all" if state.hide_plumbing else "Ctrl-T hide bookkeeping", "↑↓ scroll", views, "Ctrl-D exit"]
-    elif view == "Actions":
-        items = ["Enter run action", "↑↓ select", views, "Ctrl-D exit", "Ctrl-G command line"]  # Ctrl-K is on the prompt line
-    elif view == "Usage":
-        items = ["↑↓ scroll", "l legend", "Shift-←/→ pan", views, "Ctrl-D exit"]
-    else:
-        items = ["↑↓ scroll", views, "Ctrl-D exit"]
-    return items, "? help"
-
-
-_QUIT_HINT = "Ctrl-D exit"
-
-
-def _hint_chosen(state: _ConsoleState, width: int) -> list[str]:
-    """The hint items that fit `width` (lowest-value ones dropped first), closing hint last.
-
-    The key that leaves the console and the closing `? help` hint are never dropped.
-    """
-    items, closing = _hint_items(state)
-    chosen = list(items)
-    while chosen:
-        parts = [*chosen, closing] if closing else chosen
-        if cell_width(localize(_SEP.join(parts))) <= width:
-            return parts
-        droppable = [index for index, item in enumerate(chosen) if item != _QUIT_HINT]
-        if not droppable:
-            break
-        chosen.pop(droppable[-1])
-    return [_clip(closing or items[0], width)]  # too narrow even for the quit key: `? help` explains it
-
-
-def _hint(state: _ConsoleState, width: int = 100) -> str:
-    """`key action · key action · ? help`, dropping the lowest-value items to fit."""
-    return _SEP.join(_hint_chosen(state, width))
-
-
-def _hint_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """Hints as segments: key names in `key`, verbs in `muted`, separators in `dim`."""
-    out: list[Segment] = []
-    for index, item in enumerate(_hint_chosen(state, width)):
-        if index:
-            out.append((_SEP, "dim"))
-        key, verb = _split_hint(item)
-        if key:
-            out.append((key, "key"))
-            if verb:
-                out.append((" " + verb, "muted"))
-        else:
-            out.append((item, "muted"))
-    return out
-
-
-def _handle_mouse_event(
-    state: _ConsoleState,
-    y: int,
-    x: int,
-    height: int,
-    width: int,
-    *,
-    activate: bool = False,
-) -> None:
-    state.handle_mouse(y, x, height, width)
-    if activate:
-        state.handle_key("KEY_ENTER")
-
-
-def _row_role(view: str, text: str) -> str:
-    """Semantic color for an informational row."""
-    lowered = text.lower()
-    if view == "Overview":
-        if text.startswith("Needs you"):
-            return "warn"
-        if text.startswith("Controller"):
-            if any(word in lowered for word in ("stopped", "silent", "not started", "no heartbeat", "pausing", "finished")):
-                return "warn"
-            if "active" in lowered:
-                return "ok"
-    elif view == "Health" and text.startswith("Health") and ("warning" in lowered or "failed" in lowered):
-        return "warn"
-    return "info"
-
-
-def _wrap_row(text: str, width: int, indent: int) -> list[str]:
-    """Wrap one labelled row, hanging continuation lines under the value column.
-
-    Lines break between ` · ` separated parts first, then between the
-    comma-separated clauses of one part, so a duration such as `resets 6d 22h`
-    is never split. Only a clause wider than the screen is broken by words.
-    """
-    if cell_width(text) <= width:
-        return [text]
-    width = max(indent + 8, width)
-    pad = " " * indent
-    pieces: list[tuple[str, str]] = []
-    for unit_index, unit in enumerate(text.split(_SEP)):
-        for clause_index, clause in enumerate(unit.split(", ")):
-            pieces.append((clause, _SEP if clause_index == 0 and unit_index else ", "))
-    lines: list[str] = []
-    current = ""
-    for piece, sep in pieces:
-        if not current:
-            current = piece
-            continue
-        candidate = current + sep + piece
-        if cell_width(candidate) <= width:
-            current = candidate
-            continue
-        lines.append(current + ("," if sep == ", " else ""))
-        current = pad + piece
-    lines.append(current)
-    wrapped: list[str] = []
-    for line in lines:
-        if cell_width(line) <= width:
-            wrapped.append(line)
-        else:
-            wrapped.extend(textwrap.wrap(line, width=width, subsequent_indent=pad, break_long_words=True, break_on_hyphens=False) or [line])
-    return wrapped
-
-
-def _working_text(state: _ConsoleState, now: float | None = None) -> str:
-    """`⠋ working…` while a command awaits its durable result; static without colour support."""
-    if not state.command_pending:
-        return ""
-    if bridge_theme.colors_disabled():
-        return f"working{glyph('ellipsis')}"
-    current = time.monotonic() if now is None else now
-    bridge_redraw.note_wall(0.1)  # one spinner frame
-    frames = spinner_frames()
-    frame = frames[int(max(0.0, current - state.working_since) * 10) % len(frames)]
-    return f"{frame} working{glyph('ellipsis')}"
-
-
-def _status_line(state: _ConsoleState, width: int) -> tuple[str, str]:
-    """(text, role) for the bottom status row: error, working, latest message, else key hints."""
-    if state.snapshot_error:
-        return state.snapshot_error, "error"
-    working = _working_text(state)
-    if working:
-        return working, "info"
-    message = state.status_message()
-    if message:
-        return message, _status_role(message)
-    return _hint(state, width), "dim"
-
-
-def _status_line_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """Bottom row: an error, the working indicator, a command result, else the key hints."""
-    if state.snapshot_error:
-        return [(state.snapshot_error, "error")]
-    working = _working_text(state)
-    if working:
-        return [(working, "info")]
-    message = state.status_message()
-    if message:
-        return [(message, _status_role(message))]
-    return _hint_segments(state, width)
-
-
-def _draw_status_lines(window: curses.window, state: _ConsoleState, prompt_y: int, hint_y: int, width: int) -> None:
-    _draw_command_line(window, prompt_y, state, width)
-    _put_segments(window, hint_y, 0, _clip_segments(_status_line_segments(state, width), width), width)
-
-
-def _place_cursor(window: curses.window, state: _ConsoleState, prompt_y: int, width: int, *, visible: bool = True) -> None:
-    if visible and (state.input_focused or state.palette_filter_editing):
-        available = max(1, width - cell_width(_input_prompt(state)))
-        _, caret = _display_input(state, available)
-        try:
-            curses.curs_set(1)
-            window.move(prompt_y, min(width - 1, cell_width(_input_prompt(state)) + caret))
-        except curses.error:
-            pass
-    else:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-
-
-def _strip_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """Line 1 of the control view: provider square, then the status text with its parts coloured."""
-    snapshot = state.snapshot
-    if state.snapshot_error and not snapshot:
-        return [("status unavailable", "error")]
-    if state.saved_notice:
-        saved = f"saved as {_short_id(state.mission_id)}"
-        if str(_mission(snapshot).get("status") or "").upper() == "CREATED":
-            saved += f"{_SEP}type /start"
-        return _inline_segments(saved, "ok")
-    owner = ""
-    if str(_dict(snapshot.get("current_task")).get("status") or "").upper() == "RUNNING":
-        owner = _active_owner(snapshot)
-    text, role = _status_strip(snapshot, width - (2 if owner else 0))
-    total = snapshot.get("task_total")
-    if state.view == "Tasks" and (state.search_query or (isinstance(total, int) and total > len(_items(snapshot.get("tasks"))))):
-        return _inline_segments(_orders_summary(state), "muted")  # searching or paging: say what is shown
-    base = "error" if role == "error" else "muted" if role in {"dim", "secondary"} else "info"
-    square: list[Segment] = [(glyph("square"), _provider_role(owner)), (" ", "info")] if owner else []
-    return [*square, *_inline_segments(text, base, context="strip")]
-
-
-_TASK_ROW = re.compile(r"^task (?P<id>\S+)  (?P<state>(?:\S )?[A-Z]+)  (?P<title>.*?)(?P<idle>" + re.escape(_SEP) + r"no output for .*)?$")
-
-
-def _task_row_segments(value: str) -> list[Segment] | None:
-    """`task 2  ● RUNNING  title · no output for 2m`: id muted, state coloured, title untouched."""
-    match = _TASK_ROW.match(value)
-    if not match:
-        return None
-    word = match.group("state").split()[-1]
-    look = _state_look(word)
-    finished = word in _FINISHED_STATES
-    out: list[Segment] = [
-        ("task ", "info"), (match.group("id"), "muted"), ("  ", "info"),
-        (match.group("state"), look[1] if look else "info"), ("  ", "info"),
-        (match.group("title"), "muted" if finished else "info"),
-    ]
-    if match.group("idle"):
-        out += [(_SEP, "dim"), (match.group("idle")[len(_SEP):], _idle_role(match.group("idle")))]
-    return out
-
-
-def _value_segments(view: str, label: str, value: str) -> list[Segment]:
-    """Colour the value of one labelled Overview or Health row."""
-    if not value.strip():
-        return [(value, "info")]
-    if view == "Overview":
-        if label == "Controller":
-            if value.lstrip().startswith("failed —"):
-                return [(value, "error")]
-            return _inline_segments(value, "info", context="controller")
-        if label in {"Now", "Next"}:
-            return _task_row_segments(value) or [(value, "info")]
-        if label == "Tasks":
-            return _inline_segments(value, "info", context="tasks")
-        if label == "Needs you":
-            return _inline_segments(value, "info", context="needs")
-        if label == "Recent":
-            match = re.match(r"^(\s*)([\d-]{2}:[\d-]{2}:[\d-]{2})  (.*)$", value)
-            if match:
-                return [(match.group(1), "info"), (match.group(2), "muted"), ("  ", "info"),
-                        (match.group(3), "error" + QUIET if _activity_role(match.group(3)) == "error" else "info")]
-            return [(value, "info")]
-    base = "warn" if view == "Health" and label == "Health" and _row_role(view, "Health " + value) == "warn" else "info"
-    return _inline_segments(value, base)
-
-
-def _labelled_segments(view: str, line: str, label_width: int, label: str) -> tuple[list[Segment], str]:
-    """Segments of one wrapped line in a labelled view, and the label it belongs to."""
-    head, value = line[:label_width], line[label_width:]
-    if head.strip():
-        label = head.strip()
-    if not line.strip():
-        return [(line, "info")], label
-    label_role = "state_review" if label == "Needs you" else "heading"
-    # Pad outside the label so an underline or reverse attribute never runs across the gap.
-    segments: list[Segment] = [(head.rstrip(), label_role), (head[len(head.rstrip()):], "info")] if head.strip() else [(head, "info")]
-    segments.extend(_value_segments(view, label, value))
-    return segments, label
-
-
-def _framed(draw: Callable[[curses.window, _ConsoleState], None]) -> Callable[[curses.window, _ConsoleState], None]:
-    """Let one frame share expensive row projections between its helpers."""
-    @functools.wraps(draw)
-    def wrapper(window: curses.window, state: _ConsoleState) -> None:
-        state._draw_cache = {}
-        try:
-            draw(window, state)
-        finally:
-            state._draw_cache = None
-    return wrapper
-
-
-@_framed
-def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
-    sync_window_size(window)
-    height, width = window.getmaxyx()
-    window.erase()
-    _draw_header(window, state, width)
-    rows = state.rows()
-    if height >= 2:
-        forecasts = _capacity_summaries(state.snapshot)
-        if state.view == "Tasks":
-            first = _inline_segments(_clip(_orders_summary(state), width), "muted")
-        elif forecasts:
-            first = _inline_segments(_clip(forecasts[0], width), "info")
-        else:
-            first = _inline_segments(_clip("Controller " + _controller_line(state.snapshot), width), "info", context="controller")
-        _put_segments(window, 1, 0, first, width)
-    if height >= 3:
-        _draw_navigation(window, state.view_index, " ", width)
-    if height >= 4:
-        selected = state.selected_row() if state.view == "Providers" else state.selected
-        detail = rows[min(selected, max(0, len(rows) - 1))] if rows else ""
-        if rows and state.selectable:
-            _put(window, 3, 0, _clip(detail, width), width, role="selected")
-        else:
-            _put_segments(window, 3, 0, _clip_segments(_inline_segments(detail, "info"), width), width)
-    if height >= 5:
-        _draw_command_line(window, 4, state, width)
-    if height >= 6:
-        _put_segments(window, 5, 0, _clip_segments(_status_line_segments(state, width), width), width)
-    _place_cursor(window, state, 4, width, visible=height >= 6)
-    window.noutrefresh()
-    curses.doupdate()
-
-
-@_framed
-def _draw_full(window: curses.window, state: _ConsoleState) -> None:
-    sync_window_size(window)
-    height, width = window.getmaxyx()
-    window.erase()
-    _draw_header(window, state, width)
-    if height >= 2:
-        _put_segments(window, 1, 0, _clip_segments(_strip_segments(state, width), width), width)
-    if height >= 3:
-        _draw_navigation(window, state.view_index, "  ", width)
-    gutter = 2
-    avail = max(1, width - gutter)
-    state.content_width = avail
-    rows = state.rows()
-    header = state.column_header()
-    content_top = 3
-    content_height = max(0, height - 6)
-    if header is not None and content_height > 1:
-        _put(window, content_top, gutter, cell_slice(header, 0, avail), avail, role="dim")
-        content_top += 1
-        content_height -= 1
-    label_width = _LABEL_WIDTHS.get(state.view)
-    display = [line for row in rows for line in _wrap_row(row, avail, label_width)] if label_width else rows
-    if state.view == "Overview":
-        free = content_height - len(display)
-        source = state.snapshot.get("operator_events")
-        events = _items(source if source is not None else state.snapshot.get("events"))
-        recent = _recent_event_rows(events, avail, free - 1, _task_numbers(state.snapshot)) if state.event_offset == 0 else []
-        if recent:
-            display = [*display, "", *recent]
-    preview_task = state.selected_task() if state.view == "Tasks" and not state.task_detail else None
-    list_height = _orders_list_height(content_height, width, len(rows)) if preview_task is not None else None
-    visible = list_height if list_height is not None else content_height
-    action_note = state.action_note(avail) if state.view == "Actions" and content_height > 2 else ""
-    if action_note:
-        visible = content_height - 1  # the last content row shows the selected action's full description
-    if state.selectable:
-        selected_row = state.detail_scroll if state.view == "Tasks" and state.task_detail else state.selected_row()
-        start = _scroll_start(selected_row, len(display), visible)
-    else:
-        selected_row = -1
-        state._scroll_limit = max(0, len(display) - content_height)
-        start = max(0, min(state.selected, state._scroll_limit))
-        state.selected = start
-    wrapped_view = label_width is not None
-    roles = state.row_roles()
-    segment_rows = state.row_segments() if not wrapped_view else None
-    horizontal = 0
-    if state.view == "Usage":
-        widest = max((cell_width(line) for line in display), default=0)
-        state.usage_hscroll = horizontal = max(0, min(state.usage_hscroll, widest - avail))
-    label = ""
-    for before in display[:start]:  # the label a scrolled-in continuation line belongs to
-        if label_width and before[:label_width].strip():
-            label = before[:label_width].strip()
-    for offset, value in enumerate(display[start : start + visible]):
-        y = content_top + offset
-        index = start + offset
-        if state.view == "Usage":
-            clean = "".join(char if unicodedata.category(char) not in {"Cc", "Cs"} else " " for char in value)
-            if segment_rows is not None and index < len(segment_rows):
-                parts = _slice_segments(segment_rows[index], horizontal, avail)
-                _put_segments(window, y, gutter, _clip_segments(parts, avail, mark=False), avail)
-            else:
-                role = roles[index] if roles is not None and index < len(roles) else "info"
-                if index > 0 and _USAGE_HEADER.match(clean):
-                    role = "heading"
-                elif index > 0 and clean.strip() and set(clean.strip()) <= {"─", "-", " "}:
-                    role = "dim"
-                _put(window, y, gutter, cell_slice(clean, horizontal, avail), avail, role=role)
-            continue
-        value = _clip(value, avail) if not wrapped_view else value
-        if state.selectable and index == selected_row:
-            _put(window, y, 0, "> " + value, width, role="selected")
-        elif label_width:
-            segments, label = _labelled_segments(state.view, value, label_width, label)
-            _put_segments(window, y, gutter, segments, avail)
-        elif segment_rows is not None and index < len(segment_rows):
-            _put_segments(window, y, gutter, _clip_segments(segment_rows[index], avail), avail)
-        else:
-            role = roles[index] if roles is not None and index < len(roles) else _row_role(state.view, value)
-            _put(window, y, gutter, value, avail, role=role)
-    if action_note:
-        _put(window, content_top + content_height - 1, gutter, _clip(action_note, avail), avail, role="muted")
-    if preview_task is not None and list_height is not None:
-        separator_y = content_top + list_height
-        _put_segments(window, separator_y, gutter, _order_separator_segments(preview_task, avail), avail)
-        for offset, (label_text, value, value_role) in enumerate(_order_preview_lines(preview_task, avail, content_height - list_height - 1)):
-            y = separator_y + 1 + offset
-            _put(window, y, gutter, f"{label_text:<{_BRIDGE_LABEL}}", avail, role="muted")
-            _put(window, y, gutter + _BRIDGE_LABEL, value, max(0, avail - _BRIDGE_LABEL), role=value_role)
-    if height >= 2:
-        _draw_slash_popup(window, state, height - 2, width, 3)
-        _draw_status_lines(window, state, height - 2, height - 1, width)
-        _place_cursor(window, state, height - 2, width)
-    window.noutrefresh()
-    curses.doupdate()
-
-
-def _response_rows(state: _ConsoleState, width: int) -> list[str]:
-    available = max(1, width - 2)
-    rows: list[str] = []
-    for line in state.output:
-        safe = "".join(
-            char if unicodedata.category(char) not in {"Cc", "Cs"} else " "
-            for char in line
-        )
-        rows.extend(textwrap.wrap(
-            safe,
-            width=available,
-            replace_whitespace=False,
-            drop_whitespace=False,
-            break_long_words=True,
-            break_on_hyphens=False,
-        ) or [""])
-    return rows or ["No command response."]
-
-
-def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
-    """Show bounded multiline help/query output without losing input context."""
-    sync_window_size(window)
-    height, width = window.getmaxyx()
-    window.erase()
-    if state.confirm_command is not None:
-        _put(window, 0, 0, "Confirm", width, role="heading")
-        # The "Y confirm · N or Esc cancel" hint is part of the response rows,
-        # directly after the question; showing it here as well would repeat it.
-        for offset, value in enumerate(_response_rows(state, width)[: max(0, height - 1)]):
-            if value.startswith("Y "):  # the choice: keys in `key`, verbs `muted`
-                segments: list[Segment] = []
-                for index, item in enumerate(value.split(_SEP)):
-                    key, verb = _split_hint(item.strip())
-                    segments += ([(_SEP, "dim")] if index else []) + ([(key, "key"), (" " + verb, "muted")] if key else [(item, "muted")])
-                _put_segments(window, 1 + offset, 0, segments, width)
-                continue
-            _put(window, 1 + offset, 0, value, width, role="warn" if offset == 0 else "info", preserve_spacing=True)
-        window.noutrefresh()
-        curses.doupdate()
-        return
-    _put(window, 0, 0, "Command response", width, role="heading")
-    if height >= 2:
-        _put(window, 1, 0, _SEP.join(("Arrows/PgUp/PgDn scroll", "Esc/Enter close", "F1-9/Tab switch view")), width, role="dim")
-    rows = _response_rows(state, width)
-    content_top = 2
-    footer_rows = 1 if height >= 4 else 0
-    content_height = max(0, height - content_top - footer_rows)
-    maximum_scroll = max(0, len(rows) - content_height)
-    state.response_scroll = min(maximum_scroll, max(0, state.response_scroll))
-    state.response_page_size = max(1, content_height)
-    for offset, value in enumerate(rows[state.response_scroll : state.response_scroll + content_height]):
-        if width <= 0:
-            break
-        safe = "".join(
-            char if unicodedata.category(char) not in {"Cc", "Cs"} else " "
-            for char in value
-        )
-        _put(window, content_top + offset, 0, safe, width, role=_status_role(safe), preserve_spacing=True)
-    if footer_rows:
-        if rows:
-            visible_start = state.response_scroll + 1 if content_height else 0
-            visible_end = min(len(rows), state.response_scroll + content_height)
-            counter = f"{visible_start}-{visible_end}/{len(rows)}" if content_height else f"0/{len(rows)}"
-        else:
-            counter = "0/0"
-        _put(window, height - 1, 0, f"{counter} response lines", width, role="dim")
-    window.noutrefresh()
-    curses.doupdate()
-
-
-def _draw_document(window: curses.window, state: _ConsoleState) -> None:
-    viewer = state.document_viewer
-    if viewer is None:
-        return
-    sync_window_size(window)
-    height, width = window.getmaxyx()
-    viewer.resize(width)
-    window.erase()
-    mode = "rendered" if viewer.rendered else "source"
-    rich_rows = viewer.rich_lines(width) if viewer.rendered else ()
-    degraded = " · plain source" if viewer.rendered and rich_rows and rich_rows[0][0][0].startswith("[plain source") else ""
-    _put(window, 0, 0, viewer.title if viewer.plain else f"{viewer.title} · read-only · {mode}{degraded}", width, role="heading")
-    content_height = max(1, height - 2)
-    if state.document_heading_list:
-        headings = viewer.headings()
-        rows = [f"{'>' if index == state.document_heading_selected else ' '} {number}: {label}"
-                for index, (number, label, _visual) in enumerate(headings)] or ["No Markdown headings in this source."]
-        first = max(0, min(state.document_heading_selected, len(rows) - content_height))
-        rows = rows[first:first + content_height]
-    else:
-        rows = viewer.visible(content_height, width)
-    for index, value in enumerate(rows):
-        if state.document_heading_list:
-            _put(window, index + 1, 0, value, width, role="selected" if value.startswith(">") else "info", preserve_spacing=True)
-        elif viewer.rendered:
-            spans = rich_rows
-            row = spans[viewer.top + index] if viewer.top + index < len(spans) else ()
-            x = 0
-            skipped = viewer.horizontal if not viewer.wrap else 0
-            for text, role in row:
-                if skipped >= cell_width(text):
-                    skipped -= cell_width(text)
-                    continue
-                text = cell_slice(text, skipped, max(0, width-x))
-                skipped = 0
-                amount = min(width - x, cell_width(text))
-                if amount <= 0:
-                    break
-                _put(window, index + 1, x, text, amount, role=role, preserve_spacing=True)
-                x += amount
-        else:
-            _put(window, index + 1, 0, value, width, role="info", preserve_spacing=True)
-    if viewer.rendering:
-        bridge_redraw.note_wall(0.15)  # a render or layout is running; repaint when it lands
-    footer = (f"q close | {viewer.top + 1}/{max(1, viewer.layout_rows)} {viewer.source_size}B "
-              f"{viewer.search_count} matches | / find m mode w wrap s export")
-    if viewer.plain:
-        footer = _SEP.join(["↑↓ scroll", "/ find", "Esc close", *([viewer.footer_extra] if viewer.footer_extra else [])])
-    if state.document_heading_list:
-        footer = "Headings · Up/Down select · Enter go · Esc close"
-    elif state.document_notice:
-        footer = ("Esc close | " if viewer.plain else "q close | ") + state.document_notice
-    if state.document_export_editing:
-        footer = "Export original source to new path: " + state.document_entry
-        if state.document_notice:
-            _put(window, max(0, height-2), 0, state.document_notice, width, role="error")
-    elif state.document_search_editing:
-        footer = "/" + viewer.query
-    _put(window, height - 1, 0, footer, width, role="dim", preserve_spacing=True)
-    try:
-        editing = state.document_export_editing or state.document_search_editing
-        curses.curs_set(1 if editing else 0)
-        if editing:
-            label = "Export: " if state.document_export_editing else "/"
-            source = state.document_entry if state.document_export_editing else viewer.query
-            visible, caret = input_view(source, len(source), max(1, width-cell_width(label)))
-            _put(window, height-1, 0, label+visible, width, role="command", preserve_spacing=True)
-            window.move(height-1, min(width-1, cell_width(label)+caret))
-    except (curses.error, AttributeError):
-        pass
-    window.noutrefresh()
-    curses.doupdate()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _edit_task_prompt(
@@ -5678,7 +2141,7 @@ def _compose_task_prompt(
         window.clear()
         window.refresh()
     if source is None:
-        if LAST_RECOVERY_DRAFT is not None and LAST_RECOVERY_DRAFT.is_file() and LAST_RECOVERY_DRAFT.stat().st_size:
+        if bridge_composer.LAST_RECOVERY_DRAFT is not None and bridge_composer.LAST_RECOVERY_DRAFT.is_file() and bridge_composer.LAST_RECOVERY_DRAFT.stat().st_size:
             state.output.append("Draft kept · Ctrl-E reopens it" if task_id is None else "Task unchanged; your edit is kept in the private drafts folder")
         return
     from .bridge_store import default_state_dir
@@ -5699,7 +2162,7 @@ def _compose_task_prompt(
         except OSError:
             pass
         state.edit_initial_text = source
-        state.output.append(f"Could not save task draft: {_text(exc, 100)}. Recovery source: {LAST_RECOVERY_DRAFT}")
+        state.output.append(f"Could not save task draft: {_text(exc, 100)}. Recovery source: {bridge_composer.LAST_RECOVERY_DRAFT}")
         return
     path = Path(name)
     if task_id is not None:
@@ -5714,7 +2177,7 @@ def _compose_task_prompt(
             command.extend(["--file", str(path)])
         else:
             command = ["task", "add", "--file", str(path)]
-    checkpoint = LAST_RECOVERY_DRAFT
+    checkpoint = bridge_composer.LAST_RECOVERY_DRAFT
     cleanup_paths = tuple(dict.fromkeys(item for item in (path, checkpoint) if item is not None))
     if not state._dispatch(shlex.join(command), cleanup_paths=cleanup_paths):
         state.output.append(f"Task source retained for recovery: {path}")
