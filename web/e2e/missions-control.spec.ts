@@ -1,9 +1,10 @@
 // PRD-014: the Missions list groups what needs the operator, what is rate-limited and which worker is unhealthy, and stays bounded at 500 missions.
 // The 500-mission checks count rendered nodes; they assert no wall-clock bound.
 import { groupOf, withHeadings } from "../src/grouping";
-import { windowSlice } from "../src/virtual";
+import { windowByHeights, windowSlice } from "../src/virtual";
 import { deriveState } from "../src/state";
 import { expect, test } from "./fixtures";
+import { mockApp } from "./mock";
 import { openApp } from "./redesign/harness";
 
 // ---- pure arithmetic
@@ -79,8 +80,7 @@ const activeNodes = (page: import("@playwright/test").Page) => page.locator('[da
 test("500 missions: the list holds a bounded number of row nodes and the groups come first", async ({ page }) => {
   await openApp(page, { auth: "in", dataset: "dense" }, "/missions");
   await expect(page.locator('[data-section="active"] .mrow').first()).toBeVisible();
-  const rows = await page.locator('[data-section="active"] .mrow').count();
-  expect(rows, "rendered mission rows of 500").toBeLessThanOrEqual(60);
+  await expect.poll(() => page.locator('[data-section="active"] .mrow').count(), "rendered mission rows of 500").toBeLessThanOrEqual(60);
   expect(await activeNodes(page), "child nodes of the active list").toBeLessThanOrEqual(70);
   // Headings keep the attention items first: the first heading is Needs you with every such mission counted, though most rows are not in the DOM.
   const first = page.locator('[data-section="active"] .mgroup').first();
@@ -93,4 +93,60 @@ test("500 missions: the list holds a bounded number of row nodes and the groups 
   await expect.poll(() => page.locator('[data-section="active"] .mrow').count()).toBeLessThanOrEqual(60);
   await expect(page.locator('[data-section="active"] .mrow[data-state="paused"], [data-section="active"] .mrow[data-state="queued"]').last()).toBeVisible();
   expect(await activeNodes(page)).toBeLessThanOrEqual(70);
+});
+
+test("windowByHeights uses each entry's own height and keeps before and after consistent", () => {
+  const heights = Array.from({ length: 200 }, (_, i) => (i % 2 ? 100 : 30)); // alternating tall and short rows
+  const total = heights.reduce((a, b) => a + b, 0);
+  const w = windowByHeights(heights, 3000, 800, 200, 60);
+  const shown = heights.slice(w.start, w.end).reduce((a, b) => a + b, 0);
+  expect(w.before + shown + w.after).toBe(total);
+  expect(w.before).toBeLessThanOrEqual(2800);
+  expect(w.before + shown).toBeGreaterThanOrEqual(4000);
+  expect(w.end - w.start).toBeLessThan(40);
+  expect(windowByHeights(heights.slice(0, 30), 0, 800, 200, 60)).toEqual({ start: 0, end: 30, before: 0, after: 0 });
+});
+
+test("500 missions: rows announce their place in the whole list", async ({ page }) => {
+  await openApp(page, { auth: "in", dataset: "dense" }, "/missions");
+  const active = 400;
+  await expect.poll(() => page.locator('[data-section="active"] .mrow').count()).toBeLessThanOrEqual(60);
+  const first = page.locator('[data-section="active"] .mrow').first();
+  await expect(first).toHaveAttribute("aria-setsize", String(active));
+  await expect(first).toHaveAttribute("aria-posinset", "1");
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.locator('[data-section="active"] .mrow[aria-posinset]').last()).toHaveAttribute("aria-posinset", String(active));
+});
+
+test("500 missions: the row with the keyboard focus stays in the list when it scrolls far out of the window", async ({ page }) => {
+  await openApp(page, { auth: "in", dataset: "dense" }, "/missions");
+  await expect.poll(() => page.locator('[data-section="active"] .mrow').count()).toBeLessThanOrEqual(60);
+  const key = await page.locator('[data-section="active"] .mrow').first().getAttribute("data-row-key");
+  await page.locator('[data-section="active"] .mrow .row-title').first().focus();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.locator('[data-section="active"] .mrow[aria-posinset="400"]')).toHaveCount(1);
+  await expect(page.locator(`[data-section="active"] [data-row-key="${key}"]`)).toHaveCount(1);
+  expect(await page.evaluate(() => document.activeElement?.closest("[data-row-key]")?.getAttribute("data-row-key"))).toBe(key);
+  expect(await activeNodes(page)).toBeLessThanOrEqual(75);
+});
+
+test("500 missions: until the window module has loaded the whole list is shown, not its first 60 rows", async ({ page }) => {
+  let armed = false;
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  // The chunks of the first load are requested before the document is ready; the window module is requested after the list has arrived.
+  page.on("domcontentloaded", () => (armed = true));
+  await page.route(/\/chunk-[A-Z0-9]+\.js$/, async (route) => {
+    if (armed) await gate; // the window module stays pending until the test lets it through
+    await route.continue();
+  });
+  await mockApp(page, { auth: "in", dataset: "dense" });
+  await page.goto("/missions"); // not openApp: it waits for the network to be idle, which includes the delayed module
+  await expect(page.locator('[data-section="active"] .mrow').first()).toBeVisible();
+  // Both counts are taken in one step, so the window module cannot arrive between them.
+  const snapshot = () => page.evaluate(() => [document.querySelectorAll('[data-section="active"] .mrow').length, document.querySelectorAll('[data-section="active"] .mgroup').length]);
+  expect(await snapshot()).toEqual([400, 0]);
+  release();
+  await expect(page.locator('[data-section="active"] .mgroup').first()).toBeVisible();
+  await expect.poll(async () => (await snapshot())[0]).toBeLessThanOrEqual(60);
 });

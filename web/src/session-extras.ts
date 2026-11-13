@@ -1,7 +1,7 @@
 // Parts of the session pane that are needed only after an interaction: full screen, the soft-keyboard layout, the resize
 // confirmation and the transcript text. A separate chunk keeps them out of the terminal chunk's size budget.
 import type { Terminal } from "@xterm/xterm";
-import { copyText, h, hooks } from "./dom";
+import { copyText, debounce, h, hooks } from "./dom";
 export { runSteer } from "./steer";
 import { findMatches, matchLabel, stepMatch } from "./transcript-search";
 import { confirmDialog } from "./ui";
@@ -32,11 +32,13 @@ export function transcriptView(pre: HTMLElement, tools: HTMLElement): Transcript
   const prev = h("button", { type: "button", class: "btn small", "data-action": "search-prev", "aria-label": "Previous match", onclick: step(-1) }, h("span", {}, "Previous"));
   const next = h("button", { type: "button", class: "btn small", "data-action": "search-next", "aria-label": "Next match", onclick: step(1) }, h("span", {}, "Next"));
   const copy = h("button", { type: "button", class: "btn small", "data-action": "copy-scrollback", onclick: () => void copyText(text).then((ok) => hooks.say(ok ? "Copied the scrollback." : "Could not copy the scrollback; select it and copy manually.")) }, h("span", {}, "Copy scrollback"));
-  input.addEventListener("input", () => {
+  // The transcript is rebuilt once typing pauses, not on every key.
+  const rebuild = debounce(() => {
     query = input.value;
     at = 0;
     paint(true);
-  });
+  }, 120);
+  input.addEventListener("input", rebuild);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();

@@ -139,7 +139,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   const verifiers = new Map<number, string>();
   const ctx: PageCtx = {
-    workerName, missionId, blocked, needs, mutateTask, status,
+    workerName, missionId, blocked, needs, mutateTask, status, reload: reloadAll,
     subject: () => { const m = headerModel(); return m ? headerSubject(m) : undefined; },
     answer: () => handlers.takeControl(),
     verified: (ordinal, text) => {

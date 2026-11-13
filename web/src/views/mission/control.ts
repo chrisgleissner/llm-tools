@@ -1,6 +1,6 @@
 // Rotation and settings of a mission (PRD-016, PAR rows `rotation` and `mission set`): the saved provider rotation and the execution settings, read and changed
 // through the worker's typed operations `mission.rotation.get/put` and `mission.settings.get/patch`. The block reads only when it is opened, and every change can be undone
-// from its toast by writing the earlier value back.
+// from its toast by writing the earlier value back, but only while the worker still has the value this change wrote. Neither operation has a revision or etag, so that comparison is the only guard.
 import * as api from "../../api";
 import { h } from "../../dom";
 import { reportOutcome, type ToastAction } from "../../ui";
@@ -38,6 +38,26 @@ async function send(ctx: ControlCtx, operation: string, params: Record<string, u
   }
 }
 
+/** The rotation names and the settings as the worker has them now, or null when either cannot be read. Neither operation carries a revision, so a value read is the only check there is. */
+async function fresh(ctx: ControlCtx): Promise<{ rotation: string[]; settings: Settings; mode: string; selected: string } | null> {
+  const [rot, set] = await Promise.all([send(ctx, "mission.rotation.get", {}), send(ctx, "mission.settings.get", {})]);
+  if (rot.outcome !== "applied" || set.outcome !== "applied") return null;
+  const policy = record(set.result["execution_policy"]);
+  return {
+    rotation: (Array.isArray(rot.result["entries"]) ? (rot.result["entries"] as unknown[]) : []).map((e) => String(record(e)["name"] ?? "")).filter(Boolean),
+    mode: String(rot.result["mode"] ?? "providers"),
+    selected: typeof rot.result["selected"] === "string" ? rot.result["selected"] : "",
+    settings: {
+      auto_continue: set.result["auto_continue"] === true,
+      suspend_when_rate_limited: set.result["suspend_when_rate_limited"] === true,
+      teams: policy["legacy"] === true ? null : policy["teams_enabled"] === true,
+      token_spend: policy["legacy"] === true ? "" : String(policy["token_spend"] ?? ""),
+    },
+  };
+}
+
+const NOT_UNDONE = "Changed elsewhere; not undone.";
+
 export function controlBlock(ctx: ControlCtx): Control {
   let loaded = false;
   let rotation: string[] = [];
@@ -46,22 +66,16 @@ export function controlBlock(ctx: ControlCtx): Control {
   const el = h("details", { class: "disclosure", id: "mission-control" }, h("summary", {}, h("span", {}, "Rotation and settings")), body);
 
   async function load(): Promise<void> {
-    const [rot, set] = await Promise.all([send(ctx, "mission.rotation.get", {}), send(ctx, "mission.settings.get", {})]);
-    if (rot.outcome !== "applied" || set.outcome !== "applied") {
-      body.replaceChildren(h("p", { class: "notice", role: "status" }, `Cannot load the rotation and settings. ${rot.message || set.message}`));
+    const now = await fresh(ctx);
+    if (!now) {
+      body.replaceChildren(h("p", { class: "notice", role: "status" }, "Cannot load the rotation and settings."));
       loaded = false;
       return;
     }
-    rotation = (Array.isArray(rot.result["entries"]) ? (rot.result["entries"] as unknown[]) : []).map((e) => String(record(e)["name"] ?? "")).filter(Boolean);
-    const policy = record(set.result["execution_policy"]);
-    settings = {
-      auto_continue: set.result["auto_continue"] === true,
-      suspend_when_rate_limited: set.result["suspend_when_rate_limited"] === true,
-      teams: policy["legacy"] === true ? null : policy["teams_enabled"] === true,
-      token_spend: policy["legacy"] === true ? "" : String(policy["token_spend"] ?? ""),
-    };
+    rotation = now.rotation;
+    settings = now.settings;
     loaded = true;
-    draw(String(rot.result["mode"] ?? "providers"), typeof rot.result["selected"] === "string" ? rot.result["selected"] : "");
+    draw(now.mode, now.selected);
   }
 
   function draw(mode: string, selected: string): void {
@@ -71,12 +85,26 @@ export function controlBlock(ctx: ControlCtx): Control {
     saveRotation.addEventListener("click", async () => {
       const next = rotationInput.value.split(",").map((s) => s.trim()).filter(Boolean);
       if (!next.length || next.join(",") === rotation.join(",")) return;
-      const before = rotation.join(",");
+      // The earlier value is the worker's now, not what the form was drawn from.
+      const before = await fresh(ctx);
+      if (!before) return void reportOutcome({ outcome: "failed", message: "The current rotation could not be read." }, "", "save the rotation");
       const r = await send(ctx, "mission.rotation.put", { set: next.join(",") });
-      const undo: ToastAction = { label: "Undo", run: () => void send(ctx, "mission.rotation.put", { set: before }).then((u) => (reportOutcome(u, "Rotation restored", "restore the rotation"), load())) };
+      const undo: ToastAction = {
+        label: "Undo",
+        run: () =>
+          void (async () => {
+            const now = await fresh(ctx);
+            if (!now || now.rotation.join(",") !== next.join(",")) return void reportOutcome({ outcome: "rejected", message: NOT_UNDONE }, "", "restore the rotation");
+            const u = await send(ctx, "mission.rotation.put", { set: before.rotation.join(",") });
+            reportOutcome(u, "Rotation restored", "restore the rotation");
+            if (u.outcome === "applied") await load();
+          })(),
+      };
       reportOutcome(r, "Rotation saved", "save the rotation", undo);
-      if (r.outcome === "applied" && typeof r.result["applies"] === "string") rotationNote.textContent = r.result["applies"];
-      await load();
+      // A failed save leaves the form, its focus and the typed text as they are.
+      if (r.outcome !== "applied") return;
+      rotation = next;
+      if (typeof r.result["applies"] === "string") rotationNote.textContent = r.result["applies"];
     });
 
     const auto = h("input", { id: "setting-auto-continue", type: "checkbox", checked: settings.auto_continue });
@@ -85,20 +113,33 @@ export function controlBlock(ctx: ControlCtx): Control {
     const spend = h("select", { id: "setting-spend", disabled: settings.token_spend === "" }, ...(settings.token_spend === "" ? [h("option", { value: "" }, "Not set for this mission")] : []), ...SPEND.map((v) => h("option", { value: v, selected: v === settings.token_spend }, v)));
     const saveSettings = h("button", { type: "button", class: "btn small", id: "settings-save", "data-action": "settings-save" }, h("span", {}, "Save settings"));
     saveSettings.addEventListener("click", async () => {
+      const before = await fresh(ctx);
+      if (!before) return void reportOutcome({ outcome: "failed", message: "The current settings could not be read." }, "", "save the settings");
+      const was = before.settings;
       const patch: Record<string, unknown> = {};
       const back: Record<string, unknown> = {};
-      const note = (key: string, now: unknown, was: unknown): void => {
-        if (now !== was) [patch[key], back[key]] = [now, was];
+      const note = (key: keyof Settings, value: unknown): void => {
+        if (value !== was[key]) [patch[key], back[key]] = [value, was[key]];
       };
-      note("auto_continue", auto.checked, settings.auto_continue);
-      note("suspend_when_rate_limited", suspend.checked, settings.suspend_when_rate_limited);
-      if (settings.teams !== null) note("teams", teams.checked, settings.teams);
-      if (settings.token_spend !== "") note("token_spend", spend.value, settings.token_spend);
+      note("auto_continue", auto.checked);
+      note("suspend_when_rate_limited", suspend.checked);
+      if (was.teams !== null) note("teams", teams.checked);
+      if (was.token_spend !== "") note("token_spend", spend.value);
       if (!Object.keys(patch).length) return;
       const r = await send(ctx, "mission.settings.patch", patch);
-      const undo: ToastAction = { label: "Undo", run: () => void send(ctx, "mission.settings.patch", back).then((u) => (reportOutcome(u, "Settings restored", "restore the settings"), load())) };
+      const undo: ToastAction = {
+        label: "Undo",
+        run: () =>
+          void (async () => {
+            const now = await fresh(ctx);
+            if (!now || Object.entries(patch).some(([k, v]) => now.settings[k as keyof Settings] !== v)) return void reportOutcome({ outcome: "rejected", message: NOT_UNDONE }, "", "restore the settings");
+            const u = await send(ctx, "mission.settings.patch", back);
+            reportOutcome(u, "Settings restored", "restore the settings");
+            if (u.outcome === "applied") await load();
+          })(),
+      };
       reportOutcome(r, "Settings saved", "save the settings", undo);
-      await load();
+      if (r.outcome === "applied") settings = { ...settings, ...(patch as Partial<Settings>) };
     });
     const check = (input: HTMLElement, label: string): HTMLElement => h("label", { class: "check" }, input, ` ${label}`);
 

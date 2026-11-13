@@ -222,7 +222,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       winLoading = true;
       void import("../missions-window").then((m) => ((win = m.missionWindow({ list, specs, threshold: VIRTUAL_FROM, stopped: () => disposed, h, reconcile })), render()));
     }
-    reconcile(list, specs(active.slice(0, VIRTUAL_FROM)));
+    reconcile(list, specs(active)); // the whole list until the window module is ready: neither a cut list nor rows without their headings
   }
 
   function renderControls(items: Item[]): void {

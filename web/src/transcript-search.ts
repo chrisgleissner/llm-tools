@@ -7,13 +7,31 @@ export interface Range {
 /** Matches kept at most: a one-letter search in a long buffer must not build thousands of highlight nodes. */
 export const MAX_MATCHES = 500;
 
-/** Case-insensitive, non-overlapping matches of `query` in `text`, in order. An empty query has none. */
+/** Lower case of one character. Folding the whole string instead could change its length ("İ" becomes two code units) and shift every later offset. */
+const fold = (c: string): string => c.toLowerCase();
+
+/** Case-insensitive, non-overlapping matches of `query` in `text`, in order. Offsets are positions in `text` itself. An empty query has none. */
 export function findMatches(text: string, query: string): Range[] {
   if (!query) return [];
-  const hay = text.toLowerCase();
-  const needle = query.toLowerCase();
+  const chars = Array.from(text);
+  const offsets: number[] = [];
+  let at = 0;
+  for (const c of chars) {
+    offsets.push(at);
+    at += c.length;
+  }
+  offsets.push(at);
+  const folded = chars.map(fold);
+  const needle = Array.from(query).map(fold);
   const out: Range[] = [];
-  for (let at = hay.indexOf(needle); at >= 0 && out.length < MAX_MATCHES; at = hay.indexOf(needle, at + needle.length)) out.push({ start: at, end: at + needle.length });
+  for (let i = 0; i + needle.length <= chars.length && out.length < MAX_MATCHES; i += 1) {
+    let j = 0;
+    while (j < needle.length && folded[i + j] === needle[j]) j += 1;
+    if (j === needle.length) {
+      out.push({ start: offsets[i]!, end: offsets[i + needle.length]! });
+      i += needle.length - 1;
+    }
+  }
   return out;
 }
 

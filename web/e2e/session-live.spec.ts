@@ -19,6 +19,14 @@ test("findMatches and stepMatch: case-insensitive, non-overlapping, wrapping", (
   expect(matchLabel("", 0, 0)).toBe("");
 });
 
+test("findMatches keeps offsets in the original text when case folding changes a character's length", () => {
+  const text = "İx İx \u{1F600}x";
+  const found = findMatches(text, "x");
+  expect(found.map((r) => text.slice(r.start, r.end))).toEqual(["x", "x", "x"]);
+  expect(found.map((r) => r.start)).toEqual([1, 4, 8]);
+  expect(findMatches("ÄÖ äö", "äö").map((r) => r.start)).toEqual([0, 3]);
+});
+
 test("sessionFacts reads provider, model, task and turns from the projection and leaves out what is not reported", () => {
   const f = sessionFacts({
     station_observation: { station: "codex", model: "gpt-5" },
@@ -117,4 +125,19 @@ test("Copy scrollback puts the scrollback text on the clipboard", async ({ page,
   await openSearch(page);
   await page.locator('[data-action="copy-scrollback"]').click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("128 passed, 0 failed");
+});
+
+test("Search rebuilds the transcript once typing pauses, not on every key", async ({ page }) => {
+  await openApp(page, { auth: "in", terminalScreen: true }, MISSION_URL);
+  await openSearch(page);
+  const input = page.getByLabel("Search scrollback", { exact: true }).first();
+  await page.evaluate(() => {
+    const w = window as unknown as { __rebuilds: number };
+    w.__rebuilds = 0;
+    new MutationObserver((list) => (w.__rebuilds += list.length)).observe(document.querySelector("pre.transcript")!, { childList: true });
+  });
+  await input.pressSequentially("tokenizer", { delay: 0 });
+  await expect(page.locator("pre.transcript mark").first()).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __rebuilds: number }).__rebuilds), "transcript rebuilds for nine keys; without the delay there are nine").toBeLessThanOrEqual(4);
 });
