@@ -381,7 +381,7 @@ x86-64 developer host (Intel Core i7-6700K, glibc release build of this branch, 
 | Missions | 1 000 total | 15.7 | n/a | 14 (paged list p95) | 0 | pass |
 | Missions | 5 000 total | 35.6 | n/a | 19 | 0 | pass |
 | Missions | 10 000 total | 49.1 to 52.1 | n/a | 26 to 41 | 0 | pass; this is the cap |
-| Missions | 20 000 and 50 000 offered | 65 | n/a | n/a | refused | 10 000 accepted, the rest got `too-many-missions` and close 1008 |
+| Missions | 20 000 and 50 000 offered | 65 | n/a | n/a | refused | measured before the per-worker rule: 10 000 accepted in total, the rest refused (superseded, see F6) |
 | Events/s | 500 | 20.7 | 4.3 | 75 (visibility) | 0 | achieved 501/s |
 | Events/s | 2 000 | 25.1 | 9.4 | 85 | 0 | achieved 2 001/s |
 | Events/s | 5 000 (3 runs) | 28.0 (26.0 to 28.0) | 14.3 | 41 (33 to 101) | 0 | achieved 5 002/s, database +95 MiB per 45 s before retention |
@@ -418,7 +418,7 @@ Emulated Pi (memory figures only; 10 s sampling interval through SSH, 2026-11-13
 | Resource | x86-64 | Emulated Pi (memory) | Limit now enforced |
 |---|---|---|---|
 | Worker connections | 64 within the thresholds, RSS 27 MiB | RSS 21 to 27 MiB | 64 (503) |
-| Missions indexed | 10 000 at 49 to 52 MiB | 10 000 at 61 MiB | 10 000 across workers (`too-many-missions`); 5 000 per hello |
+| Missions indexed | 10 000 at 49 to 52 MiB | 10 000 at 61 MiB | 10 000 per worker (oldest finished dropped first); 5 000 per hello |
 | Events per second | 10 000/s, RSS 38 MiB, not saturated | 500/s with 17 MiB; 374 to 532/s ingest while prefilling | not limited (F7 deferred) |
 | Browser sessions | 128 (cap), RSS 40 MiB | RSS 34 MiB for 71 clients | 128 (503 `busy`) |
 | Terminal sessions | 64 (cap), RSS 29 MiB | RSS 16 MiB | 16 per worker, 64 total |
@@ -494,16 +494,16 @@ Result.
 
 | Finding | Disposition | Evidence |
 |---|---|---|
-| F1 | Fixed before this change: the stream ring holds 32 notices of at most 4 KiB, with no event or result bodies | `worker.rs` `hub_fanout_keeps_only_small_change_notifications_for_multiple_browsers`, `browser_stream_gets_change_notices_not_event_bodies_or_command_results` |
-| F2 | Fixed by existing byte caps: 64 KiB per pending request, 512 KiB per worker, 8 MiB in total bound the outbound queue; measured depth was 0 in every step | `worker.rs` `command_journal_refuses_excess_pending_bytes`; `resources.outbound_queue_depth_*` in diagnostics |
-| F3 | Fixed before this change: 128 KiB per session; this change adds the dropped-frame counter | `terminal.rs` `terminal_input_queue_refuses_bytes_above_its_per_session_budget` |
-| F4 | Not applicable. A terminal session has exactly one browser viewer (the browser socket is the session), so the 64-session cap bounds viewers at 64 and their queues at 16 MiB. Dimension 5 is measured as sessions | measured above |
-| F5 | Fixed: 256 enrolled workers, 409 `too-many-workers` | `capacity.rs` `enrolment_is_capped_at_256_workers_with_a_clear_error` |
-| F6 | Fixed: the unpaged list already returned one page (default 100); this change adds the 10 000 total mission cap (`too-many-missions`, close 1008, old list kept), the list memory fix and the hello memory fix. The plan's 50 000 was not used because of the measured memory | `capacity.rs` `total_missions_are_capped_and_an_unpaged_list_is_one_page` |
-| F7 | Deferred. No rate was found at which the coordinator fails: 10 000 events/s on x86-64 at 38 MiB, with no nacks; storage per worker is bounded by `max_events_per_worker`. A limit needs a protocol error code and worker retry behaviour. Revisit with a physical-Pi measurement, where ingest is CPU-bound at about 6 000 events/s | measured above |
-| F8 | Partly fixed. `/stream` is capped at 128 with HTTP 503 `busy` and Retry-After. Deferred: the silent drop above the 256 TCP slots, which needs a bounded 503 path in the accept loop. Upgraded WebSockets release their TCP slot, so the remaining case is plain HTTP over 256 connections | `capacity.rs` `stream_sockets_are_capped_at_128_with_a_clear_error` |
-| F9 | Fixed: `/diagnostics` has `enrolled_workers`, `missions_indexed` and `resources` (`worker_connections`, `outbound_queue_depth_max`, `outbound_queue_depth_total`, `stream_clients`, `terminal_sessions`, `terminal_input_frames_dropped`) | `capacity.rs` `diagnostics_expose_connection_and_queue_counters` |
-| F10 | Fixed: tests for the 64-worker cap, the 5 000 mission hello, the 500 event batch, the `/stream` 1013 lag path, the unpaged list size, the 10 000 mission cap, the enrolment cap and the stream cap | `coordinator/tests/capacity.rs` |
+| F1 | fixed (before this change): the stream ring holds 32 notices of at most 4 KiB, with no event or result bodies | `worker.rs` `hub_fanout_keeps_only_small_change_notifications_for_multiple_browsers`, `browser_stream_gets_change_notices_not_event_bodies_or_command_results` |
+| F2 | fixed (by the existing byte caps: 64 KiB per pending request, 512 KiB per worker, 8 MiB in total bound the outbound queue; measured depth was 0 in every step) | `worker.rs` `command_journal_refuses_excess_pending_bytes`; `resources.outbound_queue_depth_*` in diagnostics |
+| F3 | fixed (before this change): 128 KiB per session; this change adds the dropped-frame counter | `terminal.rs` `terminal_input_queue_refuses_bytes_above_its_per_session_budget` |
+| F4 | no change (not applicable). A terminal session has exactly one browser viewer (the browser socket is the session), so the 64-session cap bounds viewers at 64 and their queues at 16 MiB. Dimension 5 is measured as sessions | measured above |
+| F5 | fixed: 256 enrolled workers, 409 `too-many-workers`; the existing-name check, count and insert are one transaction | `capacity.rs` `enrolment_is_capped_at_256_workers_with_a_clear_error` |
+| F6 | fixed: the unpaged list already returned one page (default 100); this change keeps at most 10 000 summaries per worker (oldest finished dropped first; if all are active, the newest excess is not indexed and diagnostics shows `missions-over-cap`; a hello is never refused), plus the list memory fix and the hello memory fix. A coordinator-wide cap was dropped because refusing a hello caused reconnect storms | `capacity.rs` `total_missions_are_capped_and_an_unpaged_list_is_one_page` |
+| F7 | FIND-006 (deferred). No rate was found at which the coordinator fails: 10 000 events/s on x86-64 at 38 MiB, with no nacks; storage per worker is bounded by `max_events_per_worker`. A limit needs a protocol error code and worker retry behaviour. Revisit with a physical-Pi measurement, where ingest is CPU-bound at about 6 000 events/s | measured above |
+| F8 | FIND-006 (partly fixed; the rest is deferred). `/stream` is capped at 128 in total and 16 per session or token, with HTTP 503 `busy` and Retry-After. Deferred: the silent drop above the 256 TCP slots, which needs a bounded 503 path in the accept loop. Upgraded WebSockets release their TCP slot, so the remaining case is plain HTTP over 256 connections | `capacity.rs` `stream_sockets_are_capped_at_128_with_a_clear_error` |
+| F9 | fixed: `/diagnostics` has `enrolled_workers`, `missions_indexed` and `resources` (`worker_connections`, `outbound_queue_depth_max`, `outbound_queue_depth_total`, `stream_clients`, `terminal_sessions`, `terminal_input_frames_dropped`) | `capacity.rs` `diagnostics_expose_connection_and_queue_counters` |
+| F10 | fixed: tests for the 64-worker cap, the 5 000 mission hello, the 500 event batch, the `/stream` 1013 lag path, the unpaged list size, the 10 000 mission cap, the enrolment cap and the stream cap | `coordinator/tests/capacity.rs` |
 
 The `hello` error for more than 5 000 missions now says `too many missions`; before it said
 "capabilities and missions must be lists". With 300-byte summaries the 1 MiB message limit is reached at

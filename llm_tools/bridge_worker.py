@@ -60,6 +60,24 @@ MISSION_QUESTION_REFRESH_SECS = 5.0
 MAX_QUESTION_MISSIONS_PER_REFRESH = 64
 
 
+# Coordinator error codes (and close reasons) after which reconnecting cannot succeed until the operator acts.
+FATAL_COORDINATOR_CODES: dict[str, str] = {
+    "worker-id-mismatch": "this worker name is bound to a different worker id; revoke and add the worker again on the coordinator, then run `llm-bridge worker enroll` again",
+    "unsupported-version": "no protocol version is shared with the coordinator; upgrade llm-tools on this host or the coordinator",
+    "worker-revoked": "the coordinator revoked this worker; add it again on the coordinator and run `llm-bridge worker enroll` with the new token",
+}
+_FATAL_CLOSE_REASONS = {"worker revoked": "worker-revoked", "worker id mismatch": "worker-id-mismatch", "unsupported version": "unsupported-version"}
+
+
+class WorkerFatalError(RuntimeError):
+    """The coordinator refused this worker for a reason that retrying cannot fix."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        self.code = code
+        self.fix = FATAL_COORDINATOR_CODES.get(code, "see the coordinator log")
+        super().__init__(f"coordinator refused this worker ({code}{': ' + message if message else ''}): {self.fix}")
+
+
 class WorkerConfigError(ValueError):
     """The worker is not enrolled or its configuration is invalid."""
 
@@ -258,12 +276,14 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
                 service_state = "unknown"
     connection_events = [
         entry for entry in read_audit(200, env)
-        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused"}
+        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused", "connection.fatal"}
     ]
     latest = connection_events[-1] if connection_events else None
     connected = bool(latest and latest.get("action") == "connection.accepted" and service_state == "active")
     last_connected = next((entry.get("ts") for entry in reversed(connection_events) if entry.get("action") == "connection.accepted"), None)
-    if connected:
+    if latest and latest.get("action") == "connection.fatal":
+        connection_state = "refused"
+    elif connected:
         connection_state = "connected"
     elif latest and latest.get("action") in {"connection.ended", "connection.refused"}:
         connection_state = "disconnected"
@@ -276,6 +296,7 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
         "connection_state": connection_state,
         "last_connected_at": last_connected,
         "service_state": service_state,
+        **({"refused_code": latest.get("code"), "refused_fix": latest.get("fix")} if connection_state == "refused" and latest else {}),
     }
 
 
@@ -583,6 +604,7 @@ class WorkerSession:
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
+        self.fatal: WorkerFatalError | None = None  # set when the coordinator refused this worker for good
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
@@ -733,6 +755,10 @@ class WorkerSession:
             self.audit("connection.accepted", generation=generation)
             return []
         if message.type == "error":
+            code = str(message.payload.get("code", ""))
+            if code in FATAL_COORDINATOR_CODES and self.generation == 0:
+                self.fatal = WorkerFatalError(code, str(message.payload.get("message", ""))[:200])
+                return []
             if self.inflight is not None and self.inflight.tombstones and message.payload.get("in_reply_to") == self.inflight.message_id:
                 # A coordinator from before PRD-038 rejects the unknown field. Keep the tombstones pending
                 # (the pong that follows only clears the batch) and stop offering them on this connection.
@@ -1046,8 +1072,10 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
     """
     backoff = 1.0
     session.audit("worker.start", allow_control=session.config.allow_control)
+    fatal: WorkerFatalError | None = None
     while not stop.is_set():
         connection = None
+        welcomed = False
         try:
             connection = connect(session.config)
             session.generation, session.cursor, session.close_reason = 0, None, None
@@ -1059,11 +1087,15 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 now = time.monotonic()
                 if text is not None:
                     last_heard = now
-                    backoff = 1.0
                     try:
                         replies = session.handle(decode(text))
                     except ProtocolError as exc:
                         replies = [session.error(exc.code, str(exc))]
+                    if session.fatal is not None:
+                        raise session.fatal
+                    if session.generation and not welcomed:
+                        welcomed = True  # a connection that was never welcomed keeps the growing backoff
+                        backoff = 1.0
                     for reply in replies:
                         connection.send_text(reply.encode())
                     if session.close_reason:
@@ -1084,7 +1116,16 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 if now - last_ping > PING_INTERVAL and session.generation:
                     connection.send_text(session.ping().encode())
                     last_ping = now
+        except WorkerFatalError as exc:
+            fatal = exc
+            session.audit("connection.fatal", code=exc.code, fix=exc.fix)
+            log(f"worker stopped: {exc}")
         except Exception as exc:  # noqa: BLE001 - every failure leads to a bounded reconnect
+            reason = getattr(exc, "reason", "")
+            if not session.generation and reason in _FATAL_CLOSE_REASONS:
+                fatal = WorkerFatalError(_FATAL_CLOSE_REASONS[reason])
+                session.audit("connection.fatal", code=fatal.code, fix=fatal.fix)
+                log(f"worker stopped: {fatal}")
             log(f"worker connection ended: {type(exc).__name__}: {str(exc)[:200]}")
             if session.generation:  # only welcomed connections; failed attempts would flood the audit
                 session.audit("connection.ended", generation=session.generation, reason=type(exc).__name__)
@@ -1094,10 +1135,14 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                     connection.close()
                 except Exception:  # noqa: BLE001
                     pass
+        if fatal is not None:
+            break
         if stop.wait(backoff * random.uniform(0.5, 1.0)):
             break
         backoff = min(max_backoff, backoff * 2)
     session.audit("worker.stop")
+    if fatal is not None:
+        raise fatal
 
 
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:

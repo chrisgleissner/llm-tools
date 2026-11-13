@@ -385,6 +385,8 @@ pub struct Db {
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
     /// which only makes the next retention pass run early and correct the figure.
     event_counts: Mutex<HashMap<String, u64>>,
+    /// Workers that have more active missions than `MAX_MISSIONS_PER_WORKER` (diagnostics warning `missions-over-cap`).
+    missions_over_cap: Mutex<std::collections::BTreeSet<String>>,
     /// FIND-004: the last audit write failed and none has succeeded since. Reported by `/healthz`.
     audit_failed: std::sync::atomic::AtomicBool,
     audit_failures: AtomicU64,
@@ -502,19 +504,55 @@ pub struct EventBatch<'a> {
     pub max: u64,
 }
 
-pub enum HelloOutcome {
-    Ok {
-        generation: u64,
-        cursor: u64,
-    },
-    WorkerIdMismatch,
-    Unknown,
-    /// Accepting this hello would take the coordinator above `MAX_TOTAL_MISSIONS`.
-    TooManyMissions,
+/// Keep at most `cap` mission summaries of `worker`. The oldest finished summaries (by `updated_at`) go first. When
+/// every remaining summary is active, the rows that `inserted` names (newest last) are refused until the count fits.
+/// Returns true when active summaries were refused.
+fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &[String], cap: u64) -> R<bool> {
+    let count = |tx: &rusqlite::Transaction<'_>| -> R<u64> {
+        Ok(tx.query_row("SELECT COUNT(*) FROM missions WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64)
+    };
+    let total = count(tx)?;
+    if total <= cap {
+        return Ok(false);
+    }
+    tx.execute(
+        &format!(
+            "DELETE FROM missions WHERE worker=?1 AND mission_id IN (SELECT mission_id FROM missions WHERE worker=?1 \
+             AND upper(COALESCE(json_extract(info,'$.status'),'')) NOT IN {LIVE_STATES} \
+             ORDER BY COALESCE(json_extract(info,'$.updated_at'),'') ASC, mission_id ASC LIMIT ?2)"
+        ),
+        params![worker, (total - cap) as i64],
+    )?;
+    let mut remaining = count(tx)?;
+    let mut refused = false;
+    for id in inserted.iter().rev() {
+        if remaining <= cap {
+            break;
+        }
+        remaining -= tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])? as u64;
+        refused = true;
+    }
+    Ok(refused || remaining > cap)
 }
 
-/// Most missions the coordinator indexes across all workers (capacity plan F6).
-pub const MAX_TOTAL_MISSIONS: u64 = 10_000;
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnrolOutcome {
+    Added,
+    Exists,
+    Full,
+}
+
+pub enum HelloOutcome {
+    Ok { generation: u64, cursor: u64 },
+    WorkerIdMismatch,
+    Unknown,
+}
+
+/// Most mission summaries kept per worker (capacity plan F6). Above it the oldest finished summaries are dropped
+/// first; a worker whose missions are all active has its new excess rows refused, with a diagnostics warning.
+pub const MAX_MISSIONS_PER_WORKER: u64 = 10_000;
+/// Mission states that are not finished (protocol.md, Mission summaries: "live").
+const LIVE_STATES: &str = "('CREATED','RUNNING','PAUSED','STOPPING')";
 /// Most enrolled workers (capacity plan F5).
 pub const MAX_ENROLLED_WORKERS: u64 = 256;
 
@@ -885,6 +923,7 @@ impl Db {
             stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
+            missions_over_cap: Mutex::new(std::collections::BTreeSet::new()),
             audit_failed: std::sync::atomic::AtomicBool::new(false),
             audit_failures: AtomicU64::new(0),
             audit_last_attempt: std::sync::atomic::AtomicI64::new(0),
@@ -1600,6 +1639,26 @@ impl Db {
     pub fn workers_count(&self) -> R<u64> {
         Ok(self.r()?.query_row("SELECT COUNT(*) FROM workers", [], |r| r.get::<_, i64>(0))? as u64)
     }
+    /// Enrol a worker unless the name exists (`Exists`) or `cap` workers are enrolled (`Full`). The existing-name check,
+    /// the count and the insert run in one transaction on the single writer connection, so concurrent enrolments
+    /// cannot exceed the cap.
+    pub fn worker_add_capped(&self, name: &str, hash: &str, fingerprint: Option<&str>, cap: u64) -> R<EnrolOutcome> {
+        let mut c = self.c()?;
+        let tx = c.transaction()?;
+        if tx.query_row("SELECT COUNT(*) FROM workers WHERE name=?", params![name], |r| r.get::<_, i64>(0))? > 0 {
+            return Ok(EnrolOutcome::Exists);
+        }
+        if tx.query_row("SELECT COUNT(*) FROM workers", [], |r| r.get::<_, i64>(0))? as u64 >= cap {
+            return Ok(EnrolOutcome::Full);
+        }
+        tx.execute(
+            "INSERT INTO workers(name, token_hash, created_at, client_cert_fingerprint) VALUES(?,?,?,?)",
+            params![name, hash, crate::now(), fingerprint],
+        )?;
+        tx.commit()?;
+        Ok(EnrolOutcome::Added)
+    }
+
     pub fn worker_add(&self, name: &str, hash: &str) -> R<bool> {
         Ok(self.c()?.execute(
             "INSERT OR IGNORE INTO workers(name, token_hash, created_at) VALUES(?,?,?)",
@@ -1751,12 +1810,7 @@ impl Db {
         tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=?, worker_policy=? WHERE name=?",
             params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, text("worker_policy"), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
-        let incoming = hello.get("missions").and_then(Value::as_array).map_or(0, |m| m.len() as u64);
-        let others: i64 = tx.query_row("SELECT COUNT(*) FROM missions", [], |r| r.get(0))?;
-        if others as u64 + incoming > MAX_TOTAL_MISSIONS {
-            // Dropping `tx` rolls the whole hello back: the worker's previous mission list stays.
-            return Ok(HelloOutcome::TooManyMissions);
-        }
+        let mut inserted = Vec::new();
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
@@ -1767,14 +1821,26 @@ impl Db {
                         "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
                         params![name, id, m.to_string()],
                     )?;
+                    inserted.push(id.to_string());
                 }
             }
         }
+        let over = enforce_mission_cap(&tx, name, &inserted, MAX_MISSIONS_PER_WORKER)?;
         tx.commit()?;
+        self.note_mission_cap(name, over);
         Ok(HelloOutcome::Ok {
             generation: generation as u64,
             cursor: cursor as u64,
         })
+    }
+
+    fn note_mission_cap(&self, worker: &str, over: bool) {
+        let mut set = self.missions_over_cap.lock().unwrap_or_else(|e| e.into_inner());
+        if over {
+            set.insert(worker.to_string());
+        } else {
+            set.remove(worker);
+        }
     }
 
     /// Every mission row as `(worker, info JSON text)`, without parsing the summaries.
@@ -1830,6 +1896,7 @@ impl Db {
                 insert.execute(params![worker, id, e.to_string()])?;
             }
         }
+        let mut inserted_missions: Vec<String> = Vec::new();
         if let Some(missions) = missions {
             // A mission row is written only when its summary differs from the stored one: an unchanged
             // summary would otherwise dirty (and write to the log) its page on every batch.
@@ -1842,10 +1909,13 @@ impl Db {
                     if tombstoned.contains(id) {
                         continue;
                     }
-                    upsert.execute(params![worker, id, mission.to_string()])?;
+                    if upsert.execute(params![worker, id, mission.to_string()])? == 1 && !inserted_missions.iter().any(|i| i == id) {
+                        inserted_missions.push(id.to_string());
+                    }
                 }
             }
         }
+        let mission_cap_over = if missions.is_some() { Some(enforce_mission_cap(&tx, worker, &inserted_missions, MAX_MISSIONS_PER_WORKER)?) } else { None };
         // One statement for the whole worker row update: the cursors and the time live on one page.
         tx.execute(
             "UPDATE workers SET event_cursor=?1, last_event_at=?2, mission_cursor=COALESCE(?3, mission_cursor) WHERE name=?4",
@@ -1865,6 +1935,9 @@ impl Db {
             count = tx.query_row("SELECT COUNT(*) FROM events WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64;
         }
         tx.commit()?;
+        if let Some(over) = mission_cap_over {
+            self.note_mission_cap(worker, over);
+        }
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(worker.to_string(), count);
         Ok(EventsOutcome::Accepted { cursor: through, stored })
     }
@@ -2358,6 +2431,12 @@ impl Db {
             "command_queue_depths": depths,
             "enrolled_workers": count("SELECT COUNT(*) FROM workers")?,
             "missions_indexed": count("SELECT COUNT(*) FROM missions")?,
+            "warnings": self.missions_over_cap.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|w| json!({
+                "code": "missions-over-cap",
+                "worker": w,
+                "message": format!("worker {w} has more than {MAX_MISSIONS_PER_WORKER} active missions; the newest summaries are not indexed"),
+                "fix": "finish or delete missions on that worker (llm-bridge mission delete), then reconnect it",
+            })).collect::<Vec<_>>(),
         }))
     }
     }

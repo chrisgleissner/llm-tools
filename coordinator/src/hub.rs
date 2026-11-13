@@ -14,6 +14,8 @@ pub const MAX_STREAM_MESSAGE_BYTES: usize = 4 * 1024;
 /// Open browser `/stream` sockets. An upgraded WebSocket no longer holds a TCP connection slot, so this is the only
 /// bound on them. Measured on x86-64 (docs/distributed/capacity-measurements): about 0.19 MiB per client.
 pub const MAX_STREAM_CLIENTS: usize = 128;
+/// Open `/stream` sockets of one login session or API token (several tabs of one user).
+pub const MAX_STREAM_CLIENTS_PER_SESSION: usize = 16;
 pub const MAX_TERMINALS_PER_WORKER: usize = 16;
 pub const MAX_TERMINALS: usize = 64;
 
@@ -88,16 +90,25 @@ pub struct Hub {
     link: Mutex<LinkCounts>,
     /// Open `/stream` browser sockets.
     stream_clients: AtomicUsize,
+    /// Open `/stream` sockets per login session or API token.
+    stream_by: Mutex<HashMap<String, usize>>,
     /// Browser terminal input frames dropped since start because the per-session byte budget was full.
     dropped_terminal_input: AtomicU64,
 }
 
 /// Counts one open `/stream` socket for diagnostics.
-pub struct StreamGuard(Arc<Hub>);
+pub struct StreamGuard(Arc<Hub>, String);
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         self.0.stream_clients.fetch_sub(1, Ordering::SeqCst);
+        let mut by = self.0.stream_by.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = by.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                by.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -133,17 +144,27 @@ impl Hub {
             pending: Mutex::new(HashSet::new()),
             link: Mutex::new(BTreeMap::new()),
             stream_clients: AtomicUsize::new(0),
+            stream_by: Mutex::new(HashMap::new()),
             dropped_terminal_input: AtomicU64::new(0),
         })
     }
 
-    /// Claim one `/stream` slot; `None` when `MAX_STREAM_CLIENTS` sockets are open.
-    pub fn try_stream_open(self: &Arc<Self>) -> Option<StreamGuard> {
+    /// Claim one `/stream` slot for the session or token `key`; `Err` carries the refusal text.
+    pub fn try_stream_open(self: &Arc<Self>, key: &str) -> Result<StreamGuard, String> {
+        let mut by = self.stream_by.lock().unwrap_or_else(|e| e.into_inner());
+        if by.get(key).copied().unwrap_or(0) >= MAX_STREAM_CLIENTS_PER_SESSION {
+            return Err(format!(
+                "this session already has {MAX_STREAM_CLIENTS_PER_SESSION} browser streams open; close a tab and retry"
+            ));
+        }
         if self.stream_clients.fetch_add(1, Ordering::SeqCst) >= MAX_STREAM_CLIENTS {
             self.stream_clients.fetch_sub(1, Ordering::SeqCst);
-            return None;
+            return Err(format!(
+                "the coordinator already serves {MAX_STREAM_CLIENTS} browser streams; close one and retry"
+            ));
         }
-        Some(StreamGuard(self.clone()))
+        *by.entry(key.to_string()).or_default() += 1;
+        Ok(StreamGuard(self.clone(), key.to_string()))
     }
 
     /// Resource counters for `GET /api/v1/diagnostics` (capacity plan F9). All are cheap reads.

@@ -64,11 +64,20 @@ whole numbers with `invalid-message`.
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
 A `hello` with more than 5000 missions gets an `error` with code `invalid-message`; the connection stays
-open until the hello deadline. A `hello` that is valid but would take the coordinator above 10 000
-missions across all workers gets an `error` with code `too-many-missions`, followed by close 1008
-`too many missions`. The coordinator keeps the worker's previous mission list. The worker reconnects with
-its normal backoff; the operator must delete missions before it is accepted. With summaries of about 300
-bytes, the 1 MiB message limit is reached at roughly 3000 missions, before the 5000 limit.
+open until the hello deadline. With summaries of about 300 bytes, the 1 MiB message limit is reached at
+roughly 3000 missions, before the 5000 limit.
+
+The coordinator keeps at most 10 000 mission summaries per worker. A `hello` or an `events` upsert is never
+refused for this: when a worker exceeds the limit, the coordinator drops that worker's oldest finished
+summaries (by `updated_at`) first. If the remaining summaries are all active, it does not index the newest
+excess rows and reports the warning `missions-over-cap` (with the worker name and a fix) in
+`GET /api/v1/diagnostics`. The warning clears when a later update fits.
+
+Fatal refusals. After the error codes `worker-id-mismatch` and `unsupported-version`, or the close reason
+`worker revoked`, reconnecting cannot succeed until the operator acts. The Python worker stops, logs one error
+that names the fix and exits with status 1; `llm-bridge worker status` then shows the connection as `refused`
+with the code and the fix. Every other close or error leads to a reconnect with jittered exponential
+backoff. The backoff returns to its start value only after a `welcome`, not after any other message.
 
 ## Mission summaries
 

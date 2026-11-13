@@ -1692,12 +1692,8 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
             "worker name must be lowercase letters, digits and '-' (at most 63)",
         ));
     }
-    if st.db.workers_count()? >= crate::db::MAX_ENROLLED_WORKERS {
-        return Err(err(
-            StatusCode::CONFLICT,
-            "too-many-workers",
-            "the coordinator already has the maximum number of enrolled workers (256); revoke one first",
-        ));
+    if st.db.worker_get(name)?.is_some() {
+        return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists"));
     }
     let token = auth::random_token();
     let identity = if st.cfg.worker_mtls {
@@ -1711,14 +1707,22 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
     } else {
         None
     };
-    let added = if let Some(identity) = &identity {
-        st.db
-            .worker_add_with_client_certificate(name, &auth::sha256_hex(&token), &identity.fingerprint_sha256)?
-    } else {
-        st.db.worker_add(name, &auth::sha256_hex(&token))?
-    };
-    if !added {
-        return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists"));
+    let outcome = st.db.worker_add_capped(
+        name,
+        &auth::sha256_hex(&token),
+        identity.as_ref().map(|i| i.fingerprint_sha256.as_str()),
+        crate::db::MAX_ENROLLED_WORKERS,
+    )?;
+    match outcome {
+        crate::db::EnrolOutcome::Added => {}
+        crate::db::EnrolOutcome::Exists => return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists")),
+        crate::db::EnrolOutcome::Full => {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "too-many-workers",
+                "the coordinator already has the maximum number of enrolled workers (256); revoke one first",
+            ))
+        }
     }
     st.db.audit(&p.actor(), "worker.add", name, &ip);
     let mut response = json!({"name": name, "token": token, "mutual_tls": identity.is_some()});
@@ -3328,17 +3332,17 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
         ));
     }
     let rx = st.hub.stream.subscribe();
-    let Some(open) = st.hub.try_stream_open() else {
-        let mut busy = err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "busy",
-            format!(
-                "the coordinator already serves {} browser streams; close one and retry",
-                crate::hub::MAX_STREAM_CLIENTS
-            ),
-        );
-        busy.retry_after = Some(5);
-        return Err(busy);
+    let key = match &p {
+        Principal::Session { token_hash, .. } => format!("session:{token_hash}"),
+        other => format!("token:{}", other.actor()),
+    };
+    let open = match st.hub.try_stream_open(&key) {
+        Ok(open) => open,
+        Err(reason) => {
+            let mut busy = err(StatusCode::SERVICE_UNAVAILABLE, "busy", reason);
+            busy.retry_after = Some(5);
+            return Err(busy);
+        }
     };
     let shutdown = st.shutdown.clone();
     let hub = st.hub.clone();

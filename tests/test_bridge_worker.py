@@ -893,3 +893,75 @@ def test_outcome_ledger_is_private_bounded_and_pruned(tmp_path, monkeypatch):
     now[0] += worker.OUTCOMES_KEEP_SECONDS + 1
     ledger.record("late", {"outcome": "applied"})
     assert ledger.get("r7") is None and ledger.get("late") is not None
+
+
+
+class _RecordingStop(threading.Event):
+    """An Event that records the delays passed to ``wait`` and stops after ``limit`` of them."""
+
+    def __init__(self, limit):
+        super().__init__()
+        self.delays, self.limit = [], limit
+
+    def wait(self, timeout=None):
+        if timeout is not None and timeout >= 0.5:
+            self.delays.append(timeout)
+            if len(self.delays) >= self.limit:
+                self.set()
+            return self.is_set()
+        return super().wait(timeout)
+
+
+def test_backoff_grows_across_connections_that_never_get_a_welcome(state, monkeypatch):
+    directory, _ = state
+    session, _ = _session(directory)
+    stop = _RecordingStop(4)
+    ping = Message("ping", "c", 0, {}).encode()
+    monkeypatch.setattr(worker.random, "uniform", lambda a, b: 1.0)
+    worker.run(session, lambda config: FakeConnection([ping], stop, fail_after=True), stop=stop, idle=0.01, max_backoff=60.0)
+    assert stop.delays == [1.0, 2.0, 4.0, 8.0], "a text frame that is not a welcome must not reset the backoff"
+
+
+def test_backoff_resets_only_after_a_welcome(state, monkeypatch):
+    directory, _ = state
+    session, _ = _session(directory)
+    stop = _RecordingStop(3)
+    ping = Message("ping", "c", 0, {}).encode()
+    attempts = []
+
+    def connect(config):
+        attempts.append(1)
+        if len(attempts) == 3:
+            welcome = Message("welcome", "c", 1, {"generation": 1, "protocol_version": 1, "event_cursor": 0}).encode()
+            return FakeConnection([welcome], stop, fail_after=True)
+        return FakeConnection([ping], stop, fail_after=True)
+
+    monkeypatch.setattr(worker.random, "uniform", lambda a, b: 1.0)
+    worker.run(session, connect, stop=stop, idle=0.01, max_backoff=60.0)
+    assert stop.delays == [1.0, 2.0, 1.0]
+
+
+def test_a_fatal_coordinator_error_stops_the_worker_with_the_fix(state, monkeypatch):
+    directory, _ = state
+    session, _ = _session(directory)
+    stop = threading.Event()
+    connections = []
+    logs = []
+    refusal = Message("error", "c", 0, {"code": "worker-id-mismatch", "message": "this worker name is bound to a different worker id"}).encode()
+
+    def connect(config):
+        connections.append(FakeConnection([refusal], stop, fail_after=True))
+        if len(connections) >= 3:
+            stop.set()  # bounds the loop if the fatal code is ever ignored
+        return connections[-1]
+
+    monkeypatch.setattr(worker.random, "uniform", lambda a, b: 0.0)
+    with pytest.raises(worker.WorkerFatalError) as raised:
+        worker.run(session, connect, stop=stop, idle=0.01, log=logs.append)
+    assert len(connections) == 1, "no reconnect after a fatal code"
+    assert raised.value.code == "worker-id-mismatch" and "worker enroll" in str(raised.value)
+    assert connections[0].closed
+    assert [entry for entry in worker.read_audit(50) if entry["action"] == "connection.fatal"][-1]["code"] == "worker-id-mismatch"
+    assert sum("worker stopped" in line for line in logs) == 1
+    status = worker.status_public(service_state="active")
+    assert status["connection_state"] == "refused" and "worker enroll" in status["refused_fix"]
