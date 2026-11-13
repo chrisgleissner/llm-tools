@@ -167,6 +167,7 @@ class BridgeMissionHooks:
         self._session_providers: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
         self._codex_owned_operations: set[str] = set()
+        self._db_session_seen: dict[str, NativeSessionIdentity] = {}  # session seen during a Kilo/OpenCode run, confirmed again at its end
         self._db_session_operations: dict[str, float] = {}  # Kilo/OpenCode runs awaiting their session row -> next look
         self._codex_observe_schedule: dict[str, tuple[int, float]] = {}  # operation -> (backoff step or -1 once found, next look)
         # The (providers, routes) pair the running Ralph loop currently uses.
@@ -815,9 +816,13 @@ class BridgeMissionHooks:
 
     def _record_session_outcome(self, operation_id: str, provider: str, cwd: str) -> None:
         expected = self._session_restore_expectations.pop(operation_id, None)
-        if self._db_session_operations.pop(operation_id, None) is not None and expected is None and operation_id not in self._session_candidates:
-            found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0))
-            if found is not None:
+        if self._db_session_operations.pop(operation_id, None) is not None or operation_id in self._db_session_seen:
+            # Kilo/OpenCode: the session is confirmed once more now. It is kept only if the store
+            # still holds exactly one fitting row and it is the one seen during the run.
+            seen = self._db_session_seen.pop(operation_id, None)
+            self._session_candidates.pop(operation_id, None)
+            found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if expected is None else None
+            if found is not None and (seen is None or seen.session_id == found.session_id):
                 self._session_candidates[operation_id] = found
         candidate = self._session_candidates.pop(operation_id, None)
         baseline = self._session_baselines.pop(operation_id, {})
@@ -857,7 +862,7 @@ class BridgeMissionHooks:
         try:
             self._record_session_outcome(operation_id, provider, str(Path(cwd).expanduser().resolve(strict=True)))
         except Exception:  # noqa: BLE001 - provider session files and the folder can disappear
-            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule, self._db_session_operations):
+            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule, self._db_session_operations, self._db_session_seen):
                 pending.pop(operation_id, None)
             self._codex_owned_operations.discard(operation_id)
             try:
@@ -910,9 +915,7 @@ class BridgeMissionHooks:
         found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if cwd else None
         if found is None:
             return
-        self._session_candidates[operation_id] = found
-        self.store.record_operation_session(operation_id, provider=provider, restoration_state="NATIVE_CREATED",
-            session_id=found.session_id, cwd=found.cwd, source=found.source)
+        self._db_session_seen[operation_id] = found  # persisted only by the end-of-run confirmation
         self._db_session_operations.pop(operation_id, None)
 
     # Seconds between reads of the provider pane while a native provider runs.

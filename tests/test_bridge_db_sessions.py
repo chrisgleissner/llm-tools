@@ -171,7 +171,7 @@ def test_session_created_by_the_run_is_recorded_then_resumed_exactly(env, provid
     _write_session(cli, _db(env, provider), other, "ses_unrelatedrun1")  # another run elsewhere: not ours
     _write_session(cli, _db(env, provider), env.cwd, "ses_createdbyrun1")
     hooks._observe_db_session(context["operation_id"], provider)
-    assert store.get_operation(context["operation_id"])["restoration_state"] == "NATIVE_CREATED"
+    assert "native_sessions" not in store.get_mission(mission["id"])["config"], "persisted only by the end-of-run confirmation"
     config.run_dir.mkdir()
     hooks.after_iteration(context, {"provider": provider}, config, 1, 0, 0.1)
     operation = store.get_operation(context["operation_id"])
@@ -268,3 +268,106 @@ def test_failed_help_probe_is_not_cached(env, monkeypatch) -> None:
     identity = sessions.NativeSessionIdentity("kilo", "ses_exactlyone01", str(env.cwd), "kilo:session.db")
     assert sessions.resume_argv(identity, executable=str(cli)) is None
     assert sessions.resume_argv(identity, executable=str(cli)) == [str(cli), "--session", "ses_exactlyone01"]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_second_row_appearing_after_the_during_run_lookup_records_nothing(env, provider) -> None:
+    cli = _cli(env.bin, provider)
+    store, mission, hooks = _new_mission(env)
+    context, config, _argv = _launch(env, store, mission, hooks, provider, cli, 1)
+    _write_session(cli, _db(env, provider), env.cwd, "ses_seenduringrun")
+    hooks._observe_db_session(context["operation_id"], provider)
+    _write_session(cli, _db(env, provider), env.cwd, "ses_appearedlater")
+    config.run_dir.mkdir()
+    hooks.after_iteration(context, {"provider": provider}, config, 1, 0, 0.1)
+    operation = store.get_operation(context["operation_id"])
+    assert operation["native_session_id"] is None and operation["restoration_state"] == "UNAVAILABLE"
+    assert "native_sessions" not in store.get_mission(mission["id"])["config"]
+    store.close()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_archived_sessions_are_neither_discovered_nor_resumable(env, provider) -> None:
+    cli = _cli(env.bin, provider)
+    db = _db(env, provider)
+    started = time.time_ns()
+    _write_session(cli, db, env.cwd, "ses_archivedone01")
+    con = sqlite3.connect(db)
+    con.execute("UPDATE session SET time_archived = 1")
+    con.commit()
+    con.close()
+    assert sessions.discover_new_db_session(provider, cwd=env.cwd, started_ns=started) is None
+    assert sessions.provider_session_metadata(provider, "ses_archivedone01", cwd=env.cwd) is None
+
+
+@pytest.mark.parametrize("bad", ["NULL", "'soon'"])
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_null_or_odd_timestamps_give_no_record_and_never_raise(env, provider, bad) -> None:
+    cli = _cli(env.bin, provider)
+    db = _db(env, provider)
+    _write_session(cli, db, env.cwd, "ses_oddtimestamp1")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t_ (x)")  # keep the original schema; relax NOT NULL by rebuilding the column value
+    con.execute("PRAGMA writable_schema = ON")
+    con.execute("UPDATE sqlite_master SET sql = replace(sql, 'time_updated integer NOT NULL', 'time_updated') WHERE name = 'session'")
+    con.commit()
+    con.close()
+    con = sqlite3.connect(db)
+    con.execute(f"UPDATE session SET time_updated = {bad}")
+    con.commit()
+    con.close()
+    assert sessions.provider_session_metadata(provider, "ses_oddtimestamp1", cwd=env.cwd) is None
+    store, mission, hooks = _new_mission(env)
+    seed = store.begin_operation(store.add_task(mission["id"], "seed"), iteration=1, station=provider)
+    store.record_operation_session(seed, provider=provider, restoration_state="NATIVE_CREATED",
+                                   session_id="ses_oddtimestamp1", cwd=str(env.cwd), source=f"{provider}:session.db")
+    _context, _config, argv = _launch(env, store, mission, hooks, provider, cli, 2)
+    assert argv == [str(cli), "--prompt", "prompt 2"]
+    store.close()
+
+
+@pytest.mark.parametrize("name", ["a?b", "a#b", "a%20b", "plain"])
+def test_store_path_with_uri_special_characters_is_opened(tmp_path, monkeypatch, name) -> None:
+    data = tmp_path / name
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    cli = _cli(tmp_path / "bin", "kilo")
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    started = time.time_ns()
+    _write_session(cli, data / "kilo" / "kilo.db", cwd.resolve(), "ses_specialpath01")
+    identity = sessions.discover_new_db_session("kilo", cwd=cwd, started_ns=started)
+    assert identity is not None and identity.session_id == "ses_specialpath01"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_sessions_of_other_folders_cannot_hide_the_match(env, provider) -> None:
+    cli = _cli(env.bin, provider)
+    db = _db(env, provider)
+    other = env.tmp / "other"
+    other.mkdir()
+    started = time.time_ns()
+    for index in range(60):
+        _write_session(cli, db, other, f"ses_elsewhere{index:04}")
+    _write_session(cli, db, env.cwd, "ses_thematchhere1")
+    identity = sessions.discover_new_db_session(provider, cwd=env.cwd, started_ns=started)
+    assert identity is not None and identity.session_id == "ses_thematchhere1"
+
+
+def test_nonzero_help_probe_is_retried_not_cached(env, monkeypatch) -> None:
+    cli = _cli(env.bin, "kilo")
+    sessions._HELP_CACHE.clear()
+    codes = [1, 0]
+    real_run = subprocess.run
+    calls = []
+
+    def failing_then_ok(argv, **kwargs):
+        calls.append(argv)
+        if codes.pop(0):
+            return subprocess.CompletedProcess(argv, 1, "", "boom")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(sessions.subprocess, "run", failing_then_ok)
+    identity = sessions.NativeSessionIdentity("kilo", "ses_exactlyone01", str(env.cwd), "kilo:session.db")
+    assert sessions.resume_argv(identity, executable=str(cli)) is None
+    assert sessions.resume_argv(identity, executable=str(cli)) == [str(cli), "--session", "ses_exactlyone01"]
+    assert len(calls) == 2

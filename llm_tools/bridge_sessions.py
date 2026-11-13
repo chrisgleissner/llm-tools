@@ -187,7 +187,8 @@ def _db_session_rows(provider: str, where: str, params: tuple[object, ...], *, h
         info = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode):
             return None
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        # as_uri() percent-encodes "?", "#" and "%" so they cannot end or change the URI.
+        connection = sqlite3.connect(Path(os.path.abspath(path)).as_uri() + "?mode=ro", uri=True, timeout=1.0)
     except (OSError, sqlite3.Error):
         return None
     try:
@@ -234,7 +235,15 @@ def discover_new_db_session(
         expected_cwd = _absolute_cwd(cwd)
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
-    rows = _db_session_rows(provider, "parent_id IS NULL AND time_archived IS NULL AND time_created >= ?", (started_ns // 1_000_000,), home=home)
+    # The folder is filtered in SQL, so sessions of other folders cannot crowd the match out of the
+    # candidate limit. A row stores the folder as the CLI saw it: the resolved path, or the path as
+    # given when that differs. Other spellings (symlinks) are not matched; the caller starts fresh.
+    spellings = tuple(dict.fromkeys((expected_cwd, os.path.abspath(os.fspath(cwd)))))
+    marks = ",".join("?" * len(spellings))
+    rows = _db_session_rows(
+        provider,
+        f"parent_id IS NULL AND time_archived IS NULL AND time_created >= ? AND directory IN ({marks})",
+        (started_ns // 1_000_000, *spellings), home=home)
     if rows is None or len(rows) > _DB_MAX_CANDIDATES:
         return None
     identities = [identity for row in rows if (identity := _db_row_identity(provider, row, expected_cwd)) is not None]
@@ -242,14 +251,18 @@ def discover_new_db_session(
 
 
 def _db_session_record(provider: str, session_id: str, cwd: str, *, home: str | os.PathLike[str] | None) -> NativeSessionRecord | None:
-    rows = _db_session_rows(provider, "id = ?", (session_id,), home=home)
+    rows = _db_session_rows(provider, "id = ? AND time_archived IS NULL", (session_id,), home=home)
     if not rows or len(rows) != 1:
         return None
     identity = _db_row_identity(provider, rows[0], cwd)
     path = session_db_path(provider, home=home)
     if identity is None or path is None:
         return None
-    return NativeSessionRecord(identity, path, int(rows[0]["time_updated"]) * 1_000_000)
+    try:
+        modified_ns = int(rows[0]["time_updated"]) * 1_000_000
+    except (TypeError, ValueError, OverflowError):
+        return None  # NULL or non-numeric timestamp: no evidence, so no resume
+    return NativeSessionRecord(identity, path, modified_ns)
 
 
 def parse_session_metadata(
@@ -1008,7 +1021,7 @@ def _probe_help(resolved: str) -> tuple[int, str] | None:
     except (OSError, subprocess.SubprocessError):
         return None  # a timeout or launch failure is not cached: the next call may succeed
     probed = (result.returncode, (result.stdout + "\n" + result.stderr)[:128 * 1024])
-    if key is not None:
+    if key is not None and result.returncode == 0:  # a failed probe is retried next time
         _HELP_CACHE[key] = probed
     return probed
 
