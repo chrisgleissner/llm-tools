@@ -15,7 +15,7 @@
 @media (max-width: 47.99rem) { .search-open { flex: none; padding: 0; background: transparent; border-color: transparent; } .search-open .so-text { display: none; } }
 
 /* capacity chips: neutral text and a small meter; a provider that waits for capacity takes the attention tone */
-.cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); overflow: hidden; }
+.cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); overflow: clip; }
 .cap-chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h-sm); padding-inline: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--text); font-size: var(--fs-sm); text-decoration: none; white-space: nowrap; }
 /* compact chip (UXR-053): "Claude 4%"; a waiting chip puts "resets 12:25" on a second line */
 .tight { gap: 4px; }
