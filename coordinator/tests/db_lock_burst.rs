@@ -4,7 +4,8 @@
 //! that the rate limiter triggers) or one verified-and-failed sign-in (`known_addr`, `admin_get`, the audit
 //! insert), on a two-thread runtime like the coordinator's. The hash itself runs outside the database
 //! connection (`verify_blocking`), so it is not part of the locked sections measured here.
-//! The longest hold is printed for information; it is not asserted, because it depends on host load.
+//! The longest hold and the peak number of waiting callers are printed for information. Neither is asserted:
+//! both depend on how the host schedules threads (on Windows all 60 callers can wait at once).
 use bridge_coordinator::db::Db;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -76,6 +77,5 @@ fn a_burst_of_sign_in_requests_is_not_refused_for_database_contention() {
             "{n} requests took the connection {} times, more than 3 per request",
             stats.acquisitions
         );
-        assert!(stats.peak_waiters < n, "{n} requests: {} waited at once", stats.peak_waiters);
     }
 }
