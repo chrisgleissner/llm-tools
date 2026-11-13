@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -207,3 +208,49 @@ def test_every_coordinator_error_code_has_a_troubleshooting_anchor() -> None:
     present = anchors(COORDINATOR_TROUBLESHOOTING)
     missing = {code: sorted(files) for code, files in coordinator_error_codes().items() if code not in present}
     assert not missing, f"coordinator error codes without a '### <code>' heading in docs/distributed/troubleshooting.md: {missing}"
+
+
+def openapi_routes() -> set[tuple[str, str]]:
+    """Routes declared by the distributed OpenAPI document."""
+    document = json.loads(_read(ROOT / "docs" / "distributed" / "openapi.json"))
+    methods = {"get", "post", "put", "patch", "delete"}
+    return {
+        (method.upper(), path)
+        for path, operations in document["paths"].items()
+        for method in operations
+        if method in methods
+    }
+
+
+def test_every_openapi_route_is_documented_in_the_api_reference() -> None:
+    lines = _read(ROOT / "docs" / "distributed" / "api.md").splitlines()
+    undocumented = sorted(
+        (method, path)
+        for method, path in openapi_routes()
+        if not any(
+            method in line
+            and re.search(rf"(?<![A-Za-z0-9_/{{}}-]){re.escape(path)}(?![A-Za-z0-9_/{{}}-])", line)
+            for line in lines
+        )
+    )
+    assert not undocumented, (
+        "routes in openapi.json without a line naming method and path in docs/distributed/api.md: "
+        f"{undocumented}"
+    )
+
+
+def test_the_site_links_the_troubleshooting_and_uninstall_pages() -> None:
+    paths = (
+        "docs/llm-bridge/troubleshooting.md",
+        "docs/distributed/troubleshooting.md",
+        "docs/llm-bridge/uninstall.md",
+        "docs/distributed/uninstall.md",
+    )
+    site = _read(ROOT / "docs" / "site" / "index.html")
+    for path in paths:
+        assert path in site
+        assert (ROOT / path).is_file()
+
+
+def test_the_openapi_route_collector_sees_the_known_routes() -> None:
+    assert {("GET", "/api/v1/workers"), ("POST", "/api/v1/commands")} <= openapi_routes()
