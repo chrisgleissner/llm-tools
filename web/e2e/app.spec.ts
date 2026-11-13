@@ -1,11 +1,11 @@
 import { expect, expectAccessible, expectNoHorizontalScroll, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test } from "./fixtures";
 
-test("first-run setup signs in and shows the overview; unauthenticated visits go to login", async ({ page, coord }) => {
+test("first-run setup signs in and shows the Inbox; unauthenticated visits go to login", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator("#conn")).toContainText("Live");
-  await expect(page.getByText("Workers online")).toBeVisible();
-  await expect(page.getByText("healthy")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No workers yet" })).toBeVisible();
+  await expect(page.locator("[data-q=need-me]")).toHaveText("Nothing needs you");
   // The setup token is consumed.
   await signOutViaUi(page);
   await expect(page).toHaveURL(/\/login$/);
@@ -50,11 +50,11 @@ test("workers added with the CLI are listed as offline", async ({ page, coord })
   await setupViaUi(page, coord);
   await navTo(page, "Workers");
   await expect(page.getByRole("heading", { name: "Workers" })).toBeVisible();
-  const rows = page.locator("#workers-table tbody tr");
+  const rows = page.locator('[data-entity^="worker:"]');
   await expect(rows).toHaveCount(2);
   for (const name of ["alpha", "beta"]) {
-    const row = page.locator(`tr[data-worker="${name}"]`);
-    await expect(row.locator('[data-label="State"]')).toContainText("offline");
+    const row = page.locator(`[data-entity="worker:${name}"]`);
+    await expect(row.locator(".pill")).toContainText(/offline/i);
     await expect(row).toContainText("never");
   }
   await expectNoHorizontalScroll(page);
@@ -66,8 +66,9 @@ test("missions index is empty without workers and the SPA serves deep links", as
   await expect(page.getByRole("heading", { name: "Missions", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "No missions yet" })).toBeVisible();
   await page.goto("/missions/nobody/none");
-  await expect(page.getByRole("heading", { name: "none" })).toBeVisible();
-  await expect(page.locator("#terminal-region")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mission not found" })).toBeVisible();
+  await expect(page.getByText("The coordinator has no mission none on worker nobody.")).toBeVisible();
+  await expect(page.getByRole("tab")).toHaveCount(0);
   await page.goto("/does/not/exist");
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });
@@ -83,7 +84,7 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   await page.keyboard.type(PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
   // main has focus after navigation; the first Tab stop is the skip link.
   // Move the sequential focus starting point to the top of the document, as a fresh page load does.
   await page.evaluate(() => {
@@ -105,44 +106,23 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
     await page.keyboard.press("Tab");
     reached.push(await name());
   }
-  const wide = (page.viewportSize()?.width ?? 0) >= 960;
-  for (const label of ["LLM Bridge", "Overview", "Workers", "Missions", wide ? "Diagnostics" : "More"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
-  expect(reached.some((r) => r.startsWith("Theme:"))).toBe(true);
-  expect(reached.some((r) => r.includes("account menu"))).toBe(true);
+  for (const label of ["LLM Bridge", "Inbox", "Workers", "Missions", "Sessions", "Usage"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
+  expect(reached.some((r) => r.includes("Account menu"))).toBe(true);
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" }).focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/workers$/);
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" })).toHaveAttribute("aria-current", "page");
 });
 
-test("a live refresh of the overview keeps keyboard focus on the same tile", async ({ page, coord }) => {
-  await setupViaUi(page, coord);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  // Hold the diagnostics reply so the re-render it causes happens after a tile has focus.
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => (release = resolve));
-  await page.route("**/api/v1/diagnostics", async (route) => {
-    await held;
-    await route.continue();
-  });
-  await page.goto("/");
-  const tile = page.locator('[data-tile="missions-running"]');
-  await tile.focus();
-  await tile.evaluate((el) => el.setAttribute("data-before-refresh", ""));
-  release();
-  await expect(page.locator("#ov-health")).toContainText("Coordinator healthy");
-  // The tile element was replaced by the re-render, and focus moved to its replacement.
-  await expect(page.locator("[data-before-refresh]")).toHaveCount(0);
-  await expect(tile).toBeFocused();
-});
-
 test("theme toggle cycles and persists", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  const toggle = page.locator("#theme-toggle");
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-label", /Theme: light/);
+  const toggle = async () => {
+    await page.locator("#account-button").click();
+    await page.locator("#menu-theme").click();
+  };
+  await toggle();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await toggle.click();
+  await toggle();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -164,8 +144,8 @@ test("diagnostics shows coordinator data", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   await navTo(page, "Diagnostics");
   await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
-  await expect(page.getByRole("row", { name: /Protocol/ })).toBeVisible();
-  await expect(page.getByRole("row", { name: /Live stream live/ })).toBeVisible();
+  await expect(page.locator("dt", { hasText: "Protocol" })).toBeVisible();
+  await expect(page.locator("dt", { hasText: "Live stream" }).locator("+ dd")).toHaveText("live");
 });
 
 test("static responses carry the security headers and the app logs no console errors", async ({ page, coord, request }) => {
@@ -196,7 +176,7 @@ test("pages have no horizontal scroll and no accessibility violations", async ({
   await expectNoHorizontalScroll(page);
   await expectAccessible(page, "setup");
   await setupViaUi(page, coord);
-  for (const name of ["Overview", "Workers", "Missions", "Sessions", "Usage", "Diagnostics", "Account"] as const) {
+  for (const name of ["Inbox", "Workers", "Missions", "Sessions", "Usage", "Diagnostics", "Account"] as const) {
     await navTo(page, name);
     await expect(page.getByRole("heading", { name: name === "Usage" ? "Provider usage" : name, exact: true })).toBeVisible();
     if (name === "Diagnostics") await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();

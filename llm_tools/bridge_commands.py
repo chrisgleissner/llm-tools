@@ -343,6 +343,13 @@ def _mission_events(store: BridgeStore | None, request: CommandRequest, params: 
     return {"schema_version": 1, "events": events, "total": store.event_count(request.mission_id, **filters)}
 
 
+def _mission_activity_line(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_review
+
+    assert store is not None and request.mission_id is not None
+    return bridge_review.activity_line(store, request.mission_id)
+
+
 def _mission_control(action: str) -> Handler:
     def handler(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
         cli = _cli()
@@ -788,6 +795,7 @@ OPERATIONS: dict[str, OperationSpec] = {
             },
             _mission_events,
         ),
+        OperationSpec("mission.activity_line", "One sanitized line of the running provider's latest output", False, True, _NO_PARAMS, _mission_activity_line),
         OperationSpec(
             "mission.start",
             "Start a mission controller on this worker",

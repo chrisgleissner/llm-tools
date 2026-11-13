@@ -556,6 +556,27 @@ pub fn openapi_value() -> Value {
                                         },
                                         {"type":"null"}
                                     ]
+                                },
+                                "attention":{
+                                    "description":"Why the operator is needed, from the worker's mission status (same kinds as the CLI hint). Absent when the worker predates the field; null when nothing is needed.",
+                                    "oneOf":[
+                                        {
+                                            "type":"object",
+                                            "required":["kind","message","tasks"],
+                                            "properties":{
+                                                "kind":{"type":"string","enum":["approval","failed","blocked","operator","proposal","capacity","provider"]},
+                                                "message":{"type":"string","maxLength":240},
+                                                "tasks":{"type":"array","maxItems":8,"items":{"type":"integer","minimum":1}}
+                                            },
+                                            "additionalProperties":false
+                                        },
+                                        {"type":"null"}
+                                    ]
+                                },
+                                "task_counts":{
+                                    "type":"object",
+                                    "description":"Tasks per status (QUEUED, READY, RUNNING, PAUSED, BLOCKED, VERIFYING, COMPLETED, FAILED, CANCELLED); statuses without tasks are absent. Absent when the worker predates the field.",
+                                    "additionalProperties":{"type":"integer","minimum":1}
                                 }
                             }
                         }

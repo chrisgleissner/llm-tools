@@ -1778,7 +1778,10 @@ impl Db {
         } = batch;
         let mut c = self.c()?;
         let tx = c.transaction()?;
-        let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;
+        let (cursor, previous_mission_cursor): (i64, i64) =
+            tx.query_row("SELECT event_cursor, mission_cursor FROM workers WHERE name=?", params![worker], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if after != cursor as u64 {
             return Ok(EventsOutcome::Nack { expected: cursor as u64 });
         }
@@ -1819,6 +1822,10 @@ impl Db {
                 }
             }
         }
+        // `stale` compares the two cursors, so it must mean that mission data is really behind. A
+        // batch of heartbeats from a worker that predates `mission_cursor` cannot change a mission
+        // summary: when the copy was current before the batch, it stays current.
+        let mission_cursor = mission_cursor.or_else(|| (previous_mission_cursor == cursor && crate::protocol::heartbeat_only(events)).then_some(through));
         // One statement for the whole worker row update: the cursors and the time live on one page.
         tx.execute(
             "UPDATE workers SET event_cursor=?1, last_event_at=?2, mission_cursor=COALESCE(?3, mission_cursor) WHERE name=?4",

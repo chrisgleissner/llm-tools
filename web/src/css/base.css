@@ -1,0 +1,56 @@
+/* Reset, typography, focus ring, layout primitives (spec sections 4 and 6.7). */
+* { box-sizing: border-box; }
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-padding-top: calc(var(--head-h) + 8px);
+  scroll-padding-bottom: calc(var(--tab-h) + 8px);
+}
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text);
+  font: var(--fs-md)/var(--lh-md) var(--font);
+  overflow-wrap: anywhere; /* legacy default for the pages not yet rebuilt; short fields opt out with .nowrap, and the last page package narrows this to .long-text */
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+code, kbd { font-family: var(--mono); font-size: 0.9em; }
+kbd { background: var(--surface-2); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: var(--r-1); padding: 1px 6px; }
+h1 { font-size: var(--fs-title); line-height: 1.25; font-weight: 600; margin: var(--sp-2) 0 var(--sp-4); letter-spacing: -0.01em; }
+h2 { font-size: var(--fs-xl); line-height: 1.4; font-weight: 600; margin: var(--sp-5) 0 var(--sp-2); }
+h3 { font-size: var(--fs-lg); line-height: var(--lh-lg); font-weight: 600; margin: var(--sp-4) 0 var(--sp-2); }
+p { margin: var(--sp-2) 0; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-muted); }
+.small { font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.icon { flex: none; vertical-align: middle; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Focus ring: 2 px, offset 2 px; inside rows and the terminal region the offset is negative so clipping cannot hide it. */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-1); }
+li > :focus-visible, [role="row"] :focus-visible, .term-host :focus-visible, .xterm:focus-within { outline-offset: -2px; }
+[tabindex="-1"]:focus { outline: none; }
+
+.skip { position: absolute; left: var(--sp-2); top: -80px; background: var(--accent); color: var(--on-accent); padding: var(--sp-2) var(--sp-3); z-index: 60; border-radius: var(--r-1); }
+.skip:focus { top: var(--sp-2); }
+
+/* Layout primitives */
+.stack { display: flex; flex-direction: column; gap: var(--sp-3); }
+.cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); }
+
+/* Truncation rule (spec 6.3): wrap first, clamp once. */
+.clamp-2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+/* A short field is not broken inside a word; it may move to the next line between words when the line is too narrow (200% text, text spacing). */
+.nowrap { overflow-wrap: normal; word-break: keep-all; min-width: 0; }
+.long-text { overflow-wrap: anywhere; }
+
+/* Reduced motion: no animation anywhere (the durations are also zero in tokens.css). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+
+@media (forced-colors: active) {
+  .pill { border: 1px solid CanvasText; }
+  [aria-current="page"] { border-inline-start: 4px solid Highlight; }
+}

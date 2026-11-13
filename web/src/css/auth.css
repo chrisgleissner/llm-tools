@@ -1,0 +1,48 @@
+/* Sign-in, first-run setup, password and token pages (WP-5). Presentation only: markup ids, labels and messages are unchanged. */
+main.auth { max-width: none; min-height: 100vh; min-height: 100dvh; padding: var(--sp-5) var(--gutter); display: flex; align-items: center; justify-content: center; }
+.auth-card { inline-size: 100%; max-inline-size: 400px; }
+.auth-head { display: flex; align-items: center; gap: var(--sp-3); margin-block-end: var(--sp-2); }
+.auth-head .icon { color: var(--accent); }
+.auth-head h1 { margin: 0; font-size: var(--fs-display); line-height: 2.25rem; }
+
+/* Help that is not needed to fill in the form sits behind a disclosure so the first phone screen shows the fields. */
+details.aside { margin: var(--sp-2) 0; }
+details.aside > summary { display: flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h); cursor: pointer; font-weight: 500; list-style: none; }
+details.aside > summary::-webkit-details-marker { display: none; }
+details.aside > summary::before { content: ""; inline-size: 8px; block-size: 8px; border-inline-end: 2px solid currentcolor; border-block-end: 2px solid currentcolor; transform: rotate(-45deg); flex: none; margin-inline: var(--sp-1); }
+details.aside[open] > summary::before { transform: rotate(45deg); }
+details.aside.notice { padding-block: 0; }
+details.aside.notice[open] { padding-block-end: var(--sp-2); }
+details.aside > .hint { margin-block-end: var(--sp-2); }
+
+/* ---------------------------------------------------------------- password strength meter */
+.meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-1); margin-top: var(--sp-2); }
+.meter i { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); }
+.meter[data-level="1"] i:nth-child(-n+1) { background: var(--danger); border-color: var(--danger); }
+.meter[data-level="2"] i:nth-child(-n+2) { background: var(--alert-attention-fg); border-color: var(--alert-attention-fg); }
+.meter[data-level="3"] i:nth-child(-n+3), .meter[data-level="4"] i:nth-child(-n+4) { background: var(--icon-done); border-color: var(--icon-done); }
+.policy { list-style: none; margin: var(--sp-2) 0; padding: 0; font-size: var(--fs-md); }
+.policy li { display: flex; align-items: center; gap: var(--sp-2); padding: 2px 0; }
+.policy li .icon { color: var(--text-muted); }
+.policy li.met .icon { color: var(--icon-done); }
+.caps-warning { display: flex; align-items: center; gap: var(--sp-2); color: var(--alert-attention-fg); font-weight: 600; font-size: var(--fs-md); margin: 0; }
+@media (max-width: 600px) { .card { padding: var(--sp-4); } }
+
+/* ---------------------------------------------------------------- account: one 640 px column of three blocks */
+.account-col { display: grid; gap: var(--sp-4); max-inline-size: 640px; }
+.account-block { padding: var(--sp-4) var(--sp-5); margin: 0; }
+.account-block h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-lg); line-height: var(--lh-lg); }
+.account-facts { gap: var(--sp-2) var(--sp-5); }
+.block-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4); }
+.block-head h2 { margin: 0; }
+.token-list { display: grid; gap: var(--sp-2); list-style: none; margin: var(--sp-3) 0; padding: 0; }
+.token-list li { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-2) var(--sp-3); }
+.token-main { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); }
+.token-actions { margin-inline-start: auto; }
+.token-meta { display: flex; flex-wrap: wrap; gap: 0 var(--sp-4); }
+.token-list .token-none { border: 0; padding: 0; }
+.token-create { display: grid; gap: var(--sp-3); }
+.token-create fieldset { display: grid; gap: var(--sp-1); border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-2) var(--sp-3); margin: 0; }
+.token-create legend { font-weight: 600; padding-inline: var(--sp-1); }
+.token-secret .secret { margin: var(--sp-3) 0; }
+@media (max-width: 600px) { .account-block { padding: var(--sp-3) var(--sp-4); } }

@@ -1,4 +1,5 @@
 import { icon, type IconName } from "./icons";
+import { shortId, type DerivedState } from "./state";
 
 type Child = Node | string | number | null | undefined | false;
 type Attrs = Record<string, string | number | boolean | EventListener | null | undefined>;
@@ -8,12 +9,63 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = 
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (v === null || v === undefined || v === false) continue;
-    if (typeof v === "function") el.addEventListener(k.replace(/^on/, ""), v);
+    if (typeof v === "function") on(el, k.slice(2), v);
     else if (v === true) el.setAttribute(k, "");
     else el.setAttribute(k, String(v));
   }
   append(el, children);
   return el;
+}
+
+type Live = Record<string, unknown>;
+/** What `morph` carries from a freshly built element to the element it keeps: listeners (`on:<type>`) and values a component reads later (the items of a menu). */
+export const liveOf = (el: Element): Live => ((el as Element & { live?: Live }).live ??= {});
+
+/** A listener that `morph` can replace: the element keeps one dispatcher per event type and the dispatcher calls the latest function. */
+export function on(el: Element, type: string, fn: EventListener): void {
+  const live = liveOf(el);
+  const key = `on:${type}`;
+  if (!live[key]) el.addEventListener(type, (e) => (live[key] as EventListener)(e));
+  live[key] = fn;
+}
+
+// Attributes the user changes by using the element (a menu or details opens, a button toggles a panel). `data-own` marks an element that owns its `hidden` as well.
+const OWN = ["open", "aria-expanded"];
+// Attributes the page sets on an element after it was built (keyboard navigation marks and focuses a row, a working button is busy): a fresh element has none of them and must not take them away.
+const SET_LATER = ["data-kb-row", "tabindex", "aria-busy"];
+const identity = (n: Node): string => (n instanceof Element ? n.tagName + (["data-row-key", "data-entity", "data-action", "id", "class"].map((a) => n.getAttribute(a)).find(Boolean) ?? "") : "#");
+
+/**
+ * Bring `old` in line with `fresh`, keeping the elements of `old`: a live refresh patches text and attributes where they are, so an
+ * element the pointer or the keyboard focus is on is never replaced (a click whose pointer-down and pointer-up straddle a redraw would be lost).
+ */
+export function morph(old: Node, fresh: Node): void {
+  if (!(old instanceof Element) || !(fresh instanceof Element)) {
+    if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue;
+    return;
+  }
+  const own = (name: string): boolean => OWN.includes(name) || (name === "hidden" && old.hasAttribute("data-own"));
+  for (const name of old.getAttributeNames()) if (!fresh.hasAttribute(name) && !own(name) && !SET_LATER.includes(name)) old.removeAttribute(name);
+  for (const name of fresh.getAttributeNames()) if (!own(name) && old.getAttribute(name) !== fresh.getAttribute(name)) old.setAttribute(name, fresh.getAttribute(name) ?? "");
+  for (const [key, value] of Object.entries(liveOf(fresh))) {
+    if (key.startsWith("on:")) on(old, key.slice(3), value as EventListener);
+    else liveOf(old)[key] = value;
+  }
+  if (!old.hasAttribute("data-leaf")) patch(old, [...fresh.childNodes]);
+}
+
+/** Make the children of `parent` the nodes `kids`: a child with the same identity is kept and morphed, the others are inserted or removed. A node marked `data-keep` stays. */
+export function patch(parent: Element, kids: Node[]): void {
+  const old = [...parent.childNodes];
+  let at = parent.firstChild;
+  for (const kid of kids) {
+    const i = old.findIndex((o) => identity(o) === identity(kid));
+    const node = i < 0 ? kid : (old.splice(i, 1)[0] as Node);
+    if (node !== kid) morph(node, kid);
+    if (node === at) at = at.nextSibling;
+    else parent.insertBefore(node, at);
+  }
+  for (const node of old) if (!(node instanceof Element && node.hasAttribute("data-keep"))) node.remove();
 }
 
 export function append(el: Element, children: Child[]): void {
@@ -123,22 +175,55 @@ export function startClock(): void {
 
 // ---- small components
 
-export function statusBadge(status: string): HTMLElement {
-  return h("span", { class: `badge s-${status.toLowerCase()}` }, status.toLowerCase());
+/** The one state pill: icon shape plus label, nothing else inside (spec 5.2). The detail text belongs next to it in `.pill-meta`. */
+export function statePill(state: DerivedState, opts: { dense?: boolean; live?: boolean } = {}): HTMLElement {
+  return h(
+    "span",
+    { class: opts.dense ? "pill dense" : "pill", "data-state": state.id, "data-tier": state.tier, "data-live": opts.live ? "focus" : null },
+    icon(state.icon, 16),
+    state.label,
+  );
 }
 
 export interface ButtonOpts {
+  /** Space separated modifier classes: `primary`, `ghost`, `danger`, `danger solid`, `small`. */
   kind?: string;
   disabled?: boolean;
+  /** Why the button is disabled, in words ("This worker allows viewing only"). It becomes the title and the accessible description. */
+  reason?: string;
   title?: string;
   icon?: IconName;
   label?: string;
+  /** Value of `data-action` (approve, reject, pause, stop, resume, start, retry, take-control, answer, open). */
+  action?: string;
+  id?: string;
 }
 
-export function button(label: string, onclick: () => void, opts: ButtonOpts = {}): HTMLButtonElement {
-  const b = h("button", { type: "button", class: `btn ${opts.kind ?? ""}`.trim(), disabled: opts.disabled, title: opts.title, "aria-label": opts.label }, opts.icon ? icon(opts.icon, 18) : null, label ? h("span", {}, label) : null);
-  b.addEventListener("click", onclick);
+export function button(label: string, onclick: (e: Event) => void, opts: ButtonOpts = {}): HTMLButtonElement {
+  const disabled = opts.disabled || Boolean(opts.reason);
+  const b = h(
+    "button",
+    { type: "button", id: opts.id, class: `btn ${opts.kind ?? ""}`.trim(), disabled, title: opts.reason || opts.title, "aria-label": opts.label, "data-action": opts.action },
+    opts.icon ? icon(opts.icon, 18) : null,
+    label ? h("span", {}, label) : null,
+  );
+  on(b, "click", onclick);
   return b;
+}
+
+/** Marks a button as working: `aria-busy`, the leading icon is replaced by a ring and the label stays. */
+export function setBusy(b: HTMLButtonElement, busy: boolean): void {
+  if (busy === (b.getAttribute("aria-busy") === "true")) return;
+  if (busy) {
+    b.setAttribute("aria-busy", "true");
+    const ring = icon("ring", 18);
+    ring.classList.add("ring");
+    ring.setAttribute("data-keep", "");
+    b.prepend(ring);
+  } else {
+    b.removeAttribute("aria-busy");
+    b.querySelector(":scope > svg.ring")?.remove();
+  }
 }
 
 export function iconButton(name: IconName, label: string, onclick: () => void, extra = ""): HTMLButtonElement {
@@ -147,8 +232,8 @@ export function iconButton(name: IconName, label: string, onclick: () => void, e
   return b;
 }
 
-/** Callback set by `ui.ts` so this module need not import it (avoids a cycle). */
-export const hooks: { toast: (message: string) => void } = { toast: () => {} };
+/** Callbacks set by `ui.ts` so this module need not import it (avoids a cycle). `say` speaks to screen readers without a toast. */
+export const hooks: { toast: (message: string) => void; say: (message: string) => void } = { toast: () => {}, say: () => {} };
 
 export async function copyText(text: string): Promise<boolean> {
   try {
@@ -170,27 +255,93 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** Copy confirmation is inline (a check icon for 1.5 s) and spoken through the live region; it never opens a toast. */
 export function copyButton(text: string, what: string): HTMLButtonElement {
   const b = iconButton("copy", `Copy ${what}`, () => {
     void copyText(text).then((ok) => {
-      hooks.toast(ok ? `Copied ${what}.` : `Could not copy ${what}; select it and copy manually.`);
+      hooks.say(ok ? `Copied ${what}.` : `Could not copy ${what}; select it and copy manually.`);
       if (ok) {
         b.replaceChildren(icon("check", 20));
-        window.setTimeout(() => b.replaceChildren(icon("copy", 20)), 1500);
+        b.classList.add("check-flash");
+        window.setTimeout(() => {
+          b.replaceChildren(icon("copy", 20));
+          b.classList.remove("check-flash");
+        }, 1500);
       }
     });
   }, "copy");
   return b;
 }
 
-/** A short form of an identifier with the full value in the title and a copy button. */
+/** A shortened identifier with the full value in the title and a copy button. */
 export function idChip(id: string, what = "ID"): HTMLElement {
-  const short = id.length > 12 ? id.slice(0, 8) : id;
-  return h("span", { class: "idchip" }, h("code", { title: id }, short), copyButton(id, what));
+  return h("span", { class: "idchip" }, h("code", { title: id }, shortId(id)), copyButton(id, what));
 }
 
-export function emptyState(opts: { icon: IconName; title: string; text: Child; action?: Node }): HTMLElement {
-  return h("div", { class: "empty" }, h("div", { class: "empty-icon" }, icon(opts.icon, 32)), h("h2", {}, opts.title), h("p", { class: "muted" }, opts.text), opts.action ?? null);
+/** Teaches what will appear and why it is empty: icon, title, one sentence, then one primary action or a copyable command. */
+export function emptyState(opts: { icon: IconName; title: string; text: Child; action?: Node; command?: string }): HTMLElement {
+  return h(
+    "div",
+    { class: "empty" },
+    h("div", { class: "empty-icon" }, icon(opts.icon, 24)),
+    h("h2", {}, opts.title),
+    h("p", { class: "muted" }, opts.text),
+    opts.command ? h("p", {}, h("code", {}, opts.command), copyButton(opts.command, "command")) : null,
+    opts.action ?? null,
+  );
+}
+
+/** A block of placeholder rows with the geometry of the final rows, so the page does not shift when data arrives. */
+export function skeleton(rows = 3): HTMLElement {
+  return h("div", { class: "skeleton", "aria-hidden": "true", "data-skeleton": true }, ...Array.from({ length: rows }, () => h("div", { class: "skeleton-row" })));
+}
+
+/**
+ * Shows `skeleton(rows)` in `target` only if loading takes longer than `delayMs` (150 ms). Call the returned function when the real content
+ * is ready; it cancels the timer and removes the skeleton if it was shown.
+ */
+export function deferSkeleton(target: Element, rows = 3, delayMs = 150): () => void {
+  let node: HTMLElement | null = null;
+  const timer = window.setTimeout(() => {
+    node = skeleton(rows);
+    target.append(node);
+  }, delayMs);
+  return () => {
+    window.clearTimeout(timer);
+    node?.remove();
+    node = null;
+  };
+}
+
+/** An inline error in plain words with a Retry button and a muted technical code (never a raw status line). */
+export function errorBlock(opts: { message: string; retry?: () => void; code?: string }): HTMLElement {
+  return h(
+    "div",
+    { class: "error-block", role: "alert" },
+    h("p", {}, opts.message),
+    opts.code ? h("p", { class: "code" }, opts.code) : null,
+    opts.retry ? h("div", { class: "actions" }, button("Retry", opts.retry, { icon: "refresh" })) : null,
+  );
+}
+
+/** Native `<details>` disclosure with the count in the label ("Completed (3)"); it needs no script. */
+export function disclosure(label: string, body: Node | Node[], opts: { count?: number; open?: boolean; id?: string; onToggle?: (open: boolean) => void } = {}): HTMLDetailsElement {
+  const d = h(
+    "details",
+    { class: "disclosure", id: opts.id, open: opts.open },
+    h("summary", {}, label, opts.count === undefined ? null : h("span", { class: "count" }, `(${opts.count})`)),
+    h("div", { class: "disclosure-body" }, ...(Array.isArray(body) ? body : [body])),
+  );
+  if (opts.onToggle) d.addEventListener("toggle", () => opts.onToggle?.(d.open));
+  return d;
+}
+
+/**
+ * Truncate once (spec 6.3): text wraps and is clamped to two lines by one element; the full text is in `title`. Never put one
+ * of these inside another clamped or ellipsized element.
+ */
+export function clamped(text: string, tag: "span" | "div" | "h2" | "h3" | "a" = "span", attrs: Attrs = {}): HTMLElement {
+  return h(tag, { class: "clamp-2", title: text, ...attrs }, text);
 }
 
 export function pager(label: string, offset: number, size: number, total: number, go: (offset: number) => void): HTMLElement {
@@ -230,14 +381,6 @@ export function field(id: string, label: string, type = "text", extra: Attrs = {
   };
 }
 
-/** A column header whose button sorts the list; `aria-sort` reflects the current order. */
-export function sortHeader(label: string, key: string, current: string, order: "asc" | "desc", onSort: (key: string) => void): HTMLElement {
-  const active = current === key;
-  const b = h("button", { type: "button", class: "sort", "data-sort": key }, label, active ? icon(order === "asc" ? "chevronUp" : "chevronDown", 16) : null);
-  b.addEventListener("click", () => onSort(key));
-  return h("th", { scope: "col", "aria-sort": active ? (order === "asc" ? "ascending" : "descending") : null }, b);
-}
-
 /** Debounce helper for search boxes. */
 export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number): (...a: A) => void {
   let t = 0;
@@ -253,3 +396,4 @@ export function searchBox(id: string, label: string, value: string, onInput: (v:
   input.addEventListener("input", () => onInput(input.value));
   return h("div", { class: "search" }, icon("search", 18), input);
 }
+

@@ -1,4 +1,6 @@
+import { ownRequests } from "./api";
 import { h, hooks } from "./dom";
+import { eventClass } from "./event-class";
 import { icon, type IconName } from "./icons";
 
 let liveRegion: HTMLElement | null = null;
@@ -6,25 +8,24 @@ let toastBox: HTMLElement | null = null;
 
 /** What happened to a requested change. These words match the worker's outcome vocabulary. */
 export type Outcome = "accepted" | "applied" | "rejected" | "failed" | "uncertain";
-export type ToastKind = "info" | "error" | Outcome;
+/** `attention` is a new needs-you item (needs approval, needs input, failed): the only toast a stream event may cause. */
+export type ToastKind = "info" | "error" | "attention" | Outcome;
 
-const TOAST: Record<ToastKind, { icon: IconName; label: string }> = {
-  info: { icon: "info", label: "Note" },
-  error: { icon: "alert", label: "Error" },
-  accepted: { icon: "clock", label: "Accepted" },
-  applied: { icon: "checkCircle", label: "Applied" },
-  rejected: { icon: "ban", label: "Rejected" },
-  failed: { icon: "alert", label: "Failed" },
-  uncertain: { icon: "help", label: "Uncertain" },
-};
+// The icon carries the kind; the text says what happened in plain words (no "Applied." or "Rejected." prefix).
+const TOAST: Record<ToastKind, IconName> = { info: "info", error: "alert", attention: "diamondCheck", accepted: "clock", applied: "checkCircle", rejected: "ban", failed: "alert", uncertain: "help" };
 
-export const OUTCOME_HELP: Record<Outcome, string> = {
-  accepted: "The coordinator queued the request. The worker has not confirmed it yet.",
-  applied: "The worker carried the change out.",
-  rejected: "The worker refused the change. Nothing was modified.",
-  failed: "The request could not be carried out. Nothing was modified.",
-  uncertain: "The request may or may not have been applied. Refresh and check before trying again.",
-};
+/**
+ * Report what happened to the operator's own request as one toast, in words: "Mission paused." on success, "Could not pause the mission. The worker
+ * refused the change." on a refusal. `did` is the past tense ("Mission paused"), `action` the verb phrase ("pause the mission"). Returns whether it went through.
+ */
+export function reportOutcome(r: { outcome: string; message: string }, did: string, action: string, undo?: ToastAction): boolean {
+  const ok = r.outcome === "applied" || r.outcome === "accepted";
+  const text = r.outcome === "applied" ? `${did}.` : r.outcome === "accepted" ? `Asked the worker to ${action}.`
+    : r.outcome === "uncertain" ? `The worker did not confirm: ${action}. Refresh and check before trying again.`
+    : `Could not ${action}. ${r.message || (r.outcome === "rejected" ? "The worker refused the change." : "Nothing was changed.")}`;
+  announce(text, r.outcome as ToastKind, "", ok && undo ? { action: undo, ms: UNDO_MS } : {});
+  return ok;
+}
 
 const nextRoute: Array<[string, ToastKind, string]> = [];
 
@@ -35,33 +36,135 @@ export function announceNextPage(message: string, kind: ToastKind = "info", deta
 
 export function mountFeedback(root: HTMLElement): void {
   liveRegion = h("div", { id: "live-status", class: "sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true" });
-  toastBox = h("div", { id: "toasts", class: "toasts" });
+  toastBox = h("div", { id: "toasts", class: "toasts", role: "status", "aria-label": "Notifications", "aria-atomic": "false" });
+  queue.length = 0;
   root.append(liveRegion, toastBox);
   for (const [message, kind, detail] of nextRoute.splice(0)) announce(message, kind, detail);
 }
 
-hooks.toast = (message) => announce(message);
+/** Speak a message to screen readers without showing anything (copy confirmations, routine changes). */
+export function say(message: string): void {
+  if (!liveRegion) return;
+  liveRegion.textContent = "";
+  window.setTimeout(() => liveRegion && (liveRegion.textContent = message), 30);
+}
 
-/** Announce a message to screen readers and show it briefly. Failures and uncertain results use role=alert and stay longer. */
-export function announce(message: string, kind: ToastKind = "info", detail = ""): void {
-  if (liveRegion) {
-    liveRegion.textContent = "";
-    window.setTimeout(() => liveRegion && (liveRegion.textContent = `${kind === "info" ? "" : TOAST[kind].label + ": "}${message}`), 30);
-  }
+// Copy confirmations are inline on the button; they never toast.
+hooks.toast = say;
+hooks.say = say;
+
+// ---- the interrupt ladder (spec 6.4): level 2 is a toast. At most two are visible (one on a phone), the rest queue as "+n".
+
+interface ToastSpec {
+  message: string;
+  kind: ToastKind;
+  detail: string;
+  action: ToastAction | undefined;
+  ms: number | undefined;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+export interface ToastOptions {
+  /** Button inside the toast, for example "Open" on a needs-you toast. A toast with an action stays until dismissed. */
+  action?: ToastAction;
+  /** Makes a toast with an action expire after this many milliseconds instead of staying until dismissed (the Undo toast, spec 6.4). */
+  ms?: number;
+}
+
+const queue: ToastSpec[] = [];
+const SUCCESS_MS = 4000;
+const UNDO_MS = 8000;
+const isPhone = () => window.matchMedia("(max-width: 47.99rem)").matches;
+const maxVisible = () => (isPhone() ? 1 : 2);
+const sticky = (spec: ToastSpec) => spec.kind === "error" || spec.kind === "failed" || spec.kind === "uncertain" || spec.kind === "rejected" || (spec.action !== undefined && spec.ms === undefined);
+
+function showToast(spec: ToastSpec): void {
   if (!toastBox) return;
-  const t = TOAST[kind];
-  const loud = kind === "error" || kind === "failed" || kind === "uncertain" || kind === "rejected";
-  const el = h("div", { class: `toast ${kind}`, role: loud ? "alert" : null, "data-kind": kind });
+  const loud = spec.kind === "error" || spec.kind === "failed" || spec.kind === "uncertain" || spec.kind === "rejected";
+  const el = h("div", { class: `toast ${spec.kind}`, role: loud ? "alert" : null, "data-kind": spec.kind });
   const close = h("button", { type: "button", class: "btn icon ghost", "aria-label": "Dismiss notification" }, icon("x", 18));
-  close.addEventListener("click", () => el.remove());
+  const actions = spec.action
+    ? h("div", { class: "toast-actions" }, h("button", { type: "button", class: "btn small", onclick: () => { spec.action?.run(); dismiss(); } }, spec.action.label))
+    : null;
   el.append(
-    h("span", { class: "toast-icon" }, icon(t.icon, 20)),
-    h("div", { class: "toast-text" }, kind === "info" ? null : h("strong", {}, `${t.label}. `), message, detail ? h("div", { class: "muted small" }, detail) : null),
+    h("span", { class: "toast-icon" }, icon(TOAST[spec.kind], 20)),
+    h("div", { class: "toast-text" }, spec.message, spec.detail ? h("div", { class: "muted small" }, spec.detail) : null, actions),
     close,
   );
-  toastBox.append(el);
-  while (toastBox.children.length > 4) toastBox.firstElementChild?.remove();
-  window.setTimeout(() => el.remove(), loud ? 10000 : 4500);
+  let timer = 0;
+  const dismiss = () => {
+    window.clearTimeout(timer);
+    el.remove();
+    pump();
+  };
+  close.addEventListener("click", dismiss);
+  if (!sticky(spec)) {
+    // Success and information toasts last 4 s (an Undo toast 8 s) and wait while the pointer or keyboard focus is on them.
+    const arm = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(dismiss, spec.ms ?? SUCCESS_MS);
+    };
+    const hold = () => window.clearTimeout(timer);
+    el.addEventListener("mouseenter", hold);
+    el.addEventListener("mouseleave", arm);
+    el.addEventListener("focusin", hold);
+    el.addEventListener("focusout", arm);
+    arm();
+  }
+  toastBox.insertBefore(el, toastBox.querySelector(".toast-more"));
+}
+
+/** On a phone the toast sits just above the lowest fixed bar (composer, action dock or navigation), so it never covers the header or those controls. */
+function lift(): void {
+  const half = window.innerHeight / 2;
+  const tops = [...document.querySelectorAll<HTMLElement>("[data-composer], .mission-head .head-actions, .main-nav")].filter((e) => e.offsetWidth > 0).map((e) => e.getBoundingClientRect().top).filter((t) => t > half);
+  toastBox?.style.setProperty("--toast-floor", `${Math.round(window.innerHeight - Math.min(window.innerHeight, ...tops)) + 8}px`);
+}
+
+function pump(): void {
+  if (!toastBox) return;
+  if (isPhone()) lift();
+  while (queue.length > 0 && toastBox.querySelectorAll(".toast").length < maxVisible()) showToast(queue.shift() as ToastSpec);
+  toastBox.querySelector(".toast-more")?.remove();
+  if (queue.length > 0) toastBox.append(h("div", { class: "toast-more" }, `+${queue.length} more`));
+}
+
+/**
+ * Show a toast. Use it for the result of the operator's own action (one toast per action) and for a new needs-you item;
+ * `announceStreamEvent` is the guarded entry for anything that comes from the event stream. Failures, uncertain results and
+ * toasts with an action use role=alert and stay until dismissed.
+ */
+export function announce(message: string, kind: ToastKind = "info", detail = "", opts: ToastOptions = {}): void {
+  if (!toastBox) return;
+  if (kind === "attention") {
+    // A needs-you toast is for an operator who can act on it now: not while the tab is hidden, and not while typing in the composer or the terminal.
+    const active = document.activeElement as HTMLElement | null;
+    if (!document.hasFocus() || active?.closest("[data-composer], .xterm, textarea, input")) return;
+  }
+  queue.push({ message, kind, detail, action: opts.action, ms: opts.ms });
+  pump();
+}
+
+/**
+ * The only way a stream event can reach the operator's eyes. Plumbing and detail events (heartbeats, capacity refreshes, commands,
+ * routine task changes) never toast and are not announced. The echo of the operator's own request (a request id this browser sent)
+ * is dropped because the action already toasted. A milestone is spoken through the live region; only a caller that knows the event
+ * created a new needs-you item passes `needsYou`, which shows one attention toast. Returns whether a toast was queued.
+ */
+export function announceStreamEvent(event: { kind: string }, message: string, opts: { requestId?: string; needsYou?: boolean; action?: ToastAction } = {}): boolean {
+  if (eventClass(event.kind) !== "milestone") return false;
+  if (opts.requestId && ownRequests.has(opts.requestId)) return false;
+  if (opts.needsYou) {
+    const before = queue.length + (toastBox?.querySelectorAll(".toast").length ?? 0);
+    announce(message, "attention", "", opts.action ? { action: opts.action } : {});
+    return queue.length + (toastBox?.querySelectorAll(".toast").length ?? 0) > before;
+  }
+  say(message);
+  return false;
 }
 
 export interface ConfirmOptions {
@@ -77,26 +180,41 @@ export interface ConfirmOptions {
 /** Modal confirmation built on <dialog>: focus is trapped, Escape cancels. Resolves with the reason text ("" when none) or null. */
 export function confirmDialog(opts: ConfirmOptions): Promise<string | null> {
   return new Promise((resolve) => {
-    const reason = opts.reasonLabel ? h("textarea", { id: "dialog-reason", rows: 3, required: true }) : null;
+    const reason = opts.reasonLabel ? h("textarea", { id: "dialog-reason", rows: 3, "aria-describedby": "dialog-reason-error" }) : null;
+    const reasonError = h("p", { class: "field-error", id: "dialog-reason-error", role: "alert" });
     const dlg = h("dialog", { class: "dialog", "aria-labelledby": "dialog-title", "aria-describedby": "dialog-msg" });
     const form = h(
       "form",
-      { method: "dialog" },
-      h("h2", { id: "dialog-title" }, opts.title),
-      h("p", { id: "dialog-msg" }, opts.message),
-      opts.details ?? null,
-      reason && h("div", { class: "field" }, h("label", { for: "dialog-reason" }, opts.reasonLabel ?? ""), reason),
+      { method: "dialog", novalidate: true },
+      // The body scrolls and the buttons stay below it, so with the keyboard open nothing can sit over the field (phones, see components.css).
+      h(
+        "div",
+        { class: "dialog-body" },
+        h("h2", { id: "dialog-title" }, opts.title),
+        h("p", { id: "dialog-msg" }, opts.message),
+        opts.details ?? null,
+        reason && h("div", { class: "field" }, h("label", { for: "dialog-reason" }, opts.reasonLabel ?? ""), reason, reasonError),
+      ),
       h(
         "div",
         { class: "actions end" },
         h("button", { type: "button", class: "btn", id: "dialog-cancel", onclick: () => dlg.close("cancel") }, "Go back"),
-        h("button", { type: "submit", class: `btn ${opts.danger ? "danger solid" : "primary"}`, id: "dialog-confirm", value: "ok" }, opts.confirmLabel),
+        h("button", { type: "submit", class: `btn ${opts.danger ? "danger solid" : "primary"}`, id: "dialog-confirm", value: "ok", "data-confirm": true }, opts.confirmLabel),
       ),
     );
+    // The reason is validated inline (no browser bubble): an empty reason shows a message next to the field and keeps the dialog open.
     form.addEventListener("submit", (e) => {
       if (reason && !reason.value.trim()) {
         e.preventDefault();
+        reasonError.textContent = "Enter a reason.";
+        reason.setAttribute("aria-invalid", "true");
         reason.focus();
+      }
+    });
+    reason?.addEventListener("input", () => {
+      if (reason.value.trim()) {
+        reasonError.textContent = "";
+        reason.removeAttribute("aria-invalid");
       }
     });
     dlg.append(form);

@@ -1,0 +1,98 @@
+/* Inbox page (spec 8.3) and the MissionRow component it shares with the Missions page (rows.ts). */
+.page-title { margin-block: var(--sp-2) var(--sp-1); }
+/* Phones and tablets: the title sits directly under the top padding of the page. */
+@media (max-width: 63.99rem) { .page-title { margin-block-start: 0; } }
+.answer { display: flex; min-block-size: var(--lh-sm); flex-wrap: wrap; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.answer > span:empty { display: none; }
+.answer > [data-q="need-me"] { color: var(--text); font-weight: 600; }
+.answer > span:not(:last-child):not(:empty)::after { content: "\00b7"; margin-inline: var(--sp-2); }
+.page-state:empty, .more:empty { display: none; }
+.section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-1) var(--sp-3); margin-block: var(--sp-3) var(--sp-1); }
+.section-head h2 { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
+[data-section="needs-you"] .rows { --pillw: 8.5rem; }
+[data-section="running"] .rows { --pillw: 6.5rem; }
+.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); container-type: inline-size; }
+.quiet { margin-block: var(--sp-4); }
+/* On a phone the line may take two lines once the kinds that need you are known ("5 failed, 1 awaits approval, 5 need input"); the room is kept from the start so the rows do not move. */
+@media (max-width: 47.99rem) and (min-height: 30rem) { [data-l0="inbox.answer"] { min-block-size: calc(2 * var(--lh-sm)); } }
+/* Phones and tablets: tighter spacing around the page head so the first rows stay above the fold (the addendum's fold budget). */
+@media (max-width: 63.99rem) {
+  .answer { margin-block-end: var(--sp-2); }
+  .section-head { margin-block-start: var(--sp-2); }
+}
+
+/* MissionRow: pill, title, reason or cells, inline actions, menu. The layout follows the width of the list, not the device. */
+.mrow {
+  display: grid; align-items: center; column-gap: var(--sp-3); padding: 4px var(--sp-3);
+  grid-template-columns: var(--pillw, 11rem) minmax(0, 1fr) auto auto; grid-template-areas: "pill title actions menu" "pill sub actions menu";
+  background: var(--surface-1); border: 1px solid var(--border); border-inline-start: 3px solid var(--border); border-radius: var(--r-2);
+}
+.mrow[data-layout="cells"] { grid-template-areas: "pill title sub menu"; padding-block: 3px; }
+.mrow.selected { background: var(--accent-tint); }
+.mrow > .pill { grid-area: pill; justify-self: start; }
+.row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
+@media (hover: hover) { .row-title:hover { text-decoration: underline; } }
+.row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.row-reason { flex: 1 1 7rem; min-inline-size: 0; }
+.row-reason + .row-reason, .row-reason.one { flex-basis: 100%; }
+.row-reason.one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; } /* an approval: the reason and its summary on one line, the rest in the tooltip and the dialog */
+/* With what an approval rests on (verifier result, size of the change) the line is two boxes side by side, each cut at its own end, so the late arrival of the second does not widen the text block of the reason (LCP, T37) */
+.row-reason.one:has(.tail) { display: flex; overflow: visible; }
+.row-reason.one > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tail { max-width: 22rem; }
+.row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
+.row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
+.row-cells { flex-wrap: nowrap; gap: var(--sp-3); }
+.row-cells .cell { min-inline-size: 2.5rem; }
+.row-cells .cell:nth-child(2), .row-cells .cell:nth-child(3) { min-inline-size: 5rem; }
+.row-actions { grid-area: actions; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); }
+.row-menu { grid-area: menu; }
+/* From 60rem an Inbox row is one line: pill, title, reason and age, actions, menu. */
+@container (min-width: 60rem) {
+  .mrow[data-layout="stack"] { grid-template-columns: var(--pillw, 11rem) minmax(0, 1fr) minmax(0, 1.1fr) auto auto; grid-template-areas: "pill title sub actions menu"; }
+}
+/* From 36rem to 48rem (a tablet) a row without inline actions keeps two lines: the provider, worker and age move up beside the title, and
+   the reason takes the whole second line. Without this, a running row wraps its reason and meta over three lines. */
+@container (min-width: 36rem) and (max-width: 47.99rem) {
+  .mrow[data-layout="stack"]:not(.has-actions) { grid-template-columns: 9rem minmax(0, 1fr) auto auto; grid-template-areas: "pill title meta menu" "pill reason reason menu"; }
+  .mrow[data-layout="stack"]:not(.has-actions) > .row-sub { display: contents; }
+  .mrow[data-layout="stack"]:not(.has-actions) .row-reason { grid-area: reason; }
+  .mrow[data-layout="stack"]:not(.has-actions) .row-meta { grid-area: meta; justify-self: end; max-inline-size: 22rem; }
+}
+/* Below 36rem the title shares the first line with the pill (Missions) or gets its own full-width line (Inbox). */
+@container (max-width: 36rem) {
+  .mrow, .mrow[data-layout="cells"] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "pill title menu" "sub sub menu" "actions actions actions"; padding-block: 4px; }
+  .mrow > .pill { min-block-size: 24px; }
+  .mrow[data-layout="cells"] { padding-block: 1px; }
+  .mrow[data-layout="stack"] { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "pill menu" "title title" "sub sub"; }
+  .mrow.has-actions { grid-template-areas: "pill pill" "title title" "sub sub" "actions menu"; }
+  .row-actions { justify-content: flex-start; }
+  .row-cells { flex-wrap: wrap; gap: 0 var(--sp-2); }
+  .row-cells .cell { min-inline-size: 0 !important; }
+  .row-cells .cell:empty { display: none; }
+  .row-cells .cell:not(:empty) ~ .cell:not(:empty)::before { content: "\00b7"; margin-inline-end: var(--sp-2); }
+}
+
+/* Preview of the selected row, only when the list column leaves room (container 70rem and wider); no second terminal is opened. */
+.inbox-layout { container: inbox / inline-size; }
+.inbox-grid { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); }
+.inbox-preview { display: none; }
+@container inbox (min-width: 70rem) {
+  .inbox-grid { grid-template-columns: minmax(0, 1fr) minmax(17rem, 22rem); }
+  .inbox-preview { display: block; position: sticky; inset-block-start: calc(var(--head-h) + var(--sp-3)); align-self: start; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-3) var(--sp-4); margin-block-start: var(--sp-3); }
+  .inbox-preview h2 { margin-block-start: 0; }
+}
+.inbox-preview pre { max-block-size: 22rem; overflow: auto; font: var(--fs-xs)/var(--lh-xs) var(--mono); }
+
+/* Phone layout of the Sessions, Workers and Usage pages. It sits here and not in fleet.css because that route stylesheet is at the byte cap of
+   budget.json (routes.cssRaw), while the initial stylesheet has room. The answer line uses the small text size and tighter spacing, and a worker
+   row is two lines (pill and name, the last-seen time under them, the menu at the top right; then the facts beside Details), so the first rows of each page stay
+   above the fold of a 320x568 screen. */
+@media (max-width: 47.99rem) {
+  .fleet-head + .answers { margin-block: var(--sp-1) var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .row-main:has(> .row-seen) { position: relative; padding-inline-end: var(--target); min-block-size: var(--target); }
+  .row-main:has(> .row-seen) > .row-end { position: absolute; inset: 0 0 auto auto; }
+  #view-status { margin-block-end: var(--sp-2); }
+  main .wsection + .wsection { margin-block-start: var(--sp-4); }
+  main .wname { margin-block-end: var(--sp-1); }
+}

@@ -1,0 +1,94 @@
+/* Shell (spec 7): fixed header, one navigation element laid out as labelled rail, icon rail, bottom bar or header links, "as of" banner. */
+@media (min-width: 80rem) { :root { --rail-w: 208px; } }
+.shell { min-block-size: 100vh; min-block-size: 100svh; padding-block-start: var(--head-h); }
+.top {
+  position: fixed; inset: 0 0 auto; z-index: 30; block-size: var(--head-h); display: flex; align-items: center; gap: var(--sp-2);
+  padding-inline: max(var(--sp-2), env(safe-area-inset-left)) max(var(--gutter), env(safe-area-inset-right));
+  background: var(--surface-1); border-block-end: 1px solid var(--border);
+}
+.brand { flex: none; display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h); min-inline-size: var(--control-h); justify-content: center; padding-inline: var(--sp-2); color: var(--text); font-weight: 700; font-size: var(--fs-lg); text-decoration: none; white-space: nowrap; overflow-wrap: normal; }
+@media (min-width: 80rem) { .brand { inline-size: calc(var(--rail-w) - var(--sp-2)); justify-content: flex-start; } }
+@media (max-width: 24.99rem), (min-width: 48rem) and (max-width: 79.99rem) { .brand-text { display: none; } }
+.search-open { flex: 0 1 26rem; justify-content: flex-start; color: var(--text-muted); background: var(--surface-2); border-color: transparent; font-weight: 400; min-inline-size: var(--control-h); }
+.search-open .so-text { flex: 1; text-align: start; white-space: nowrap; }
+@media (max-width: 47.99rem), (pointer: coarse) { .search-open kbd { display: none; } }
+@media (max-width: 47.99rem) { .search-open { flex: none; padding: 0; background: transparent; border-color: transparent; } .search-open .so-text { display: none; } }
+
+/* capacity chips: neutral text and a small meter; a provider that waits for capacity takes the attention tone */
+.cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); overflow: hidden; }
+.cap-chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h-sm); padding-inline: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--text); font-size: var(--fs-sm); text-decoration: none; white-space: nowrap; }
+.tight .cap-meter { display: none; }
+.tight .cap-scope, .tight .waiting .cap-pct { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
+.tight .waiting { padding-inline: 6px; font-size: var(--fs-xs); }
+.cap-meter { inline-size: 2rem; block-size: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.cap-meter i { display: block; block-size: 100%; inline-size: var(--v); background: var(--text-muted); }
+.cap-chip.waiting { background: var(--alert-attention-bg); border-color: var(--alert-attention-bar); color: var(--alert-attention-fg); }
+@media (hover: hover) { .cap-chip:hover:not(.waiting) { background: var(--surface-3); } }
+
+/* connection: a dot, labelled only when not live; the banner is a status region under the header */
+.conn { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; overflow-wrap: normal; }
+.conn .dot { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--icon-idle); }
+.conn[data-s="live"] .dot { background: var(--icon-done); }
+.conn[data-s="reconnecting"] .dot { background: var(--alert-attention-bar); }
+.conn[data-s="offline"] .dot { background: var(--icon-offline); }
+.conn-wrap { position: sticky; inset-block-start: var(--head-h); z-index: 25; }
+.conn-banner:not(:empty) { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--gutter); background: var(--surface-2); border-block-end: 1px solid var(--border-strong); font-size: var(--fs-sm); }
+.conn-banner .age { color: var(--text-muted); }
+@media (max-width: 47.99rem) { .conn-text:not(.sr-only) { display: none; } }
+
+/* user menu */
+#account-button { max-inline-size: 11rem; }
+#account-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+@media (max-width: 79.99rem) { #account-button > span { display: none; } #account-button { padding: 0; } }
+
+/* navigation: bottom bar by default */
+.main-nav { position: fixed; z-index: 28; inset: auto 0 0; padding-block-end: env(safe-area-inset-bottom); background: var(--surface-1); border-block-start: 1px solid var(--border); }
+.main-nav ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); block-size: var(--tab-h); }
+.main-nav li { position: relative; min-inline-size: 0; }
+.main-nav a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; block-size: 100%; color: var(--text); font-size: var(--fs-xs); line-height: var(--lh-xs); text-decoration: none; white-space: nowrap; overflow-wrap: normal; }
+.main-nav a[aria-current="page"] { background: var(--accent-tint); color: var(--accent-strong); font-weight: 600; }
+.nav-count { position: absolute; inset: 4px 6px auto auto; display: grid; place-items: center; min-inline-size: 1.25rem; block-size: 1.25rem; padding-inline: 4px; border-radius: var(--r-pill); background: var(--alert-attention-bg); color: var(--alert-attention-fg); font-size: var(--fs-xs); font-weight: 600; pointer-events: none; }
+@media (max-width: 47.99rem) and (max-aspect-ratio: 3/2) { body[data-kb] .main-nav { display: none; } }
+@media (hover: hover) { .main-nav a:hover { background: var(--surface-3); } }
+
+/* content */
+.shell > main { max-inline-size: 90rem; margin-inline: auto; padding: var(--space-section) var(--gutter); }
+.shell > main:has([data-pane="session"]) { max-inline-size: none; }
+@media (max-width: 47.99rem) { .shell > main { padding-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom) + var(--sp-4)); } }
+[data-kb-row]:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* the rail from 48rem; labelled from 80rem */
+@media (min-width: 48rem) {
+  .shell { padding-inline-start: var(--rail-w); }
+  .main-nav { inset: var(--head-h) auto 0 0; inline-size: var(--rail-w); padding: var(--sp-2) 0; border-block-start: 0; border-inline-end: 1px solid var(--border); overflow-y: auto; }
+  .main-nav ul { display: flex; flex-direction: column; gap: 2px; block-size: auto; padding-inline: var(--sp-1); }
+  .main-nav a { flex-direction: row; justify-content: center; block-size: 40px; min-block-size: var(--control-h); border-radius: var(--r-2); }
+  .nav-label { display: none; }
+}
+@media (min-width: 80rem) {
+  .main-nav a { justify-content: flex-start; gap: var(--sp-3); padding-inline: var(--sp-3); }
+  .nav-label { display: inline; }
+}
+
+/* landscape phone: one 40 px line, the navigation links sit in the header, no bottom bar */
+@media (min-aspect-ratio: 3/2) and (max-height: 32rem) {
+  :root { --head-h: 40px; --tab-h: 0px; }
+  .shell { padding-inline-start: 0; }
+  .brand-text, .cap-chips, .search-open { display: none; }
+  .brand { position: relative; z-index: 31; }
+  .top { justify-content: flex-end; }
+  .main-nav { inset: 0 auto auto calc(var(--sp-2) + 2.5rem + env(safe-area-inset-left)); inline-size: auto; block-size: var(--head-h); padding: 0; background: none; border: 0; overflow: visible; }
+  .main-nav ul { flex-direction: row; gap: 0; padding: 0; block-size: 100%; }
+  .main-nav a { block-size: 100%; padding-inline: var(--sp-3); border-radius: 0; }
+  .main-nav .icon, .nav-count { display: none; }
+  .nav-label { display: inline; }
+}
+@media (min-aspect-ratio: 3/2) and (max-height: 32rem) and (pointer: coarse) { :root { --head-h: 44px; } }
+
+/* browser notification opt-in: a card that floats, so it never moves the page */
+.notify-offer { position: fixed; z-index: 26; inset-inline-start: calc(var(--rail-w) + var(--gutter)); inset-block-end: var(--sp-3); max-inline-size: 22rem; padding: var(--sp-3) var(--sp-4); box-shadow: var(--e1); }
+.notify-offer p { margin: 0; font-size: var(--fs-sm); }
+.notify-offer .actions { margin: var(--sp-2) 0 0; }
+@media (max-width: 47.99rem) { .notify-offer { inset-inline: var(--sp-3); inset-block-end: calc(var(--tab-h) + 5rem + env(safe-area-inset-bottom)); max-inline-size: none; } }
+/* Typing in a field on a phone: the bottom bar gives its height to the keyboard's half of the screen (body[data-typing] is set by shell.ts). */
+@media (max-width: 47.99rem) and (max-aspect-ratio: 3/2) and (pointer: coarse) and (max-height: 24rem) { body[data-typing] .main-nav { display: none; } }
