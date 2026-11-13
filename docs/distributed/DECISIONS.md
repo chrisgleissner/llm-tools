@@ -640,3 +640,10 @@ Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller
 ## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
 
 Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.
+
+## D55 Worker placement reads usage snapshots; the provider command template stays local (ORCH-008, ORCH-009)
+
+The coordinator stores no provider usage, so placement reads the latest `usage.snapshot` command result of each worker (at most 300 s old) and fetches a new one from the other workers together, waiting at most 20 s in total. Storing usage on the coordinator would mean replicating every capacity refresh, which the worker already avoids (DF-019/020). A worker without an answer is treated as having no usage snapshot, so it is not eligible when the request names providers.
+
+`command_template` replaces the provider command on the worker, so it is refused for remote creation in the same way as a verifier command (D47).
+
