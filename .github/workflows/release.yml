@@ -4,9 +4,26 @@ on:
   push:
     tags:
       - "*.*.*"
+  # Release dry run: builds every artifact and its checksums without secrets and publishes nothing.
+  # Limited to the paths that change what a release contains, so unrelated PRs do not pay for it.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/container-release.yml"
+      - "container/**"
+      - "coordinator/**"
+      - "web/**"
+      - "pyproject.toml"
+      - "rust-toolchain.toml"
+      - "scripts/release_checksums.py"
+
+permissions:
+  contents: read
 
 jobs:
   release:
+    # Tag-only: publishing never runs for a pull request.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,7 +49,11 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
+      - name: Write SHA-256 checksums of the Python artifacts
+        run: python scripts/release_checksums.py dist SHA256SUMS
+
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           # Only attach the build artifacts. Do NOT regenerate release notes:
@@ -40,4 +61,55 @@ jobs:
           # and this workflow runs on the resulting tag push. Re-generating
           # here would append a second copy of the notes to the existing
           # release body (the duplication bug).
-          files: dist/*
+          files: |
+            dist/*
+            SHA256SUMS
+
+  dry-run:
+    name: Release dry run (wheel, coordinator binaries, multi-arch image, checksums)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      BRIDGE_BUILD_DIR: ${{ runner.temp }}/bridge-image-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Install pinned cross-build tools
+        run: python -m pip install cargo-zigbuild==0.24.1 ziglang==0.17.1
+      - uses: ./.github/actions/rust-toolchain
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the multi-architecture image as an OCI archive (nothing is pushed)
+        # container/build.sh builds the amd64 and arm64 coordinator binaries once and reuses them for the image.
+        run: container/build.sh --oci "$RUNNER_TEMP/coordinator-image.oci.tar" --tag llm-bridge-coordinator:dry-run
+      - name: Collect artifacts and write SHA-256 checksums
+        run: |
+          mkdir -p release-dry-run
+          cp dist/* release-dry-run/
+          for arch in amd64 arm64; do
+            cp "$BRIDGE_BUILD_DIR/context/bin/$arch/bridge-coordinator" "release-dry-run/bridge-coordinator-linux-$arch"
+          done
+          cp "$RUNNER_TEMP/coordinator-image.oci.tar" release-dry-run/
+          python scripts/release_checksums.py release-dry-run release-dry-run/SHA256SUMS
+          cat release-dry-run/SHA256SUMS
+          # The checksum file must verify with the standard tool.
+          (cd release-dry-run && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dry-run
+          path: release-dry-run
+          if-no-files-found: error
+          retention-days: 7
