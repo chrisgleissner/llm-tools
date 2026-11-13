@@ -24,9 +24,26 @@ export async function openApp(page: Page, opts: MockOptions = IN, path = "/"): P
   return { ...mock, ix };
 }
 
+/**
+ * Wait until the page has loaded its data and drawn it. The signals are set by the page itself, not guessed from a delay:
+ * `data-requests` on the root element is the number of /api/v1 requests in flight (src/api.ts), the Inbox badge carries
+ * `data-partial="true"` while some mission's attention is still unread (it reads "13+" until then), and `aria-busy="true"` marks
+ * a panel that is still loading. Fonts must be ready and two frames drawn. The condition is checked again after the frames, because
+ * a read that started when the previous one finished (the status reads, then the lines) can begin between the two checks.
+ * Every screenshot spec calls this before it captures.
+ */
 export async function settle(page: Page): Promise<void> {
+  const loaded = () =>
+    page.waitForFunction(() => {
+      const requests = document.documentElement.getAttribute("data-requests");
+      return (requests === null || requests === "0") && !document.querySelector('[data-partial="true"], [aria-busy="true"]:not(.btn)');
+    });
   await page.waitForLoadState("networkidle").catch(() => {});
-  await page.evaluate(() => document.fonts.ready.then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))));
+  for (let pass = 0; pass < 2; pass += 1) {
+    await loaded();
+    await page.evaluate(() => document.fonts.ready.then(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))));
+  }
+  await loaded();
 }
 
 export const viewport = (page: Page) => page.viewportSize() ?? { width: 1440, height: 900 };

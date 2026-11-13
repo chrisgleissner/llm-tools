@@ -2,6 +2,7 @@
 // They use the deterministic mock of e2e/mock.ts, so they show sample data, never a real installation.
 import { expect, test } from "./fixtures";
 import { MISSION_PATH, mockApp } from "./mock";
+import { settle } from "./redesign/harness";
 
 const dir = process.env["SITE_SHOTS_DIR"];
 test.skip(!dir, "set SITE_SHOTS_DIR to capture the site screenshots");
@@ -12,7 +13,7 @@ for (const theme of ["dark", "light"] as const) {
     const phone = info.project.name === "chromium-mobile";
     test.skip(!phone && info.project.name !== "chromium-desktop", "Chromium projects only");
     if (!phone) await page.setViewportSize({ width: 1100, height: 680 });
-    const shot = (name: string) => page.screenshot({ path: `${dir}/${name}-${theme}.png` });
+    const shot = async (name: string) => (await settle(page), page.screenshot({ path: `${dir}/${name}-${theme}.png` }));
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await mockApp(page, { auth: "in", terminalScreen: true });
     await page.goto("/");
