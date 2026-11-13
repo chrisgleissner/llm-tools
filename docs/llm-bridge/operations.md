@@ -1238,8 +1238,9 @@ ambiguous by design.
 Resume. The next native run starts `kilo --session <id> ...` (or `opencode`) only when the id was
 recorded by Bridge, the folder is unchanged, the installed CLI help still lists `--session`, and
 the id still exists in the database for that folder. Otherwise the run starts fresh. The help
-probe has a 3 second limit and Kilo's `--help` takes about 2.4 seconds on this host, so on a slow
-host resume may be unavailable (fresh start) rather than wrong.
+probe has a 10 second limit (Kilo's `--help` takes about 2.4 seconds here) and its result is
+cached per CLI path, modification time and size, so it runs at most once per controller. A timeout
+is not cached and means a fresh start, not a wrong resume.
 
 Finish. The exit command is `/exit` for both (the upstream TUI command, alias `/quit`; not
 verifiable from `--help`, so unverified in the installed CLI). Finish reads the pane first and types

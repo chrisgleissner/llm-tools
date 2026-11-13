@@ -988,6 +988,31 @@ def _question_fields(value: object) -> list[dict[str, object]]:
     return result if result else []
 
 
+HELP_PROBE_TIMEOUT_SECONDS = 10
+# (resolved path, mtime_ns, size) -> (return code, help text). A completed probe is remembered for
+# the life of the process, so the CLI's --help runs at most once per controller and installed version.
+_HELP_CACHE: dict[tuple[str, int, int], tuple[int, str]] = {}
+
+
+def _probe_help(resolved: str) -> tuple[int, str] | None:
+    try:
+        info = os.stat(resolved)
+        key: tuple[str, int, int] | None = (resolved, info.st_mtime_ns, info.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _HELP_CACHE:
+        return _HELP_CACHE[key]
+    try:
+        result = subprocess.run([resolved, "--help"], check=False, capture_output=True, text=True,
+                                timeout=HELP_PROBE_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None  # a timeout or launch failure is not cached: the next call may succeed
+    probed = (result.returncode, (result.stdout + "\n" + result.stderr)[:128 * 1024])
+    if key is not None:
+        _HELP_CACHE[key] = probed
+    return probed
+
+
 def _installed_help(
     provider: str,
     executable: str | None,
@@ -1001,17 +1026,10 @@ def _installed_help(
     resolved = shutil.which(binary)
     if resolved is None:
         return None
-    try:
-        result = subprocess.run(
-            [resolved, "--help"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
+    probed = _probe_help(resolved)
+    if probed is None:
         return None
-    help_text = (result.stdout + "\n" + result.stderr)[:128 * 1024]
+    returncode, help_text = probed
     pattern: re.Pattern[str] | None
     if option == "resume":
         pattern = capability.help_pattern
@@ -1021,7 +1039,7 @@ def _installed_help(
         pattern = _CODEX_NO_DAEMON
     else:
         pattern = None
-    if result.returncode != 0 or pattern is None or not pattern.search(help_text):
+    if returncode != 0 or pattern is None or not pattern.search(help_text):
         return None
     return resolved, help_text
 

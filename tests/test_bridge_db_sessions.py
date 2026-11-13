@@ -230,3 +230,41 @@ def test_session_created_before_the_last_look_is_found_when_the_run_ends(env, pr
     hooks.after_iteration(context, {"provider": provider}, config, 1, 0, 0.1)
     assert store.get_operation(context["operation_id"])["native_session_id"] == "ses_foundatexit1"
     store.close()
+
+
+def test_help_probe_runs_once_per_cli_path_and_version(env, monkeypatch) -> None:
+    cli = _cli(env.bin, "kilo")
+    sessions._HELP_CACHE.clear()
+    calls = []
+    real_run = subprocess.run
+
+    def counting(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(sessions.subprocess, "run", counting)
+    identity = sessions.NativeSessionIdentity("kilo", "ses_exactlyone01", str(env.cwd), "kilo:session.db")
+    for _ in range(3):
+        assert sessions.resume_argv(identity, executable=str(cli)) == [str(cli), "--session", "ses_exactlyone01"]
+    assert len(calls) == 1 and calls[0][1] == 10 == sessions.HELP_PROBE_TIMEOUT_SECONDS
+    # A replaced binary (new mtime/size) is probed again.
+    cli.write_text(cli.read_text() + "\n# upgraded\n")
+    sessions.resume_argv(identity, executable=str(cli))
+    assert len(calls) == 2
+
+
+def test_failed_help_probe_is_not_cached(env, monkeypatch) -> None:
+    cli = _cli(env.bin, "kilo")
+    sessions._HELP_CACHE.clear()
+    outcomes = [subprocess.TimeoutExpired("kilo", 10), None]
+    real_run = subprocess.run
+
+    def flaky(argv, **kwargs):
+        if outcomes and (outcome := outcomes.pop(0)) is not None:
+            raise outcome
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(sessions.subprocess, "run", flaky)
+    identity = sessions.NativeSessionIdentity("kilo", "ses_exactlyone01", str(env.cwd), "kilo:session.db")
+    assert sessions.resume_argv(identity, executable=str(cli)) is None
+    assert sessions.resume_argv(identity, executable=str(cli)) == [str(cli), "--session", "ses_exactlyone01"]
