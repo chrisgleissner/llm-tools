@@ -245,13 +245,12 @@ function paletteActions(): PaletteAction[] {
   const { hooks } = live;
   const hint = (path: string): string => `g ${NAV.find((n) => n.path === path)?.key ?? ""}`.trim();
   const out: PaletteAction[] = NAV.map((n) => ({ title: `Go to ${n.label}`, hint: hint(n.path), run: () => hooks.go(n.path) }));
-  const pause = mainEl()?.querySelector<HTMLElement>('[data-action="pause"]:not(:disabled)');
-  if (pause) out.push({ title: "Pause the open mission", hint: "p", run: () => pause.click() });
   out.push(
     { title: "Go to Diagnostics", run: () => hooks.go("/diagnostics") },
     { title: "Go to Account", run: () => hooks.go("/account") },
     { title: "Toggle theme", hint: "t", run: () => void cycleTheme() },
     { title: "Toggle density", run: () => void toggleDensity() },
+    { title: "Change the worker offline alert time", run: () => void import("./alerts").then((m) => m.cycleOfflineAlert()) },
     { title: "Keyboard shortcuts", hint: "?", run: shortcutDialog },
   );
   if (canNotify() && notifyState() === "default") out.push({ title: "Turn on browser notifications", run: live.asks });
@@ -508,6 +507,12 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     if (!shellDisposed) stopSecurity = m.mountSecurityNotice(security);
   }).catch(() => {});
 
+  // The worker-offline and rate-limit-lifted notices are a chunk of their own, loaded once the shell is up.
+  let stopAlerts = (): void => {};
+  void import("./alerts").then((m) => {
+    if (!shellDisposed) stopAlerts = m.mountAlerts(hooks.go);
+  }).catch(() => {});
+
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   const el = h(
     "div",
@@ -535,6 +540,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       stopSecurity();
       unsubscribe();
       unDetails();
+      stopAlerts();
       window.clearTimeout(readTimer);
       caps.dispose();
       mo?.disconnect();

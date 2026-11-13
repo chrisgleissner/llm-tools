@@ -286,6 +286,10 @@ export interface Mock {
   setNeeds(missionId: string, needs: Record<string, unknown> | null): void;
   /** Pin the task list of one mission (task statuses by ordinal), whatever its status says; null restores the derived list. */
   setTasks(missionId: string, statuses: string[] | null): void;
+  /** Change what GET /workers reports for one worker (the stream message alone is overwritten by the next list read). */
+  setWorker(name: string, patch: { state?: "online" | "offline"; last_seen?: number }): void;
+  /** Change whether a provider of `usage.snapshot` is ready (a rate limit that lifts). */
+  setProviderReady(provider: string, ready: boolean): void;
 }
 
 /** The typed operation a request carries, derived the way the coordinator routes it. */
@@ -312,7 +316,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   const dataset = opts.dataset ?? "default";
   const baseWorkers = dataset === "long-names" ? LONG_WORKERS.map((name, i) => ({ ...WORKERS[i]!, name, state: "online", last_seen: nowS - 5 })) : WORKERS;
   const baseMissions = dataset === "dense" ? DENSE_MISSIONS : dataset === "long-names" ? LONG_MISSIONS : MISSIONS;
-  const workers = opts.workers === "none" ? [] : baseWorkers;
+  const workers = opts.workers === "none" ? [] : baseWorkers.map((w) => ({ ...w }));
+  const usage = JSON.parse(JSON.stringify(USAGE)) as typeof USAGE;
   const log: MockRequest[] = [];
   const terminals: TerminalFrameLog[] = [];
   const extraEvents: Array<{ id: number; event: Record<string, unknown> }> = [];
@@ -554,7 +559,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         "task.show": ((): unknown => { const n = Number(request.params?.["task_number"] ?? request.params?.["task_id"] ?? 0); const found = ownTasks.find((t) => t.ordinal === n || t.id === n); return found ? fullTask(found, entry.mission.id) : null; })(),
         ...TASK_READS,
         "session.list": { sessions: opts.sessions === "none" ? [] : SESSIONS },
-        "usage.snapshot": opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : USAGE,
+        "usage.snapshot": opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : usage,
       };
       const read = op in results;
       return json(route, 200, { request_id: request.request_id, target, operation: op, state: "done", result: { outcome: read ? "ok" : "applied", result: read ? results[op] : { status: "PAUSED" }, error: null } });
@@ -583,6 +588,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     setNeeds: (missionId, needs) => void needsOverride.set(missionId, needs),
     setTasks: (missionId, statuses) => void (statuses ? tasksOverride.set(missionId, statuses.map((st, i) => task(i + 1, `Task number ${i + 1}`, st))) : tasksOverride.delete(missionId)),
     requestCounts: () => ({ ...requestCounts }),
+    setWorker: (name, patch) => void Object.assign(workers.find((w) => w.name === name) ?? {}, patch),
+    setProviderReady: (provider, ready) => void Object.assign(usage.providers.find((p) => p.provider === provider) ?? {}, { ready }),
     patchMission: (id, patch) => {
       const entry = missions.find((m) => m.mission.id === id);
       if (entry) Object.assign(entry.mission, patch);

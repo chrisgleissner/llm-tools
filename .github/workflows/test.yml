@@ -208,6 +208,77 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # PRD-021: WebKit (Playwright's build of the engine Safari uses) on Linux. webkit-desktop is required. webkit-mobile (iPhone 13 profile) is best effort
+  # for iOS Safari and does not fail the job.
+  web-webkit:
+    name: web UI WebKit (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install the Python worker for the end-to-end worker test
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Type-check and build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+      - name: WebKit desktop (required)
+        working-directory: web
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          docker run --rm --ipc=host -e CI=1 -e BRIDGE_SKIP_VISUAL=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+            -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" bash -ec '
+              apt-get update -qq
+              apt-get install -y -qq tmux python3-venv > /dev/null
+              python3 -m venv --clear /work/.venv
+              /work/.venv/bin/python -m pip install -q -e /work
+              node node_modules/@playwright/test/cli.js test --project=webkit-desktop
+            '
+      - name: WebKit mobile, iPhone profile (best effort)
+        continue-on-error: true
+        working-directory: web
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          docker run --rm --ipc=host -e CI=1 -e BRIDGE_SKIP_VISUAL=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+            -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" bash -ec '
+              apt-get update -qq
+              apt-get install -y -qq tmux python3-venv > /dev/null
+              python3 -m venv --clear /work/.venv
+              /work/.venv/bin/python -m pip install -q -e /work
+              node node_modules/@playwright/test/cli.js test --project=webkit-mobile
+            '
+      - name: Keep the Playwright report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-webkit
+          path: web/playwright-report
+          if-no-files-found: ignore
+          retention-days: 14
+
   # PRD-037 T37: Lighthouse (mobile preset) on the Inbox, Missions and a mission page of a seeded coordinator and worker.
   web-lighthouse:
     name: web UI Lighthouse

@@ -377,7 +377,15 @@ export interface UsageSnapshot {
 /** `usage.snapshot` of one worker: provider capacity as `llm-usage` reports it. */
 export async function usageSnapshot(target: string): Promise<UsageSnapshot> {
   const row = await command(target, "usage.snapshot", null, {});
-  return (row.result?.result ?? {}) as UsageSnapshot;
+  const snapshot = (row.result?.result ?? {}) as UsageSnapshot;
+  for (const l of [...usageListeners]) l(snapshot);
+  return snapshot;
+}
+const usageListeners = new Set<(snapshot: UsageSnapshot) => void>();
+/** Called with every usage read, whoever made it (the capacity chips poll once a minute); the shell uses it to notice a lifted rate limit. */
+export function onUsageSnapshot(fn: (snapshot: UsageSnapshot) => void): () => void {
+  usageListeners.add(fn);
+  return () => usageListeners.delete(fn);
 }
 
 /** Result of `task.diff` and `task.output`: `available: false` carries a plain-words `message` and a short `reason`. */

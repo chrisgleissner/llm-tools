@@ -19,7 +19,7 @@ export interface PaletteContext {
 }
 
 interface Entry {
-  kind: "Action" | "Mission" | "Session";
+  kind: "Action" | "Mission" | "Worker" | "Session";
   title: string;
   detail: string;
   /** Extra searchable text (id, folder, provider). */
@@ -45,6 +45,19 @@ const STYLE = `dialog.palette{padding:var(--sp-3);inline-size:min(calc(100vw - 2
 
 const path = (worker: string, id: string): string => `/missions/${encodeURIComponent(worker)}/${encodeURIComponent(id)}`;
 
+/** The actions of the open page, each with a key as well. Only when the page has exactly one such button: on a list the palette cannot know which row is meant (select a row and press the key). */
+function pageActions(): PaletteAction[] {
+  const main = document.getElementById("main");
+  const out: PaletteAction[] = [];
+  for (const [action, title, hint] of [["approve", "Approve", "a"], ["reject", "Reject", "r"], ["pause", "Pause the open mission", "p"]] as const) {
+    const buttons = main?.querySelectorAll<HTMLElement>(`[data-action="${action}"]:not(:disabled)`) ?? [];
+    if (buttons.length === 1) out.push({ title, hint, run: () => (buttons[0] as HTMLElement).click() });
+  }
+  const composer = main?.querySelector<HTMLElement>("[data-composer] textarea, [data-composer] input");
+  if (composer) out.push({ title: "Write to the provider", hint: "c", run: () => composer.focus() });
+  return out;
+}
+
 export function openPalette(ctx: PaletteContext, initial = ""): void {
   document.getElementById("palette")?.remove();
   if (!document.getElementById("palette-css")) document.head.append(h("style", { id: "palette-css" }, STYLE));
@@ -61,7 +74,7 @@ export function openPalette(ctx: PaletteContext, initial = ""): void {
 
   const render = (): void => {
     const q = input.value.trim();
-    const actions: Entry[] = ctx.actions().map((a) => ({ kind: "Action", title: a.title, detail: a.hint ?? "", more: "", run: a.run }));
+    const actions: Entry[] = [...pageActions(), ...ctx.actions()].map((a) => ({ kind: "Action", title: a.title, detail: a.hint ?? "", more: "", run: a.run }));
     const missions: Entry[] = store.missions.map((m) => ({
       kind: "Mission",
       title: m.mission.name,
@@ -69,9 +82,11 @@ export function openPalette(ctx: PaletteContext, initial = ""): void {
       more: `${m.worker} ${m.mission.id} ${m.mission.folder}`,
       run: () => ctx.go(path(m.worker, m.mission.id)),
     }));
+    // A worker has no page of its own: the entry opens the Workers page, where its row is.
+    const workers: Entry[] = store.workers.map((w) => ({ kind: "Worker", title: w.name, detail: `${w.state}${w.host_name ? ` - ${w.host_name}` : ""}`, more: `${w.host_name ?? ""} ${w.id ?? ""} worker`, run: () => ctx.go("/workers") }));
     shown = (q
-      ? [...actions, ...missions, ...sessions].map((e) => ({ e, s: score(q, e.title, e.more) })).filter((r) => r.s >= 0).sort((a, b) => a.s - b.s).map((r) => r.e)
-      : [...actions, ...missions.slice(0, 5)]
+      ? [...actions, ...missions, ...workers, ...sessions].map((e) => ({ e, s: score(q, e.title, e.more) })).filter((r) => r.s >= 0).sort((a, b) => a.s - b.s).map((r) => r.e)
+      : [...actions, ...missions.slice(0, 5), ...workers.slice(0, 3)]
     ).slice(0, 12);
     if (!moved || at >= shown.length) at = 0;
     list.replaceChildren(

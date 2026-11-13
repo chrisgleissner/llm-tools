@@ -180,7 +180,10 @@ async function route(): Promise<void> {
   if (generation !== routeGeneration) return;
   const heading = main.querySelector("h1");
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;
-  main.focus({ preventScroll: true });
+  // A route change moves focus to the page's main heading, so a screen reader announces the new page and the next Tab starts inside it.
+  // A page whose heading is drawn later (the mission page) keeps the focus on the main region until then.
+  if (heading) heading.tabIndex = -1;
+  (heading ?? main).focus({ preventScroll: true });
 }
 
 /** Fetch a route chunk (showing skeleton rows if it takes longer than 150 ms) and mount it; a newer navigation discards the result. */
@@ -201,4 +204,16 @@ function showLoadError(into: HTMLElement, generation: number): void {
   into.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => generation === routeGeneration && void route(), code: "chunk-load-failed" }))));
 }
 
-void route();
+/** What this browser lacks that the console needs, or undefined. A browser that cannot parse the script never gets here. */
+const lacking = (
+  [
+    ["WebSocket", typeof WebSocket],
+    ["fetch", typeof fetch],
+    ["the dialog element", typeof window.HTMLDialogElement?.prototype.showModal],
+    ["ResizeObserver", typeof ResizeObserver],
+  ] as const
+).find(([, t]) => t === "undefined")?.[0];
+if (lacking) {
+  app.replaceChildren(h("main", { id: "main", class: "auth", "data-unsupported": "" }, h("h1", {}, "This browser is not supported"), h("p", {}, `LLM Bridge needs ${lacking}, which this browser does not have. Open the console in a current version of Chrome, Edge, Firefox or Safari (or Chrome on Android).`)));
+  document.title = "Browser not supported - LLM Bridge";
+} else void route();
