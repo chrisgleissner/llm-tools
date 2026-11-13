@@ -2875,6 +2875,7 @@ mod lock_wait_tests {
                 events: &events,
                 mission_cursor: None,
                 missions: None,
+                replay: false,
                 max: 1000,
             })
             .unwrap();
@@ -2901,6 +2902,7 @@ mod lock_wait_tests {
                 events: &events,
                 mission_cursor: None,
                 missions: None,
+                replay: false,
                 max: 1000,
             })
             .err()
@@ -2926,6 +2928,7 @@ mod lock_wait_tests {
                 events: &[],
                 mission_cursor: None,
                 missions: None,
+                replay: false,
                 max: 1000,
             })
             .unwrap();
