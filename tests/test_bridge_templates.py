@@ -221,7 +221,7 @@ def test_export_round_trips_config_and_task_graph(env, tmp_path, capsys) -> None
 
 def test_export_to_stdout_and_by_name(env, tmp_path, capsys) -> None:
     mission = _create(capsys, env, "--prompt", "Plain objective", "--providers", "codex")["mission"]
-    code, out, _ = _run(capsys, "mission", "export", mission["id"], "--template")
+    code, out, _ = _run(capsys, "mission", "export", mission["id"], "--template", "-")
     assert code == 0
     parsed = tomllib.loads(out)
     assert parsed["template"] == 1 and parsed["objective"] == "Plain objective" and len(parsed["tasks"]) == 1
@@ -246,3 +246,71 @@ def test_toml_string_escaper_round_trips_awkward_text() -> None:
     for text in ['a "q" \\ b', "tab\t nl\n cr\r bell\x07 del\x7f", '"""', "unicode é 😀", "", "ends with quote\""]:
         for multiline in (False, True):
             assert tomllib.loads("v = " + bridge_templates.toml_string(text, multiline=multiline))["v"] == text
+
+
+def test_exported_file_is_owner_only_and_new_folder_is_private(env, tmp_path, capsys) -> None:
+    mission = _create(capsys, env, "--prompt", "Objective", "--providers", "codex")["mission"]
+    target = tmp_path / "newdir" / "t.toml"
+    assert _run(capsys, "mission", "export", mission["id"], "--template", str(target))[0] == 0
+    assert target.stat().st_mode & 0o777 == 0o600 and target.parent.stat().st_mode & 0o777 == 0o700
+    target.chmod(0o644)
+    assert _run(capsys, "mission", "export", mission["id"], "--template", str(target), "--force")[0] == 0
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_export_force_does_not_follow_a_symlink(env, tmp_path, capsys) -> None:
+    mission = _create(capsys, env, "--prompt", "Objective", "--providers", "codex")["mission"]
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep\n", encoding="utf-8")
+    link = tmp_path / "link.toml"
+    link.symlink_to(victim)
+    code, _, _ = _run(capsys, "mission", "export", mission["id"], "--template", str(link), "--force")
+    assert code == 2 and victim.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_export_json_and_template_needs_a_value(env, tmp_path, capsys) -> None:
+    mission = _create(capsys, env, "--prompt", "Objective", "--providers", "codex")["mission"]
+    code, out, _ = _run(capsys, "mission", "export", mission["id"], "--template", "-", "--json")
+    assert code == 0 and tomllib.loads(json.loads(out)["template"])["objective"] == "Objective"
+    target = tmp_path / "j.toml"
+    code, out, _ = _run(capsys, "mission", "export", mission["id"], "--template", str(target), "--json")
+    assert code == 0 and json.loads(out)["path"] == str(target)
+    with pytest.raises(SystemExit) as raised:
+        main(["mission", "export", mission["id"], "--template"])
+    assert raised.value.code == 2
+    capsys.readouterr()
+
+
+def test_failing_task_insert_leaves_no_mission_and_no_tombstone(env, tmp_path, monkeypatch) -> None:
+    store = BridgeStore(store_path())
+    tasks = bridge_templates.parse_template(BASIC)["tasks"]
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(store, "add_dependency", boom)
+    with pytest.raises(RuntimeError):
+        store.create_mission_with_tasks("m", "objective", tasks, cwd=env)
+    assert store.list_missions() == []
+    assert store.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert not store._has_tombstone_table() or store.db.execute("SELECT COUNT(*) FROM mission_tombstones").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("entry", ["../secret.sh", "a/../../b", "/etc/passwd"])
+def test_verifier_files_outside_the_mission_folder_are_refused(env, tmp_path, capsys, entry) -> None:
+    path = tmp_path / "t.toml"
+    path.write_text(f'template = 1\nobjective = "work"\n[verifier]\ncommand = "true"\nfiles = [{json.dumps(entry)}]\n', encoding="utf-8")
+    code, out, err = _run(capsys, "mission", "create", "--cwd", str(env), "--template", str(path))
+    assert code == 2 and repr(entry) in out + err
+
+
+def test_explicit_verifier_timeout_and_log_flags_win(env, tmp_path, capsys) -> None:
+    path = tmp_path / "t.toml"
+    path.write_text('template = 1\nobjective = "work"\n[verifier]\ncommand = "true"\ntimeout_seconds = 50\n'
+                    '[policy]\nlog_max_bytes = 2048\nlog_rotations = 7\nlog_retained_runs = 9\ncapacity_refresh_seconds = 120\n', encoding="utf-8")
+    config = _create(capsys, env, "--template", str(path))["mission"]["config"]
+    assert config["verifier"]["timeout_seconds"] == 50 and config["log_max_bytes"] == 2048 and config["log_retained_runs"] == 9
+    config = _create(capsys, env, "--template", str(path), "--new", "--verifier-timeout", "60", "--log-max-bytes", "4096",
+                     "--log-rotations", "2", "--log-retained-runs", "4", "--capacity-refresh-seconds", "30")["mission"]["config"]
+    assert config["verifier"]["timeout_seconds"] == 60 and config["log_max_bytes"] == 4096
+    assert config["log_rotations"] == 2 and config["log_retained_runs"] == 4 and config["capacity_refresh_seconds"] == 30

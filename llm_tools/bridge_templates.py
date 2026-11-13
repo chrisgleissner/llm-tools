@@ -221,6 +221,9 @@ def _normalise_verifier(table: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("verifier.argv must not be empty")
     if "files" in table:
         result["files"] = _str_list(table["files"], "verifier.files")
+        for entry in result["files"]:
+            if os.path.isabs(entry) or ".." in Path(entry).parts:
+                raise ValueError(f"verifier.files entry {entry!r} must be a path inside the mission folder: no absolute path and no '..'")
     if "timeout_seconds" in table:
         value = table["timeout_seconds"]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -305,24 +308,12 @@ def apply_to_args(args: argparse.Namespace, template: dict[str, Any], explicit: 
 def create_template_tasks(store: Any, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and the template's tasks and dependencies; returns ``{"mission", "task"}``.
 
-    A failure after the mission row exists removes the mission again, so no half-built graph remains.
+    The store creates everything in one transaction, so a failure leaves no mission and no tombstone.
     """
     from .bridge_store import derive_mission_name
 
-    mission = store.create_mission(args.name or derive_mission_name(prompt, "LLM Bridge mission"), prompt, cwd=args.cwd, config=config)
-    mid = str(mission["id"])
-    try:
-        ids: dict[str, int] = {}
-        for task in args.template_tasks:
-            ids[task["id"]] = store.add_task(mid, task["body"], title=task["title"], acceptance=task["acceptance"])
-        for task in args.template_tasks:
-            for dep in task["depends_on"]:
-                store.add_dependency(mid, ids[task["id"]], ids[dep])
-    except BaseException:
-        store.delete_mission(mid)
-        raise
-    first = store.get_task(ids[args.template_tasks[0]["id"]])
-    return {"mission": store.get_mission(mid), "task": first}
+    mission = store.create_mission_with_tasks(args.name or derive_mission_name(prompt, "LLM Bridge mission"), prompt, args.template_tasks, cwd=args.cwd, config=config)
+    return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
 
 
 # -- writing ------------------------------------------------------------------------------------
@@ -410,8 +401,8 @@ def _split(raw: Any) -> list[str]:
 
 
 def export_target(value: str | None) -> Path | None:
-    """The file ``--template [PATH]`` writes: none for standard output, a bare name goes in the templates folder."""
-    if value is None or value in ("", "-"):
+    """The file ``--template VALUE`` writes: ``-`` is standard output, a bare name goes in the templates folder."""
+    if value is None or value == "-":
         return None
     if is_path_reference(value):
         return Path(value).expanduser()
@@ -422,12 +413,18 @@ def export_target(value: str | None) -> Path | None:
 
 def write_export(text: str, target: Path, *, force: bool) -> None:
     """Write ``text`` to ``target``; an existing file is refused unless ``force``."""
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.parent.exists():
+        target.parent.mkdir(parents=True, mode=0o700)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC | os.O_NOFOLLOW if force else os.O_EXCL)
     try:
-        with open(target, "w" if force else "x", encoding="utf-8") as handle:
-            handle.write(text)
+        descriptor = os.open(target, flags, 0o600)
     except FileExistsError:
         raise ValueError(f"{target} already exists; pass --force to overwrite it") from None
+    except OSError as exc:
+        raise ValueError(f"cannot write template {target}: {exc.strerror or exc}") from None
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(text)
 
 
 def export_mission(store: Any, mission_id: str) -> str:

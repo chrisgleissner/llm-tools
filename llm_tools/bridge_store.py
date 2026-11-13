@@ -840,6 +840,29 @@ class BridgeStore:
             result["initial_task_id"] = task_id
         return result
 
+    def create_mission_with_tasks(
+        self,
+        name: str,
+        objective: str,
+        tasks: list[dict[str, Any]],
+        *,
+        cwd: str | Path,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a mission, its tasks and their dependencies in one transaction; a failure leaves nothing behind.
+
+        Each task is ``{"id", "title", "body", "acceptance", "depends_on": [ids of tasks in this list]}``.
+        """
+        with self._transaction():
+            mission = self.create_mission(name, objective, cwd=cwd, config=config)
+            ids = {task["id"]: self.add_task(mission["id"], task["body"], title=task["title"], acceptance=task["acceptance"]) for task in tasks}
+            for task in tasks:
+                for dep in task["depends_on"]:
+                    self.add_dependency(mission["id"], ids[task["id"]], ids[dep])
+            result = self.get_mission(mission["id"])
+        result["initial_task_id"] = ids[tasks[0]["id"]]
+        return result
+
     def get_mission(self, mission_id: str) -> dict[str, Any]:
         result = dict(self._mission_row(mission_id))
         result["config"] = _with_mode(json.loads(result.pop("config_json")))

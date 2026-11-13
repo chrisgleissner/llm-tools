@@ -1577,12 +1577,14 @@ def _build_parser(
     _add_json_arg(mission_delete)
     mission_export = mission_sub.add_parser(
         "export", help="write a mission's objective, tasks, verifier, rotation and policy as a template file",
-        description="Write the mission as a template that mission create --template can read back. The file holds no secrets and no folder "
-                    "path; an existing file is never overwritten without --force. Without a PATH the template goes to standard output.")
+        description="Write the mission as a template that mission create --template can read back. The file contains the task prompts and the "
+                    "verifier command line, so treat it like the mission itself; it is written readable by you only, and an existing file "
+                    "is never overwritten without --force. --template - prints it to standard output.")
     _add_mission_arg(mission_export, default_mission)
     mission_export.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
-    mission_export.add_argument("--template", metavar="PATH|NAME", nargs="?", const="-", required=True, help="where to write: a file path (with '/' or ending .toml), a bare NAME for the templates folder, or nothing for standard output")
+    mission_export.add_argument("--template", metavar="PATH|NAME", required=True, help="where to write: a file path (with '/' or ending .toml), a bare NAME for the templates folder, or - for standard output")
     mission_export.add_argument("--force", action="store_true", help="overwrite an existing file")
+    _add_json_arg(mission_export)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
     mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
@@ -2065,9 +2067,15 @@ def _mission_export_command(args: argparse.Namespace) -> int:
     with open_store(readonly=True) as store:
         text = bridge_templates.export_mission(store, args.mission)
     if target is None:
-        sys.stdout.write(text)
+        if args.json:
+            _json_print({"template": text})
+        else:
+            sys.stdout.write(text)
         return 0
     bridge_templates.write_export(text, target, force=args.force)
+    if args.json:
+        _json_print({"path": str(target), "mission": args.mission})
+        return 0
     print(f"Wrote template {target} from mission {fmt.short_id(args.mission)} · create from it with: llm-bridge mission create --template {target}")
     return 0
 

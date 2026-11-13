@@ -9,7 +9,7 @@ computers. A complete example is in [example-template.toml](./example-template.t
 llm-bridge mission create --template release            # NAME: release.toml in the templates folder
 llm-bridge mission create --template ./plans/rel.toml   # PATH: contains '/' or ends in .toml
 llm-bridge mission export ID --template ./rel.toml      # write a mission as a template
-llm-bridge mission export ID --template                 # print it to standard output
+llm-bridge mission export ID --template -               # print it to standard output
 llm-bridge mission export ID --template release         # write NAME.toml in the templates folder
 ```
 
@@ -53,7 +53,8 @@ acceptance criteria on the template's tasks.
 
 A verifier from a template is treated exactly like one from the command line.
 `mission create` hashes the verifier program, the script it interprets and the
-listed `files` at creation. If one of those files changes later, a passing
+listed `files` at creation. `files` entries must stay inside the mission folder
+(no absolute path, no `..`). If one of those files changes later, a passing
 verifier no longer completes a task without your approval.
 Review a template's verifier before you create a mission from a file you did not
 write: its command runs on your computer when a task is verified.
@@ -63,7 +64,9 @@ write: its command runs on your computer when a task is verified.
 `mission export` writes the same schema. Creating a mission from the exported
 file gives the same configuration and task graph. Task ids are written as `t1`,
 `t2`, ... by task number; cancelled tasks and unaccepted proposals are left out.
-The file holds no folder path and none of the saved llm-tools config
-(`frozen_tool_config`) or `--command-template`. The verifier command is written as
-saved, so keep secrets out of verifier arguments. An existing file is not
-overwritten unless you pass `--force`.
+The file contains the task prompts and the verifier command line, so treat it like
+the mission itself and keep secrets out of both. It is written readable by you only
+(mode 0600; a new templates folder is 0700). It holds no folder path and none of the
+saved llm-tools config or `--command-template`. An existing file is not overwritten
+unless you pass `--force`. `--template` always takes a value; `-` means standard
+output. With `--json` the result is `{"path": ...}`, or `{"template": ...}` for `-`.

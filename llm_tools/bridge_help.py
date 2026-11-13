@@ -367,7 +367,7 @@ A template is a TOML file with a mission's objective, tasks, dependencies, verif
 rotation and policy:
   llm-bridge mission create --template release         NAME.toml in <config dir>/llm-tools/templates
   llm-bridge mission create --template ./rel.toml      a path (contains / or ends in .toml)
-  llm-bridge mission export ID --template ./rel.toml   write a mission as a template
+  llm-bridge mission export ID --template ./rel.toml   write a mission as a template (- prints it)
 Options typed on the command line override the template. An unknown key, an unknown
 dependency id or a dependency cycle is refused before anything is saved. A verifier from
 a template is hashed at creation like any other, so a changed verifier file needs your
@@ -815,7 +815,7 @@ _PAID = "starts provider work (uses paid capacity)"
 # therefore no "Effects:" line on their page.
 EFFECTS: dict[str, str] = {
     "mission create": "saves a new mission in Bridge's database; starts no provider.",
-    "mission export": "writes the template file you name (nothing without a path); an existing file is refused unless --force.",
+    "mission export": "writes the template file you name (owner-readable; it contains task prompts and the verifier command); an existing file is refused unless --force.",
     "mission set": "changes a saved setting of the mission.",
     "mission colour": "changes the mission's saved colour.",
     "mission delete": "permanently removes the mission from this computer, and from a coordinator the worker is connected to. This cannot be undone.",
