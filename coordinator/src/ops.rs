@@ -298,8 +298,25 @@ pub fn setup_token(dir: &Path) -> Result<PathBuf, String> {
 // ------------------------------------------------------------------ backup and restore
 
 fn integrity_ok(path: &Path) -> Result<i64, String> {
-    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
-    let result: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    integrity_ok_cancellable(path, None)
+}
+
+/// `PRAGMA integrity_check` and the schema version of `path`. When `cancel` becomes true the check is
+/// interrupted (SQLite calls the progress handler during the check) and the error is [`BACKUP_CANCELLED`].
+pub fn integrity_ok_cancellable(path: &Path, cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<i64, String> {
+    let mut c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    if let Some(flag) = cancel {
+        let flag = flag.clone();
+        c.progress_handler(100, Some(move || flag.load(std::sync::atomic::Ordering::Relaxed)))
+            .map_err(|e| e.to_string())?;
+    }
+    let result: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).map_err(|e| {
+        if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            BACKUP_CANCELLED.to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     if result != "ok" {
         return Err(format!("integrity_check failed: {result}"));
     }
@@ -372,7 +389,13 @@ pub struct BackupOptions {
     pub assume_bytes_per_sec: Option<u64>,
     /// Print the preflight figures and progress lines to stderr.
     pub verbose: bool,
+    /// When set to true while the copy runs, the copy is interrupted (SQLite progress handler returns
+    /// true), the partial file is removed and the error is [`BACKUP_CANCELLED`].
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
+
+/// Error text of a backup that was cancelled through [`BackupOptions::cancel`].
+pub const BACKUP_CANCELLED: &str = "backup cancelled";
 
 impl Default for BackupOptions {
     fn default() -> Self {
@@ -382,6 +405,7 @@ impl Default for BackupOptions {
             max_bytes_per_sec: BACKUP_DEFAULT_MAX_BYTES_PER_SEC,
             assume_bytes_per_sec: None,
             verbose: false,
+            cancel: None,
         }
     }
 }
@@ -462,7 +486,7 @@ fn measure_write_rate(dir: &Path, stem: &str) -> Result<u64, String> {
     Ok((PROBE_BYTES as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64)
 }
 
-fn free_disk_bytes(dir: &Path) -> Option<u64> {
+pub fn free_disk_bytes(dir: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -564,13 +588,17 @@ struct Pace {
     max_bytes_per_sec: u64,
     live_bytes: u64,
     verbose: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Pace {
-    fn tick(&mut self) {
+    fn tick(&mut self) -> bool {
+        if self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return true;
+        }
         let now = std::time::Instant::now();
         if now.duration_since(self.checked) < Duration::from_millis(5) {
-            return;
+            return false;
         }
         let len = std::fs::metadata(&self.out).map(|m| m.len()).unwrap_or(0);
         if len >= self.synced_len + BACKUP_DIRTY_LIMIT {
@@ -602,6 +630,7 @@ impl Pace {
                 fmt_duration(Duration::from_secs_f64(eta))
             );
         }
+        false
     }
 }
 
@@ -618,17 +647,18 @@ fn vacuum_into(src: &Path, tmp: &Path, pace: Pace) -> Result<(), String> {
     from.pragma_update(None, "cache_size", -1024).map_err(|e| e.to_string())?;
     from.pragma_update(None, "auto_vacuum", 2).map_err(|e| e.to_string())?;
     let mut pace = pace;
+    let pace_cancel = pace.cancel.clone();
     pace.sync = std::fs::File::open(tmp).ok();
-    from.progress_handler(
-        100,
-        Some(move || {
-            pace.tick();
-            false
-        }),
-    )
-    .map_err(|e| e.to_string())?;
+    from.progress_handler(100, Some(move || pace.tick())).map_err(|e| e.to_string())?;
     let target = tmp.to_str().ok_or("the backup path is not valid UTF-8")?;
-    from.execute("VACUUM INTO ?1", [target]).map_err(|e| format!("copy failed: {e}"))?;
+    let cancelled = pace_cancel;
+    from.execute("VACUUM INTO ?1", [target]).map_err(|e| {
+        if cancelled.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            BACKUP_CANCELLED.to_string()
+        } else {
+            format!("copy failed: {e}")
+        }
+    })?;
     Ok(())
 }
 
@@ -730,6 +760,7 @@ pub fn backup_with(dir: &Path, output: &Path, opts: &BackupOptions) -> Result<Ba
         max_bytes_per_sec: opts.max_bytes_per_sec,
         live_bytes,
         verbose: opts.verbose,
+        cancel: opts.cancel.clone(),
     };
     let copied = vacuum_into(&src, &tmp, pace).and_then(|()| {
         sync_file(&tmp)?;
@@ -750,7 +781,7 @@ pub fn backup_with(dir: &Path, output: &Path, opts: &BackupOptions) -> Result<Ba
         fmt_duration(copy)
     ));
     let check_started = std::time::Instant::now();
-    let schema_version = match integrity_ok(&tmp) {
+    let schema_version = match integrity_ok_cancellable(&tmp, opts.cancel.as_ref()) {
         Ok(v) => v,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
