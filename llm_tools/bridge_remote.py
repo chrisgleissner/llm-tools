@@ -388,38 +388,37 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         from .bridge import _resolve_mode_args
 
         _resolve_mode_args(args)  # --mode and the older --native/--headless flags become one choice
+        if getattr(args, "template", None):
+            raise ValueError("mission create --template reads a file on this computer and is not available with --target; create the mission on the worker, or pass the objective with --prompt")
         unsupported_options: list[str] = []
+        if getattr(args, "isolate", "none") != "none":
+            unsupported_options.append("--isolate")
         if args.verifier_command is not None:
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):
             unsupported_options.append("-- COMMAND")
-        if bool(args.auto_continue):
-            unsupported_options.append("--auto-continue")
         if args.command_template:
             unsupported_options.append("--command-template")
-        if args.include_config:
-            unsupported_options.append("--include-config")
         if args.verifier_argv:
             unsupported_options.append("--verifier-arg")
         if args.verifier_files:
             unsupported_options.append("--verifier-file")
-        if args.verifier_timeout != 300:
-            unsupported_options.append("--verifier-timeout")
-        if args.log_max_bytes != 4 * 1024 * 1024:
-            unsupported_options.append("--log-max-bytes")
-        if args.log_rotations != 3:
-            unsupported_options.append("--log-rotations")
-        if args.log_retained_runs != 20:
-            unsupported_options.append("--log-retained-runs")
-        if args.capacity_refresh_seconds != 60:
-            unsupported_options.append("--capacity-refresh-seconds")
         params = {
             "prompt": _read_text(args), "cwd": args.cwd, "name": args.name or "",
             "acceptance": list(args.acceptance), "providers": args.providers, "routes": args.routes,
             "headless": bool(args.headless), "native_tui": bool(args.native_tui),
             "teams": args.teams, "token_spend": args.token_spend, "trust_folder": bool(args.trust_folder),
             "unsupported_options": unsupported_options,
+            "auto_continue": bool(args.auto_continue), "include_config": bool(args.include_config),
         }
+        if args.verifier_name:
+            params["verifier_name"] = args.verifier_name
+        if args.verifier_timeout is not None:
+            params["verifier_timeout"] = args.verifier_timeout
+        for option, default in (("log_max_bytes", 4 * 1024 * 1024), ("log_rotations", 3),
+                                ("log_retained_runs", 20), ("capacity_refresh_seconds", 60)):
+            if getattr(args, option) != default:
+                params[option] = getattr(args, option)
         return make("mission.create", params, with_mission=False), fmt.format_mission_created
     if command == "mission" and args.mission_action == "delete":
         request = make("mission.delete", {"confirm": True})
@@ -511,6 +510,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         params = {"kind": args.kind, "task": getattr(args, "task", None),
                   "task_id": getattr(args, "task_by_id", None), "route": args.route, "prompt": _read_text(args)}
         return make("mission.steer", params), lambda value: fmt.format_command_receipt("steer", value, request.mission_id or "")
+    if command == "mission" and args.mission_action == "export":
+        raise ValueError("mission export --target is unavailable: a template holds prompts and the coordinator has no file artifact route; run it on the worker")
     if command == "backup":
         raise ValueError("backup --target is unavailable: backup contains prompts and evidence, and the coordinator has no streaming artifact route; run backup locally on the worker")
     if command == "task":

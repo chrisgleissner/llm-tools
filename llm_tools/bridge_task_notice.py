@@ -36,11 +36,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from . import bridge_providers
 from .bridge_finish import COMPOSER_LINE, composer_is_idle
 from .bridge_states import ACTIVE_OPERATION_STATUSES
 
 # Providers whose composer the Bridge recognises (the same set `llm-bridge finish` can drive).
-NOTICE_PROVIDERS = frozenset({"claude", "codex", "copilot"})
+def notice_providers() -> frozenset[str]:
+    """Providers whose composer the Bridge can type a notice into (the registry's ``notice_delivery``)."""
+    return frozenset(name for name, spec in bridge_providers.REGISTRY.items() if spec.notice_delivery)
 QUIET_SECONDS = 3.0
 DRAFT_REPORT_SECONDS = 600.0
 KEY_PAUSE_SECONDS = 0.3
@@ -320,7 +323,7 @@ def task_delivery(store: Any, mission_id: str, task_id: int, *, controller_live:
         operation = active_operation(store, mission_id)
         if operation is not None:
             provider = provider_of_station(config, str(operation["route_id"] or operation["station"] or ""))
-            if provider in NOTICE_PROVIDERS:
+            if provider in notice_providers():
                 return {"mode": "provider-notice", "text": DELIVERED_TEXT, "after_task": None}
     ahead = store.runs_after(task_id)
     if ahead:

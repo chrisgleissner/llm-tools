@@ -197,6 +197,10 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     routes_action = create.add_argument("--routes", metavar="LIST", default=None, help=routes_help)
     routes_action.help = routes_help + "%(rotation_routes)s"
     routes_action.rotation_routes = _RotationDefaultText(lambda providers, routes: f" (default: {routes})" if routes else "")  # type: ignore[attr-defined]
+    create.add_argument("--isolate", choices=("none", "worktree"), default="none", help=(
+        "none (default): the providers work in --cwd itself. worktree: create a git worktree under the Bridge state directory on a new branch "
+        "bridge/<name>-<id> from the current commit and run the mission there, so several missions can work on one repository at once; "
+        "needs a git repository with a clean working tree; merge the branch back with git merge bridge/<name>-<id>"))
     create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the first task; repeat for several")
     create.add_argument("--teams", choices=("on", "off"), default=None, help="provider-native team guidance (default: on; global default: [bridge].teams)")
     create.add_argument("--token-spend", choices=("low", "medium", "high"), default=None, help="token spend preference (default: medium; global default: [bridge].token_spend)")
@@ -210,9 +214,10 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--native", dest="native_tui", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--verifier", dest="verifier_command", metavar="COMMAND", default=None, help="command that checks a finished task, split into words like a shell would (not run through a shell), for example 'python -m pytest -q'; or write the command last after --, as in -- python -m pytest -q; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
+    create.add_argument("--verifier-name", dest="verifier_name", metavar="NAME", default=None, help="a verifier declared as [bridge.verifiers.NAME] in the llm-tools config of the machine that runs the mission (the only verifier form a remote request may use)")
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the verifier command, for exact control of quoting; repeat per argument (--verifier-arg=-m for one that starts with a dash)")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
-    create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")
+    create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=None, help="seconds before a verifier run is treated as failed (default: 300); a --verifier-name uses its declared timeout unless this is given")
     create.add_argument("--log-max-bytes", metavar="BYTES", type=_db_int, default=4 * 1024 * 1024, help="size at which one provider log file rotates (default: 4194304, 4 MiB)")
     create.add_argument("--log-rotations", metavar="COUNT", type=_db_int, default=3, help="rotated log files kept per provider run (default: 3)")
     create.add_argument("--log-retained-runs", metavar="COUNT", type=_db_int, default=20, help="newest provider-run log directories kept; older ones are pruned (default: 20)")
@@ -293,8 +298,10 @@ def _build_parser(
     mission = sub.add_parser("mission", help="create or list missions")
     mission_sub = mission.add_subparsers(dest="mission_action", required=True)
     create = mission_sub.add_parser("create", help="create a mission and its first task")
-    _read_prompt_args(create, "mission objective and first task")
+    # --template supplies the objective, so the prompt is checked after parsing (see _parse_arguments).
+    _read_prompt_args(create, "mission objective and first task", required=False)
     _add_mission_create_args(create)
+    create.add_argument("--template", metavar="NAME|PATH", default=None, help="create the mission from a template: a TOML file with objective, tasks, dependencies, verifier, rotation and policy. NAME is NAME.toml in the templates folder next to the llm-tools config; a value with '/' or ending .toml is a file path. Options on the command line override the template; --prompt/--file replaces its objective. See help templates")
     _add_json_arg(create)
     listing = mission_sub.add_parser("list", help="list every mission (the same listing as llm-bridge missions)")
     listing.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
@@ -309,7 +316,18 @@ def _build_parser(
     mission_delete.add_argument("--mission", "-m", metavar="ID", default=None, help=f"mission ID or a unique prefix of {MIN_MISSION_PREFIX}+ characters (required; never inferred from the folder)")
     mission_delete.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
     mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
+    mission_delete.add_argument("--force", action="store_true", help="delete a mission whose isolated worktree holds uncommitted or unmerged work; the mission is removed, the worktree and branch are kept")
     _add_json_arg(mission_delete)
+    mission_export = mission_sub.add_parser(
+        "export", help="write a mission's objective, tasks, verifier, rotation and policy as a template file",
+        description="Write the mission as a template that mission create --template can read back. The file contains the task prompts and the "
+                    "verifier command line, so treat it like the mission itself; it is written readable by you only, and an existing file "
+                    "is never overwritten without --force. --template - prints it to standard output.")
+    _add_mission_arg(mission_export, default_mission)
+    mission_export.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
+    mission_export.add_argument("--template", metavar="PATH|NAME", required=True, help="where to write: a file path (with '/' or ending .toml), a bare NAME for the templates folder, or - for standard output")
+    mission_export.add_argument("--force", action="store_true", help="overwrite an existing file")
+    _add_json_arg(mission_export)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
     mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
@@ -538,6 +556,7 @@ def _build_parser(
     _add_mission_arg(doctor, default_mission, inferred=False)
     doctor.add_argument("--include-config", action="store_true", help="with --json, include the mission's saved copy of the llm-tools config (large; left out by default)")
     doctor.add_argument("--bundle", nargs="?", const="", default=None, metavar="PATH", help="write a redacted diagnostic archive for bug reports (default: llm-bridge-bundle-<UTC time>.tar.gz here; never overwrites)")
+    doctor.add_argument("--capabilities", action="store_true", help="print, per provider and capability, supported / unsupported / unverified with the evidence date and CLI version")
     _add_json_arg(doctor)
 
     theme = sub.add_parser("theme", help="show the detected terminal background, the active colour theme and a swatch per role")
@@ -608,8 +627,16 @@ def _parse_arguments(arguments: list[str]) -> argparse.Namespace:
         cut = arguments.index("--")
         parsed = _parse_arguments_core(arguments[:cut])
         parsed.verifier_after_dashes = arguments[cut + 1:]
-        return parsed
-    return _parse_arguments_core(arguments)
+    else:
+        parsed = _parse_arguments_core(arguments)
+    if arguments[:2] == ["mission", "create"]:
+        from .bridge_templates import explicit_options
+
+        if parsed.template is not None:
+            parsed.explicit_options = explicit_options(arguments)  # only a template needs to know what was typed
+        if parsed.template is None and parsed.prompt is None and parsed.prompt_file is None:
+            _build_parser().error("one of the arguments --file/--prompt-file --prompt is required")
+    return parsed
 
 
 def _parse_arguments_core(arguments: list[str]) -> argparse.Namespace:

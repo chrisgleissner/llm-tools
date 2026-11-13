@@ -75,16 +75,29 @@ test.describe("delete mission", () => {
       // A running mission has no Delete mission action.
       await page.getByRole("link", { name: "Running mission" }).click();
       await expect(page.getByRole("heading", { name: "Running mission" })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Pause mission" })).toBeVisible();
-      await expect(page.locator('#mission-actions [data-action="delete-mission"]')).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+      // The header is drawn again when the task list arrives and an open menu would be closed with it: wait for the list (the tab shows its count).
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
+      await page.getByRole("button", { name: "More mission actions" }).click();
+      await expect(page.getByRole("menuitem", { name: "Cancel mission" })).toBeVisible();
+      await expect(page.locator('[data-action="delete-mission"]')).toHaveCount(0);
+      await page.keyboard.press("Escape");
       await navTo(page, "Missions");
 
       // A never-started mission has it; the dialog names the mission, and going back changes nothing.
       await page.getByRole("link", { name: "Never started mission" }).click();
       await expect(page.getByRole("heading", { name: "Never started mission" })).toBeVisible();
-      const remove = page.locator('#mission-actions [data-action="delete-mission"]');
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
+      // The action is in the mission's overflow menu (the redesign moved it there from a button beside the other actions).
+      const remove = page.locator('[data-action="delete-mission"]');
+      const openDelete = async () => {
+        await page.getByRole("button", { name: "More mission actions" }).click();
+        await remove.click();
+      };
+      await page.getByRole("button", { name: "More mission actions" }).click();
       await expect(remove).toBeVisible();
       await expect(remove).toHaveText("Delete mission");
+      await expect(remove).toHaveAttribute("role", "menuitem");
       await remove.click();
       const dialog = page.getByRole("dialog");
       await expect(dialog).toContainText('"Never started mission"');
@@ -96,7 +109,7 @@ test.describe("delete mission", () => {
       expect(fake.bridge(["mission", "list", "--json"])).toContain(fake.idle);
 
       // Confirm: back on the missions list with a toast; the mission is gone from the worker and from the coordinator.
-      await remove.click();
+      await openDelete();
       await page.locator("#dialog-confirm").click();
       await expect(page).toHaveURL(/\/missions$/);
       await expect(page.locator(".toast", { hasText: /Deleted mission "Never started mission"/ })).toBeVisible({ timeout: 20_000 });
@@ -122,9 +135,11 @@ test.describe("delete mission", () => {
       await navTo(page, "Missions");
       await page.getByRole("link", { name: "Never started mission" }).click();
       await expect(page.getByRole("heading", { name: "Never started mission" })).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole("tab", { name: /^Tasks \d+$/ })).toBeVisible();
       // The mission starts running on the worker after the page was drawn: the worker refuses and says why.
       fake.setStatus(fake.idle, "RUNNING");
-      await page.locator('#mission-actions [data-action="delete-mission"]').click();
+      await page.getByRole("button", { name: "More mission actions" }).click();
+      await page.locator('[data-action="delete-mission"]').click();
       await page.locator("#dialog-confirm").click();
       await expect(page.locator(".toast", { hasText: /is running, so it cannot be deleted/ })).toBeVisible({ timeout: 20_000 });
       await expect(page).toHaveURL(new RegExp(`/missions/e2e-worker/${fake.idle}$`));

@@ -46,6 +46,24 @@ the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+
+`GET /api/v1/missions` (the mission list across workers) carries, for each mission the worker
+reports them for, `attention` (`{kind, message, tasks}` or `null`: why the operator is needed) and
+`task_counts` (`{STATUS: n}`). Both are optional and additive within v1; a mission from a worker
+that predates them has neither key, which means unknown. `stale` is `true` only while the worker is
+offline or its mission data is behind its events. See `protocol.md` (mission summary) for the exact
+bounds.
+
+The typed read operation `mission.activity_line` (mission-scoped, no parameters, sent through `POST
+/api/v1/commands`; no resource path and no CLI command) returns one line of what the running
+provider printed last: `{schema_version, available, reason, message, line, at, task, provider}`.
+`line` is at most 160 characters with terminal escape sequences, control characters and
+box-drawing-only lines removed. `at` is the modification time of the provider's retained log (UTC,
+ISO 8601 seconds), `task` the task number and `provider` the route or station of the running
+operation. The line comes only from the operation's retained log, which `task.output` returns in
+full to the same callers; the worker reads at most the last 16 KiB and never captures the provider's
+terminal screen. When there is no line, `available` is `false`, `line` and `at` are `null`, and
+`reason` is `not-running` (no active provider run), `no-log`, `unreadable` or `no-output`.
 The current mutation adapters use the same command journal: `POST
 /api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
@@ -255,11 +273,12 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 |---|---|
 | `help` | Exclusion: offline help has no state/API operation; replacement is `llm-bridge help` locally. |
 | `view` | Exclusion: opens a local filesystem artifact; replacement is local `llm-bridge view --file`. |
-| `mission create` | Typed `mission.create`; resource `POST /api/v1/missions` with `worker` in the JSON body; worker requires `--allow-create` and a cwd inside an enrolled `--allow-root`. Local-only creation options return `unsupported-remote-option`. |
+| `mission create` | Typed `mission.create`; resource `POST /api/v1/missions` with `worker` in the JSON body; worker requires `--allow-create` and a cwd inside an enrolled `--allow-root`. `worker` is optional: without it the coordinator places the mission (see "Worker placement" below). Only `--command-template` and the verifier command and file options stay local and return `unsupported-remote-option`; a verifier is chosen with `verifier_name`. |
 | `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
+| `mission export` | Exclusion: writes a local template file (prompts and verifier); `mission export --target` is refused, and `mission create --target --template` is refused because the template is read on the client. No REST operation. |
 | `mission colour` | Typed `mission.settings.patch` field `colour`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission color` | Alias of `mission colour`; same typed settings field. |
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
@@ -328,28 +347,31 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--file` | Local prompt/artifact input; for remote `task add`/`amend`, prompt text is sent as typed operation `prompt` (file is read client-side). |
 | `--follow` | Local file-follow behavior (`view`, `events`, `task output`); no API equivalent. Remote `events --follow` and `task output --follow` are refused. |
 | `--acceptance` | `task.add` or `mission.create` resource body `acceptance`. |
-| `--auto-continue` | Local mission configuration; `mission create --target` returns the typed `unsupported-remote-option` result. |
-| `--capacity-refresh-seconds` | Local controller setting; remote mission creation returns `unsupported-remote-option`. |
-| `--command-template` | Local test/custom launch override; remote mission creation returns `unsupported-remote-option`. |
+| `--auto-continue` | `mission.create` body `auto_continue` (boolean). |
+| `--capacity-refresh-seconds` | `mission.create` body `capacity_refresh_seconds` (5 to 3600). |
+| `--command-template` | Local only: it would run a command of the caller's choosing; remote mission creation returns `unsupported-remote-option`. |
 | `--cwd` | `mission.create` resource body `cwd`; worker resolves it and enforces enrolled allowed roots. |
 | `--headless` | `mission.start` params and `/start` body field `headless`. |
-| `--include-config` | Exclusion: local-only mission creation response option; remote create returns `unsupported-remote-option`. |
+| `--include-config` | `mission.create` body `include_config`; without it the result omits the frozen copy of the worker's configuration. |
 | `--json` | Client-side output format; applies to typed command/resource responses, not a request field. |
-| `--log-max-bytes` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
-| `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
-| `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
+| `--log-max-bytes` | `mission.create` body `log_max_bytes` (1024 to 1073741824). |
+| `--log-retained-runs` | `mission.create` body `log_retained_runs` (1 to 1000). |
+| `--isolate` | Local worktree isolation (ORCH-001); remote mission creation returns `unsupported-remote-option`. The worker's typed `mission.create` accepts `isolate`, but the coordinator does not forward it yet. |
+| `--log-rotations` | `mission.create` body `log_rotations` (0 to 20). |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
 | `--native` | `mission.start` params or `mission.create` body `native_tui`. |
 | `--prompt` | `task.add`/`task.amend` or `mission.create` typed `prompt` field; local file read if `--prompt-file`. |
 | `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
 | `--providers` | `mission.start` params/body or `mission.create` body `providers`. |
 | `--routes` | `mission.start` params/body or `mission.create` body `routes`. |
+| `--template` | Exclusion: local template file for `mission create` (and the output path of `mission export`); refused with `--target`. No REST operation. |
 | `--teams` | `mission.create` body `teams`; mission edit maps to `mission.settings.patch`. |
 | `--token-spend` | `mission.create` body `token_spend`; mission edit maps to `mission.settings.patch`. |
 | `--trust-folder` | `mission.create` body `trust_folder`; worker only accepts a cwd inside its enrolled real-path roots. |
-| `--verifier-arg` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
-| `--verifier-file` | Local verifier tracking; remote mission creation returns `unsupported-remote-option`. |
-| `--verifier-timeout` | Local verifier execution setting; remote mission creation returns `unsupported-remote-option`. |
+| `--verifier-name` | `mission.create` body `verifier_name`: a verifier declared as `[bridge.verifiers.<name>]` (`argv`, optional `files` relative to the mission folder, `timeout_seconds`) in the worker's llm-tools configuration. An undeclared name returns `unknown-verifier`. Also valid locally. |
+| `--verifier-arg` | Local only: a verifier command line is never accepted over the network (D47); remote mission creation returns `unsupported-remote-option`. Use `--verifier-name`. |
+| `--verifier-file` | Local only: a verifier file path is never accepted over the network (D47); returns `unsupported-remote-option`. Declare `files` in the worker's `[bridge.verifiers.<name>]`. |
+| `--verifier-timeout` | `mission.create` body `verifier_timeout` (seconds, above 0 up to 3600); overrides the declared `timeout_seconds` of the named verifier. |
 | `--mission` | Mission selector populates `mission_id` in typed request or `worker`-qualified mission REST path. |
 | `--suspend-when-rate-limited` | `mission.settings.patch` field `suspend_when_rate_limited`. |
 | `--all-missions` | Local inspection filter; no remote typed operation. |
@@ -399,6 +421,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--after-task` | Local `pause`/`stop` timing (steering intent `pause-after-iteration` or `stop-after-task`). Refused with `--target`; use `steer` remotely. |
 | `--background` | Internal controller launch flag; never remote. |
 | `--bundle` | Local `doctor` diagnostic archive written to this host; no remote equivalent. |
+| `--capabilities` | Local `doctor` provider capability matrix from the registry and the evidence files on this host; no remote equivalent. |
 | `--colour` | Local terminal rendering for `theme`; no API field. |
 | `--hold` | `task.reject` typed field `hold`. |
 | `--mode` | `mission.create` and `mission.start` typed fields `headless` and `native_tui`, set by the client from the one choice. |
@@ -408,7 +431,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--since` | `mission.events` typed field `since_seconds`; the request uses `POST /api/v1/commands` because the events resource pages by cursor only. |
 | `--to` | `mission.steer` typed field `route` for handoff (same as `--route`). |
 | `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
-| `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
+| `--verifier` | Local only (D47); remote mission creation returns `unsupported-remote-option`. Use `--verifier-name`. |
 | `--yes` | Confirmation for `cancel` and `mission delete`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. `mission delete` always asks (a mission the worker would refuse gets no question, only the refusal), and the prompt names the mission. |
 | `-f` | Short form of `--follow` for `events`. |
 | `-j` | Short form of `--json`. |
@@ -483,3 +506,15 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/worker/terminal/{session_id}` |
 
 The regression test enumerates the argparse tree and Rust route policy table. Adding a command, option, or route requires updating this inventory; route method/path pairs are checked for exact coverage.
+
+## Worker placement (ORCH-009)
+
+`POST /api/v1/missions` without `worker` lets the coordinator choose the worker. A worker is eligible when the token may use it (a token restricted to some workers only ever sees those, also in the 409 reasons), it is online, its policy allows control and mission creation, the request `cwd` is inside one of its `allow_root` paths (compared by path component, `..` refused; otherwise `folder-not-allowed`), and, when the body names `providers`, the worker's latest `usage.snapshot` result reports one of them `ready`. When the body names `routes`, the snapshot's `routes` rows (`{route, provider, available}`, present when routes are configured on the worker) are checked: the worker is excluded only when every requested route has a row and none is available; a route without a row is unknown, does not exclude the worker, and the reason says `route readiness unknown`. The coordinator uses a snapshot that is at most 300 seconds old. For the other workers it starts one `usage.snapshot` fetch each (or reuses an unfinished fetch younger than 25 seconds), waits for all of them together and for at most 20 seconds in total (the worker's own bound), and treats a worker without an answer as having no usage snapshot. The test hook `BRIDGE_PLACEMENT_USAGE_WAIT_MS` shortens that wait. A request with an `Idempotency-Key` that was placed before returns the original worker and `placement`, even when the snapshots have changed since (the answer is kept in the coordinator `meta` table under `placement:<key>` and pruned with the create command it belongs to). A request that names neither providers nor routes has no readiness condition. The eligible worker with the fewest active missions (`CREATED`, `RUNNING`, `PAUSED`, `STOPPING`) is chosen; a tie goes to the lowest worker name. A named `worker` always wins and is not checked against these conditions.
+
+The response is the usual command envelope plus `placement`:
+
+```json
+{"request": {"operation": "mission.create"}, "placement": {"worker": "beta", "reason": "codex ready; 1 active mission; fewest of 2 eligible workers"}}
+```
+
+When no worker is eligible the answer is `409` with problem type `no-eligible-worker` and `error.details.workers`, a map of worker name to reason (`offline`, `does not allow control`, `does not allow mission creation`, `no usage snapshot available`, `none of codex is ready`).

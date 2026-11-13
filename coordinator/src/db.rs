@@ -1871,7 +1871,10 @@ impl Db {
         } = batch;
         let mut c = self.c()?;
         let tx = c.transaction()?;
-        let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;
+        let (cursor, previous_mission_cursor): (i64, i64) =
+            tx.query_row("SELECT event_cursor, mission_cursor FROM workers WHERE name=?", params![worker], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if after != cursor as u64 {
             return Ok(EventsOutcome::Nack { expected: cursor as u64 });
         }
@@ -1916,6 +1919,10 @@ impl Db {
             }
         }
         let mission_cap_over = if missions.is_some() { Some(enforce_mission_cap(&tx, worker, &inserted_missions, MAX_MISSIONS_PER_WORKER)?) } else { None };
+        // `stale` compares the two cursors, so it must mean that mission data is really behind. A
+        // batch of heartbeats from a worker that predates `mission_cursor` cannot change a mission
+        // summary: when the copy was current before the batch, it stays current.
+        let mission_cursor = mission_cursor.or_else(|| (previous_mission_cursor == cursor && crate::protocol::heartbeat_only(events)).then_some(through));
         // One statement for the whole worker row update: the cursors and the time live on one page.
         tx.execute(
             "UPDATE workers SET event_cursor=?1, last_event_at=?2, mission_cursor=COALESCE(?3, mission_cursor) WHERE name=?4",
@@ -2019,6 +2026,45 @@ impl Db {
         self.r_after_writes()?
             .query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)
             .optional()
+    }
+
+    /// The most recently finished command of `operation` for `worker`, if its result body is still kept.
+    pub fn latest_done_command(&self, worker: &str, operation: &str) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state='done' AND result IS NOT NULL ORDER BY updated_at DESC LIMIT 1"),
+                params![worker, operation],
+                command_row,
+            )
+            .optional()
+    }
+
+    /// An unfinished command of `operation` for `worker` created at or after `since`.
+    pub fn open_command(&self, worker: &str, operation: &str, since: i64) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state!='done' AND created_at>=? ORDER BY created_at DESC LIMIT 1"),
+                params![worker, operation, since],
+                command_row,
+            )
+            .optional()
+    }
+
+    /// The placement answer given to a create request with this idempotency key.
+    pub fn placement_get(&self, request_id: &str) -> R<Option<Value>> {
+        let text: Option<String> = self
+            .r_after_writes()?
+            .query_row("SELECT value FROM meta WHERE key=?", params![format!("placement:{request_id}")], |row| row.get(0))
+            .optional()?;
+        Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    pub fn placement_put(&self, request_id: &str, placement: &Value) -> R<()> {
+        self.c()?.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("placement:{request_id}"), placement.to_string()],
+        )?;
+        Ok(())
     }
 
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
@@ -2343,6 +2389,19 @@ impl Db {
                 params![excess],
             )?;
             drop(c);
+            std::thread::sleep(MAINTENANCE_PAUSE);
+        }
+        // A stored placement answer lives as long as the create command it belongs to: the age and the
+        // row cap above remove the command, and its answer goes with it.
+        loop {
+            let n = self.c()?.execute(
+                "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'placement:%' \
+                 AND substr(key, 11) NOT IN (SELECT request_id FROM commands) LIMIT ?1)",
+                params![MAINTENANCE_BATCH],
+            )?;
+            if (n as i64) < MAINTENANCE_BATCH {
+                break;
+            }
             std::thread::sleep(MAINTENANCE_PAUSE);
         }
         self.c()?

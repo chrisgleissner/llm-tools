@@ -270,6 +270,97 @@ async fn event_batch_updates_mission_inventory_and_caught_up_status() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn heartbeat_events_do_not_make_a_caught_up_worker_stale() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let stale = |list: &Value| -> Vec<bool> { list["missions"].as_array().unwrap().iter().map(|m| m["stale"].as_bool().unwrap()).collect() };
+
+    // A worker that predates mission_cursor sends only the events. Heartbeats and capacity
+    // refreshes cannot change a mission summary, so they leave the stored copy current.
+    fw.send(
+        "events",
+        json!({"after": 0, "through": 2, "events": [
+            {"id": 1, "mission_id": "m1", "kind": "controller-heartbeat", "data": {}},
+            {"id": 2, "mission_id": "m1", "kind": "capacity-refresh", "data": {}}
+        ]}),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert_eq!(stale(&list), vec![false], "{list}");
+
+    // A mixed batch includes an event that can change a mission, so the copy is stale again.
+    fw.send(
+        "events",
+        json!({"after": 2, "through": 4, "events": [
+            {"id": 3, "mission_id": "m1", "kind": "controller-heartbeat", "data": {}},
+            {"id": 4, "mission_id": "m1", "kind": "task-status", "data": {}}
+        ]}),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert_eq!(stale(&list), vec![true], "{list}");
+
+    // Heartbeats after that do not hide the missing refresh, and a batch that carries its
+    // own mission_cursor makes the copy current again.
+    fw.send(
+        "events",
+        json!({"after": 4, "through": 5, "events": [{"id": 5, "mission_id": "m1", "kind": "controller-heartbeat", "data": {}}]}),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert_eq!(stale(&list), vec![true], "{list}");
+    fw.send(
+        "events",
+        json!({"after": 5, "through": 6, "mission_cursor": 6, "events": [{"id": 6, "kind": "task-status"}], "missions": []}),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert_eq!(stale(&list), vec![false], "{list}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mission_list_serves_attention_and_task_counts_when_the_worker_reports_them() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+
+    // The hello of an older worker (see Fw::connect) has neither field: the list omits them.
+    let (_, list) = api.get("/api/v1/missions").await;
+    let legacy = &list["missions"][0]["mission"];
+    assert!(legacy.get("attention").is_none() && legacy.get("task_counts").is_none(), "{list}");
+
+    let attention = json!({"kind": "approval", "message": "task 2 awaits your review", "tasks": [2]});
+    fw.send(
+        "events",
+        json!({"after": 0, "through": 1, "mission_cursor": 1,
+        "events": [{"id": 1, "mission_id": "m1", "kind": "task-status", "data": {}}],
+        "missions": [
+            {"id": "m1", "name": "mission", "status": "RUNNING", "folder": "proj", "updated_at": null,
+             "task_counts": {"VERIFYING": 1, "QUEUED": 2}, "attention": attention},
+            {"id": "m2", "name": "quiet", "status": "RUNNING", "folder": "proj", "updated_at": null,
+             "task_counts": {"RUNNING": 1}, "attention": null}
+        ]}),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    let by_id = |id: &str| list["missions"].as_array().unwrap().iter().find(|m| m["mission"]["id"] == id).unwrap().clone();
+    assert_eq!(by_id("m1")["mission"]["attention"], attention);
+    assert_eq!(by_id("m1")["mission"]["task_counts"], json!({"VERIFYING": 1, "QUEUED": 2}));
+    assert!(by_id("m2")["mission"]["attention"].is_null());
+    assert_eq!(by_id("m1")["stale"], false);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_round_trip() {
     let env = boot().await;
     let api = env.admin().await;

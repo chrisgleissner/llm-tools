@@ -1,6 +1,7 @@
 // Bundles src/ into dist/ with esbuild: hashed app-HASH.js / app-HASH.css and an index.html that references them.
 import { build } from "esbuild";
-import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -15,7 +16,36 @@ if (process.platform === "win32" || !existsSync("../llm_tools/bridge_tui.py")) {
 
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });
+// The xterm.js stylesheet is only needed on a mission page: it is its own hashed file that the terminal chunk loads, so it stays out of the first load.
+const xtermCss = await build({
+  entryPoints: { xterm: "node_modules/@xterm/xterm/css/xterm.css" },
+  bundle: true,
+  minify: true,
+  outdir: "dist",
+  entryNames: "[name]-[hash]",
+  metafile: true,
+  logLevel: "warning",
+});
+const xtermFile = Object.keys(xtermCss.metafile.outputs).map((p) => basename(p)).find((f) => f.endsWith(".css"));
+if (!xtermFile) throw new Error("esbuild produced no xterm css output");
+// Page stylesheets that belong to lazy routes are separate hashed files too. The route chunk's loader fetches the stylesheet in
+// parallel with the chunk and waits for both before it renders (src/route-css.ts), so the first-load CSS stays small.
+const routeCssEntries = { fleet: "src/css/fleet.css", auth: "src/css/auth.css", mission: "src/css/route-mission.css" };
+const routeCss = await build({
+  entryPoints: routeCssEntries,
+  bundle: true,
+  minify: true,
+  outdir: "dist",
+  entryNames: "[name]-[hash]",
+  metafile: true,
+  logLevel: "warning",
+});
+const routeCssFiles = Object.fromEntries(
+  Object.entries(routeCss.metafile.outputs).map(([out, o]) => [Object.entries(routeCssEntries).find(([, src]) => src === o.entryPoint)?.[0] ?? "", `/${basename(out)}`]),
+);
+for (const name of Object.keys(routeCssEntries)) if (!routeCssFiles[name]) throw new Error(`esbuild produced no ${name} route css output`);
 const result = await build({
+  define: { __XTERM_CSS__: JSON.stringify(`/${xtermFile}`), __ROUTE_CSS__: JSON.stringify(routeCssFiles) },
   entryPoints: { app: "src/main.ts" },
   bundle: true,
   minify: true,
@@ -43,6 +73,18 @@ const outputs = [...Object.keys(result.metafile.outputs), ...Object.keys(css.met
 const js = outputs.find((f) => f.startsWith("app-") && f.endsWith(".js"));
 const style = outputs.find((f) => f.endsWith(".css"));
 if (!js || !style) throw new Error("esbuild produced no js/css output");
-const html = readFileSync("src/index.html", "utf8").replace("{{JS}}", js).replace("{{CSS}}", style);
+// The browser learns the whole first-load graph from the HTML instead of from the entry script, and the session state starts with the document:
+// without these hints the entry script, then its static chunks, then the sign-in check follow one another (one round trip each, PRD-037 T37).
+const entryOutput = Object.entries(result.metafile.outputs).find(([, output]) => output.entryPoint === "src/main.ts")?.[1];
+const preload = [
+  ...(entryOutput?.imports ?? []).filter((i) => i.kind === "import-statement").map((i) => `<link rel="modulepreload" href="/${basename(i.path)}">`),
+  '<link rel="preload" as="fetch" href="/api/v1/auth/state" crossorigin="anonymous">',
+].join("\n");
+const html = readFileSync("src/index.html", "utf8").replace("{{JS}}", js).replace("{{CSS}}", style).replace("{{PRELOAD}}", preload);
 writeFileSync("dist/index.html", html);
 console.log(`dist/index.html -> ${js}, ${style}`);
+// A gzip copy of every text asset sits next to it (`app-HASH.js.gz`): the coordinator sends it to a client that accepts gzip, which cuts the bytes of the first
+// load by about 75% on a slow link (PRD-037 T37). The plain files stay, for clients that do not accept gzip and for the budget check.
+for (const file of readdirSync("dist")) {
+  if (/\.(html|js|css|svg|json)$/.test(file)) writeFileSync(`dist/${file}.gz`, gzipSync(readFileSync(`dist/${file}`), { level: 9 }));
+}

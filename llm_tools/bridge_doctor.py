@@ -97,7 +97,7 @@ def signin_state(cli: str, env: Mapping[str, str] | None = None) -> tuple[bool |
     return logged_in, detail.removeprefix("run: ")
 
 
-def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, str] | None = None, *, check_version: bool = False) -> dict[str, Any]:
     """Whether the command behind ``name`` is installed and appears signed in."""
     environment = os.environ if env is None else env
     cli = launch_cli or name
@@ -109,10 +109,24 @@ def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, s
         return {"name": name, "launch_cli": cli, "installed": False, "path": None, "logged_in": None, "detail": f"{binary} is not on PATH"}
     check = _LOGIN_CHECKS.get(cli)
     logged_in, detail = check(environment) if check else (None, "")
-    return {"name": name, "launch_cli": cli, "installed": True, "path": path, "logged_in": logged_in, "detail": detail}
+    result = {"name": name, "launch_cli": cli, "installed": True, "path": path, "logged_in": logged_in, "detail": detail}
+    drift = _version_drift(cli, None if env is None else environment.get("PATH")) if check_version else None
+    if drift:
+        result["version_drift"] = drift
+    return result
 
 
-def provider_checks(entries: Sequence[tuple[str, str | None]], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+def _version_drift(cli: str, path: str | None = None) -> str | None:
+    """PROV-011: a warning when the installed CLI's minor version is newer than its evidence file (none without evidence)."""
+    from . import bridge_capabilities
+
+    evidence = bridge_capabilities.load_evidence(cli)
+    if evidence is None:
+        return None
+    return bridge_capabilities.version_drift(bridge_capabilities.installed_version(cli, path=path), evidence)
+
+
+def provider_checks(entries: Sequence[tuple[str, str | None]], env: Mapping[str, str] | None = None, *, check_versions: bool = False) -> list[dict[str, Any]]:
     """One check per distinct ``(name, launch_cli)`` rotation entry, in rotation order."""
     seen: set[tuple[str, str | None]] = set()
     checks = []
@@ -120,7 +134,7 @@ def provider_checks(entries: Sequence[tuple[str, str | None]], env: Mapping[str,
         if (name, launch_cli) in seen:
             continue
         seen.add((name, launch_cli))
-        checks.append(provider_check(name, launch_cli, env))
+        checks.append(provider_check(name, launch_cli, env, check_version=check_versions))
     return checks
 
 

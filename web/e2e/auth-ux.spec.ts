@@ -78,7 +78,7 @@ test.describe("first-run registration", () => {
     await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
     await page.getByLabel("Repeat password").fill(PASSWORD);
     await page.getByRole("button", { name: "Create administrator" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const elapsedMs = Date.now() - started;
     if (browserName === "chromium") console.log(`UX task first sign-in: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${elapsedMs} ms`);
     await expect(page.locator(".toast.applied")).toContainText("Setup complete. You are signed in as operator");
@@ -144,10 +144,15 @@ test.describe("sign-in", () => {
   test("creating a token produces a dismissible security banner", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await page.goto("/account");
-    await page.getByLabel("Token name").fill("banner-test");
-    await page.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
     await page.getByRole("button", { name: "Create token" }).click();
+    const form = page.getByRole("dialog", { name: "Create an API token" });
+    await form.getByLabel("Token name").fill("banner-test");
+    await form.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
+    await form.getByRole("button", { name: "Create token" }).click();
+    await page.getByRole("dialog", { name: "Token created" }).getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
+    // The notices are behind a header button with their count (no banner above the page: a late notice would move the content).
+    await page.getByRole("button", { name: /^Security notifications, \d+$/ }).click();
     const banner = page.getByRole("region", { name: "Security notifications" });
     await expect(banner).toContainText("An API token was created.");
     const dismiss = banner.getByRole("button", { name: "Dismiss security notification" });
@@ -172,7 +177,7 @@ test.describe("sign-in", () => {
     await expect(progress).toHaveText("Signing in…");
     await expect(progress).toHaveAttribute("aria-live", "polite");
     await expect(page.getByRole("button", { name: "Signing in…" })).toBeDisabled();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
   });
 
   test("wrong credentials give the same message for a wrong password and an unknown user", async ({ page, coord }) => {
@@ -241,7 +246,7 @@ test.describe("sign-in", () => {
     await navTo(page, "Missions");
     await expect(page.getByRole("heading", { name: "No missions yet" })).toBeVisible();
     await context.clearCookies();
-    await page.getByLabel("Search missions").fill("x");
+    await page.getByLabel("Search missions", { exact: true }).fill("x");
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.locator("#login-notice")).toHaveAttribute("data-kind", "expired");
     await expect(page.locator("#login-notice")).toContainText("session expired");
@@ -275,7 +280,7 @@ test.describe("sign-in", () => {
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await expect(page.getByLabel("Remember this device")).not.toBeChecked();
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     expect((await cookie())?.expires).toBe(-1);
     await navTo(page, "Account");
     await expect(page.locator("#acct-session").locator("..")).toContainText("Not remembered");
@@ -286,7 +291,7 @@ test.describe("sign-in", () => {
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await page.getByLabel("Remember this device").check();
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const days = ((await cookie())?.expires ?? 0) - Date.now() / 1000;
     expect(days).toBeGreaterThan(6.9 * 86400);
     expect(days).toBeLessThan(7.1 * 86400);
@@ -316,15 +321,16 @@ test.describe("account menu and password change", () => {
     await expect(button).toHaveAttribute("aria-expanded", "false");
     await button.click();
     await expect(button).toHaveAttribute("aria-expanded", "true");
-    const panel = page.locator("#account-panel");
-    await expect(panel).toContainText("admin");
-    await expect(panel).toContainText("This browser session");
+    const panel = page.getByRole("menu");
+    await expect(button).toHaveAccessibleName(/admin/);
+    await expect(panel.getByRole("menuitem", { name: "Account" })).toBeVisible();
+    await expect(panel.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
     await expectAccessible(page, "account menu open");
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
     await expect(button).toBeFocused();
     await button.click();
-    await panel.getByRole("button", { name: "Change password" }).click();
+    await panel.getByRole("menuitem", { name: "Account" }).click();
     await expect(page).toHaveURL(/\/account$/);
     await expect(page.getByRole("heading", { name: "Account" })).toBeVisible();
   });
@@ -352,18 +358,28 @@ test.describe("account menu and password change", () => {
     await setupViaUi(page, coord);
     await navTo(page, "Account");
     await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
-    await page.getByLabel("Token name").fill("automation-key");
-    await page.getByLabel("read", { exact: true }).uncheck();
-    await page.getByLabel("operate", { exact: true }).check();
+    // Creating a token happens in a dialog that ends in the one-time secret.
     await page.getByRole("button", { name: "Create token" }).click();
-    const secret = page.locator(".token-secret code");
+    const form = page.getByRole("dialog", { name: "Create an API token" });
+    await form.getByLabel("Token name").fill("automation-key");
+    await form.getByLabel("read", { exact: true }).uncheck();
+    await form.getByLabel("operate", { exact: true }).check();
+    await form.getByRole("button", { name: "Create token" }).click();
+    const shown = page.getByRole("dialog", { name: "Token created" });
+    const secret = shown.locator(".token-secret code");
     await expect(secret).toContainText(/^.{30,}$/);
+    await expect(shown.getByRole("button", { name: "Copy token" })).toBeFocused();
+    // Escape asks before the secret is discarded.
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "Close without saving it?" }).getByRole("button", { name: "Go back" }).click();
+    await expect(secret).toBeVisible();
+    await shown.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Not used yet");
-    await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await page.getByRole("button", { name: "Actions for token automation-key" }).click();
+    await page.getByRole("menuitem", { name: "Revoke token" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
-    await expect(secret).toHaveCount(1);
   });
 
   test("API tokens can be restricted to selected workers", async ({ page, coord }) => {
@@ -371,11 +387,14 @@ test.describe("account menu and password change", () => {
     coord.cli("worker", "add", "token-worker-a");
     coord.cli("worker", "add", "token-worker-b");
     await page.goto("/account");
-    const workers = page.getByLabel("Allowed workers (optional)");
+    await page.getByRole("button", { name: "Create token" }).click();
+    const form = page.getByRole("dialog", { name: "Create an API token" });
+    const workers = form.getByLabel("Allowed workers (optional)");
     await expect(workers.locator("option")).toHaveCount(2);
     await workers.selectOption("token-worker-a");
-    await page.getByLabel("Token name").fill("worker-limited-key");
-    await page.getByRole("button", { name: "Create token" }).click();
+    await form.getByLabel("Token name").fill("worker-limited-key");
+    await form.getByRole("button", { name: "Create token" }).click();
+    await page.getByRole("dialog", { name: "Token created" }).getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Workers token-worker-a");
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("Workers token-worker-b");
   });

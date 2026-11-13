@@ -10,12 +10,10 @@
  * identifiers stay unknown and are never used to make a security decision.
  */
 
-const ZERO_AAGUID = "00000000-0000-0000-0000-000000000000";
-const AAGUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 // Deliberately small: known common names, no network request and no vendor
 // supplied icon or markup. Additions should cite a stable source revision.
-const PROVIDER_BY_AAGUID: Readonly<Record<string, string>> = Object.freeze({
+const PROVIDER_BY_AAGUID: Readonly<Record<string, string>> = {
+  "00000000-0000-0000-0000-000000000000": "Provider not identified",
   "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4": "Google Password Manager",
   "531126d6-e717-415c-9320-3d9aa6981239": "Dashlane",
   "bada5566-a7aa-401f-bd96-45619a55120d": "1Password",
@@ -26,14 +24,12 @@ const PROVIDER_BY_AAGUID: Readonly<Record<string, string>> = Object.freeze({
   "50726f74-6f6e-5061-7373-50726f746f6e": "Proton Pass",
   "b78a0a55-6ef8-d246-a042-ba0f6d55050c": "LastPass",
   "d3452668-01fd-4c12-926c-83a4204853aa": "Microsoft Password Manager",
-});
+};
 
 /** Return a display-only label without exposing an unrecognized identifier. */
 export function passkeyProviderName(aaguid: unknown): string {
-  if (typeof aaguid !== "string" || aaguid.length === 0) return "Provider not reported";
-  if (aaguid.length !== 36 || !AAGUID_PATTERN.test(aaguid.toLowerCase())) return "Unknown provider";
-
-  const normalized = aaguid.toLowerCase();
-  if (normalized === ZERO_AAGUID) return "Provider not identified";
-  return PROVIDER_BY_AAGUID[normalized] ?? "Unknown provider";
+  if (typeof aaguid !== "string" || !aaguid) return "Provider not reported";
+  // Only exact table keys match, so a malformed identifier and an unlisted one both read as unknown. Inherited object properties are not labels.
+  const name = PROVIDER_BY_AAGUID[aaguid.toLowerCase()];
+  return typeof name === "string" ? name : "Unknown provider";
 }

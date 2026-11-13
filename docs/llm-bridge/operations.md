@@ -1004,6 +1004,19 @@ Turn the feature off with:
 task_notices = false # default true
 ```
 
+### Named verifiers
+
+A mission created through the coordinator may not carry a verifier command or file. It names a verifier that the worker declares in its own `config.toml`:
+
+```toml
+[bridge.verifiers.unit]
+argv = ["python", "-m", "pytest", "-q"]
+files = ["pytest.ini"]   # optional, relative to the mission folder; hashed by the verifier guard
+timeout_seconds = 600    # optional, default 300, at most 3600
+```
+
+Use it with `mission create --verifier-name unit`, locally or with `--target`. An undeclared name fails with `unknown-verifier`.
+
 ### Provider native teams and token spend preference
 
 New missions default to provider-native team guidance enabled and Medium token
@@ -1517,7 +1530,7 @@ Event classes and audit details are in [Retention reference](#retention-referenc
 ### Database upgrades, backups and downgrades
 
 The database records its schema version in SQLite's `PRAGMA user_version`
-(currently 10). Migrations are forward-only and run automatically the first time a
+(currently 11). Migrations are forward-only and run automatically the first time a
 newer `llm-bridge` opens an older database, whichever command opens it. The
 release history has used versions 2, 3, 6 and 10 (1.1.0 and 1.2.x shipped 6; 1.3.0
 shipped 10).
@@ -1726,6 +1739,25 @@ cycle ID and wake unit.
 - A bounded live probe verified Codex native reply, controller stop, exact-ID
   restoration and context recall. Claude and Copilot live restoration is
   unverified.
+
+## Provider capabilities and prompt visibility
+
+`llm-bridge doctor --capabilities` (add `--json` for machine output) prints, for each provider and
+capability, `supported`, `unsupported` or `unverified`, with the evidence date and CLI version from
+`llm_tools/provider_evidence/<provider>.json`. `unverified` means Bridge implements the capability but no
+evidence file records it. `docs/llm-bridge/provider-capabilities.md` is generated from the same registry
+(`llm_tools/bridge_providers.py`); regenerate it with `python -m llm_tools.bridge_capabilities --write-doc`.
+`doctor` also warns when an installed provider CLI has a newer minor version than its evidence.
+
+Native missions cannot run on MiniMax (`mmx` offers text chat only) or z.ai (capacity only, no CLI).
+Starting one fails with a message that names the alternative: a route on Kilo or OpenCode.
+
+Prompt visibility: Bridge passes the prompt to Claude Code, Codex, Copilot, Kilo and OpenCode as a
+command-line argument, so it is visible to other local users in the process list. For Kilo 7.3.45 and
+OpenCode 1.18.3 the help of `run` documents a positional `message..` and `--file` (an attachment that
+does not replace the message); it documents no prompt-file or standard-input option, so Bridge cannot
+keep the prompt out of the arguments for them. The registry field `prompt_channel` records this per
+provider and switches a provider to a file or standard-input form once its CLI documents one.
 
 ## Provider trust boundary
 

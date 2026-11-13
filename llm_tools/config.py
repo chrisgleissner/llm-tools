@@ -45,6 +45,7 @@ Schema::
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,7 @@ from .capacity import ALL_PROVIDERS
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
 _TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage", "bridge"})
-_BRIDGE_KEYS = frozenset({"theme", "teams", "token_spend", "retention", "task_notices"})
+_BRIDGE_KEYS = frozenset({"theme", "teams", "token_spend", "retention", "task_notices", "verifiers"})
 _USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
@@ -79,6 +80,8 @@ _RALPH_KEYS = frozenset(
         "min_iteration_seconds",
         "prefix",
         "prefix_usage_interval",
+        "failure_backoff_base",
+        "failure_backoff_max",
     }
 )
 _SCHEDULER_KEYS = frozenset(
@@ -276,6 +279,8 @@ def _validate(raw: Any) -> dict[str, Any]:
             not isinstance(bridge["token_spend"], str) or bridge["token_spend"] not in {"low", "medium", "high"}
         ):
             _fail("bridge.token_spend must be low, medium, or high")
+        if "verifiers" in bridge:
+            _validate_verifiers(bridge["verifiers"])
         if "retention" in bridge:
             from . import bridge_retention  # stdlib-only module; imported here to keep config start-up lean
 
@@ -300,6 +305,47 @@ def _validate(raw: Any) -> dict[str, Any]:
         _validate_capacity_providers(providers)
     _validate_routes(raw.get("routes"), providers or {})
     return raw
+
+
+VERIFIER_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_VERIFIER_KEYS = frozenset({"argv", "files", "timeout_seconds"})
+
+
+class UnknownVerifier(ValueError):
+    """A mission names a verifier that ``[bridge.verifiers]`` does not declare."""
+
+
+def _validate_verifiers(verifiers: Any) -> None:
+    if not isinstance(verifiers, dict):
+        _fail("bridge.verifiers must be a table of verifier name to definition")
+    for name, block in verifiers.items():
+        where = f"bridge.verifiers.{name}"
+        if not VERIFIER_NAME_PATTERN.fullmatch(str(name)):
+            _fail(f"{where}: the name must be lowercase letters, digits, '-' or '_' (at most 64 characters)")
+        if not isinstance(block, dict):
+            _fail(f"{where} must be a table")
+        unknown = set(block) - _VERIFIER_KEYS
+        if unknown:
+            _fail(f"{where}: unknown key(s): {', '.join(sorted(unknown))} (allowed: {', '.join(sorted(_VERIFIER_KEYS))})")
+        argv = block.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv) or any("\x00" in a for a in argv):
+            _fail(f"{where}.argv must be a non-empty list of strings")
+        files = block.get("files", [])
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            _fail(f"{where}.files must be a list of paths relative to the mission folder")
+        timeout = block.get("timeout_seconds", 300)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
+            _fail(f"{where}.timeout_seconds must be a number between 0 and 3600")
+
+
+def named_verifier(cfg: dict[str, Any], name: str) -> dict[str, Any]:
+    """The ``[bridge.verifiers.<name>]`` definition as ``{argv, files, timeout_seconds}``, or raise ``UnknownVerifier``."""
+    bridge = cfg.get("bridge") if isinstance(cfg, dict) else None
+    table = bridge.get("verifiers") if isinstance(bridge, dict) else None
+    block = table.get(name) if isinstance(table, dict) and isinstance(name, str) else None
+    if not isinstance(block, dict):
+        raise UnknownVerifier(f"unknown verifier {name!r}: declare it as [bridge.verifiers.{name}] in this machine's llm-tools config")
+    return {"argv": list(block["argv"]), "files": list(block.get("files", [])), "timeout_seconds": float(block.get("timeout_seconds", 300))}
 
 
 def _validate_budget(budget: Any) -> None:
