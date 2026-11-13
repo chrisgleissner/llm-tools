@@ -365,6 +365,7 @@ fn open_reader(path: &Path) -> R<Connection> {
 struct LockStats {
     max_hold_us: AtomicU64,
     peak_waiters: AtomicUsize,
+    acquisitions: AtomicU64,
 }
 
 /// Longest time one caller held the connection, and the most callers that waited for it at once.
@@ -372,6 +373,8 @@ struct LockStats {
 pub struct LockSnapshot {
     pub max_hold: std::time::Duration,
     pub peak_waiters: usize,
+    /// Number of times the connection was handed to a caller.
+    pub acquisitions: u64,
 }
 
 pub struct Db {
@@ -890,6 +893,7 @@ impl Db {
         // The gate admits one caller at a time, so this lock is never contended. A mutex poisoned by a
         // handler that panicked is recovered.
         let inner = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.stats.acquisitions.fetch_add(1, Ordering::Relaxed);
         Ok(ConnGuard { inner: Some(inner), gate: &self.gate, stats: &self.stats, since: std::time::Instant::now() })
     }
 
@@ -948,6 +952,7 @@ impl Db {
         LockSnapshot {
             max_hold: std::time::Duration::from_micros(self.stats.max_hold_us.load(Ordering::Relaxed)),
             peak_waiters: self.stats.peak_waiters.load(Ordering::Relaxed),
+            acquisitions: self.stats.acquisitions.load(Ordering::Relaxed),
         }
     }
 
