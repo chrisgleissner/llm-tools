@@ -241,7 +241,7 @@ def format_mission_list(missions: list[dict[str, Any]], now: float | None = None
     if not missions:
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
     rows = [
-        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), (_clip(item.get("name", ""), _NAME_LIMIT) if sys.stdout.isatty() else " ".join(printable(item.get("name", "")).split())), home_relative(item.get("cwd", ""))]
+        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), (_clip(item.get("name", ""), _NAME_LIMIT) if sys.stdout.isatty() else " ".join(printable(item.get("name", "")).split())), home_relative(item.get("cwd", "")) + (f" [{item.get('branch')}]" if item.get("isolation") == "worktree" and item.get("branch") else "")]
         for item in missions
     ]
     return table(["ID", "STATUS", "UPDATED", "NAME", "FOLDER"], rows)
@@ -596,12 +596,13 @@ def provider_check_text(check: dict[str, Any], *, mission: bool = True) -> str:
     if check.get("installed") is None:
         return f"{name}: {check.get('detail') or 'not checked'}"
     login = check.get("logged_in")
+    drift = f" · warning: {check['version_drift']}" if check.get("version_drift") else ""
     if login is True:
-        return f"{name}: installed, logged in"
+        return f"{name}: installed, logged in{drift}"
     if login is False:
         hint = f" ({check['detail']})" if check.get("detail") else ""
-        return f"{name}: installed, not logged in{hint}"
-    return f"{name}: installed, login not checked"
+        return f"{name}: installed, not logged in{hint}{drift}"
+    return f"{name}: installed, login not checked{drift}"
 
 
 def format_doctor(report: dict[str, Any]) -> str:
@@ -848,6 +849,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         f"Folder      {home_relative(mission.get('cwd', ''))}",
         f"Controller  {controller_text}",
     ]
+    if mission.get("isolation") == "worktree":
+        lines.insert(2, f"Isolation   worktree on branch {mission.get('branch')} from {str(mission.get('base_commit') or '')[:10]} in {home_relative(mission.get('origin_cwd') or '')} · merge it back with: git merge {mission.get('branch')}")
     rotation = rotation_names(config)
     if rotation:
         lines.append(f"Rotation    {' → '.join(rotation)}")

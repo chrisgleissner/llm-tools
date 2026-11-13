@@ -80,6 +80,8 @@ _RALPH_KEYS = frozenset(
         "min_iteration_seconds",
         "prefix",
         "prefix_usage_interval",
+        "failure_backoff_base",
+        "failure_backoff_max",
     }
 )
 _SCHEDULER_KEYS = frozenset(

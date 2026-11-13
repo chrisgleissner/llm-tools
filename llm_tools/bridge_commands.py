@@ -371,7 +371,7 @@ def _mission_delete(store: BridgeStore | None, request: CommandRequest, params: 
         )
     from .bridge_delete import delete_mission
 
-    return delete_mission(request.mission_id)
+    return delete_mission(request.mission_id, force=params["force"])
 
 
 def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -405,6 +405,10 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
     if unsupported:
         raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(unsupported),
                              details={"options": unsupported})
+    if params["isolate"] != "none":
+        # Remote acceptance of worktree isolation is ORCH-008; until then a coordinator cannot request it.
+        raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): isolate",
+                             details={"options": ["--isolate"]})
     cli = _cli()
     args = argparse.Namespace(
         name=params["name"], cwd=params["cwd"], prompt=params["prompt"], prompt_file=None,
@@ -413,8 +417,10 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
         token_spend=params["token_spend"], command_template=None, trust_folder=params["trust_folder"],
         verifier_argv=[], verifier_files=[], verifier_name=params["verifier_name"], verifier_timeout=params["verifier_timeout"],
         log_max_bytes=params["log_max_bytes"], log_rotations=params["log_rotations"],
-        log_retained_runs=params["log_retained_runs"], capacity_refresh_seconds=params["capacity_refresh_seconds"],
+        log_retained_runs=params["log_retained_runs"], capacity_refresh_seconds=params["capacity_refresh_seconds"], isolate=params["isolate"],
     )
+    if args.isolate not in ("none", "worktree"):
+        raise CommandFailure("invalid-argument", "isolate must be none or worktree")
     if params["verifier_name"] is not None and not config_module.VERIFIER_NAME_PATTERN.fullmatch(params["verifier_name"]):
         raise CommandFailure("unknown-verifier", "verifier_name is not a valid verifier name", details={"verifier_name": params["verifier_name"][:64]})
     try:
@@ -753,7 +759,7 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "auto_continue": Param(bool, default=False), "include_config": Param(bool, default=False),
                        "verifier_name": Param(str), "verifier_timeout": Param(float),
                        "log_max_bytes": Param(int, default=4 * 1024 * 1024), "log_rotations": Param(int, default=3),
-                       "log_retained_runs": Param(int, default=20), "capacity_refresh_seconds": Param(int, default=60)}, _mission_create),
+                       "log_retained_runs": Param(int, default=20), "capacity_refresh_seconds": Param(int, default=60), "isolate": Param(str, default="none")}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
                       {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
                        "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
@@ -806,7 +812,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.delete", "Delete a finished or never-started mission and its local state", True, True,
-                      {"confirm": Param(bool, default=False)}, _mission_delete),
+                      {"confirm": Param(bool, default=False), "force": Param(bool, default=False)}, _mission_delete),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(
             "task.list",

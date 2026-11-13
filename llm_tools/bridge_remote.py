@@ -388,7 +388,11 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         from .bridge import _resolve_mode_args
 
         _resolve_mode_args(args)  # --mode and the older --native/--headless flags become one choice
+        if getattr(args, "template", None):
+            raise ValueError("mission create --template reads a file on this computer and is not available with --target; create the mission on the worker, or pass the objective with --prompt")
         unsupported_options: list[str] = []
+        if getattr(args, "isolate", "none") != "none":
+            unsupported_options.append("--isolate")
         if args.verifier_command is not None:
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):
@@ -506,6 +510,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         params = {"kind": args.kind, "task": getattr(args, "task", None),
                   "task_id": getattr(args, "task_by_id", None), "route": args.route, "prompt": _read_text(args)}
         return make("mission.steer", params), lambda value: fmt.format_command_receipt("steer", value, request.mission_id or "")
+    if command == "mission" and args.mission_action == "export":
+        raise ValueError("mission export --target is unavailable: a template holds prompts and the coordinator has no file artifact route; run it on the worker")
     if command == "backup":
         raise ValueError("backup --target is unavailable: backup contains prompts and evidence, and the coordinator has no streaming artifact route; run backup locally on the worker")
     if command == "task":

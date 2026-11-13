@@ -181,6 +181,21 @@ STATUS_REMAIN_ON_EXIT_FORMAT = (
 _MISSION_SESSION_RE = re.compile(r"mission-([0-9a-f]{32})")
 
 
+# Run by the station-switch command (a shell started by `detach-client -E`) before `attach-session`.
+_FIT_BEFORE_ATTACH = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[7])\n"
+    "from pathlib import Path\n"
+    "from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend\n"
+    "a = sys.argv\n"
+    "h = TerminalHandle(Path(a[1]), Path(a[2]), a[3], a[4], a[5], int(a[6]))\n"
+    "try:\n"
+    "    TmuxTerminalBackend()._fit_window_to_terminal(h)\n"
+    "except Exception:\n"
+    "    pass\n"
+)
+
+
 def detach_notice(session_name: str) -> str:
     """The line shown after detaching from a mission station, or ``""`` for any other session.
 
@@ -1171,7 +1186,12 @@ class TmuxTerminalBackend:
         target = f"-t={handle.session_name}"
         probe = shlex.join([*base, "has-session", target])
         attach = shlex.join([*base, "attach-session", target])
-        return f"{probe} >/dev/null 2>&1 && {attach}"
+        # Size the window for this terminal before the client attaches, as `attach()` does; otherwise
+        # tmux resizes it after the first frame and the provider repaints (DOG-029).
+        fit = shlex.join([sys.executable, "-c", _FIT_BEFORE_ATTACH, str(handle.socket_path), str(handle.config_path),
+                          handle.session_name, handle.provider_pane, handle.bridge_pane, str(handle.bridge_rows),
+                          str(Path(__file__).resolve().parent.parent)])
+        return f"{probe} >/dev/null 2>&1 && {{ {fit} >/dev/null 2>&1; {attach}; }}"
 
     def resize(self, handle: TerminalHandle, *, cols: int, rows: int) -> None:
         self._require_owned(handle)
@@ -1659,12 +1679,10 @@ _PROVIDER_PROMPT_SEEN: OrderedDict[str, tuple[int, str, str, float]] = OrderedDi
 
 def _native_input_prompt(provider: str, screen: str) -> bool:
     """Recognize only the stable input-prompt chrome for supported native providers."""
-    normalized = provider.casefold().split("-", 1)[0]
-    if normalized == "codex":
-        return "? for shortcuts" in screen.casefold() and bool(re.search(r"(?m)^\s*›(?:\s+Ask Codex to do anything)?\s*$", screen))
-    if normalized == "claude":
-        return bool(re.search(r"(?m)^\s*❯\s*$", screen))
-    return False
+    from . import bridge_providers
+
+    spec = bridge_providers.get(provider.casefold().split("-", 1)[0])
+    return spec is not None and spec.idle_prompt is not None and spec.idle_prompt.matches(screen)
 
 
 def _codex_queued_question_count(screen: str) -> int:
@@ -1785,14 +1803,20 @@ def read_native_provider_wait(
             _PROVIDER_PROMPT_SEEN.popitem(last=False)
     idle_seconds = max(0, int(moment - changed_at))
     normalized_provider = provider.casefold().split("-", 1)[0]
-    question_count = _codex_queued_question_count(screen) if normalized_provider == "codex" else 0
-    questions = _codex_queued_questions(screen) if normalized_provider == "codex" else []
+    from . import bridge_providers
+
+    spec = bridge_providers.get(normalized_provider)
+    detector = spec.question_detector if spec is not None else bridge_providers.QUESTION_NONE
+    codex_queued = detector == bridge_providers.QUESTION_CODEX_QUEUED
+    claude_idle = detector == bridge_providers.QUESTION_CLAUDE_IDLE
+    question_count = _codex_queued_question_count(screen) if codex_queued else 0
+    questions = _codex_queued_questions(screen) if codex_queued else []
     if (
         not questions
         and session_id
         and cwd
-        and normalized_provider in {"codex", "claude"}
-        and (question_count or (idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS and normalized_provider == "claude"))
+        and (codex_queued or claude_idle)
+        and (question_count or (idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS and claude_idle))
     ):
         try:
             from .bridge_sessions import pending_operator_questions
