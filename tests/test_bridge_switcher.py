@@ -326,7 +326,9 @@ def test_finish_resolves_route_provider_and_honours_override(state: Path, tmp_pa
     backend.on_exit = lambda: store.finish_operation(operation, exit_code=0)
     finish_mission(mission_id, backend=backend, handle=HANDLE, store=store, sleep=lambda _s: None, env={"LLM_BRIDGE_FINISH_CODEX": "/exit"})
     assert backend.sent[0] == "/exit"
-    assert bridge_finish.exit_command("kilo", {}) is None
+    assert bridge_finish.exit_command("kilo", {}) == "/exit"
+    assert bridge_finish.exit_command("opencode", {}) == "/exit"
+    assert bridge_finish.exit_command("minimax", {}) is None
     assert bridge_finish.exit_command("kilo", {"LLM_BRIDGE_FINISH_KILO": "/bye"}) == "/bye"
 
 
@@ -365,8 +367,8 @@ def test_finish_refuses_headless_missing_provider_and_unknown_exit(state: Path, 
     with pytest.raises(FinishError, match="native providers only"):
         finish_mission(mission2, backend=FakeBackend(), handle=HANDLE, store=store2)
     (tmp_path / "y").mkdir()
-    store3, mission3, _t3, op3 = running_native(state, tmp_path / "y", "kilo")
-    with pytest.raises(FinishError, match="No exit command is known for kilo"):
+    store3, mission3, _t3, op3 = running_native(state, tmp_path / "y", "minimax")
+    with pytest.raises(FinishError, match="No exit command is known for minimax"):
         finish_mission(mission3, backend=FakeBackend(), handle=HANDLE, store=store3, env={})
     store3.finish_operation(op3, exit_code=0)
     with pytest.raises(FinishError, match="nothing to finish"):

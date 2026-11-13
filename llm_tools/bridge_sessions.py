@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import json
 import stat
@@ -162,6 +163,106 @@ def _session_fields(provider: str, record: Mapping[str, Any]) -> tuple[str, str,
     # evidenced by this project. Refusing to infer from filenames or a generic
     # `id` field keeps these providers UNAVAILABLE until a source is verified.
     return None
+
+
+DB_SESSION_PROVIDERS = ("kilo", "opencode")
+_DB_MAX_CANDIDATES = 50
+
+
+def session_db_path(provider: str, *, home: str | os.PathLike[str] | None = None) -> Path | None:
+    """Path of the SQLite session store of a Kilo or OpenCode install, or ``None`` for another provider."""
+    spec = bridge_providers.get(provider)
+    if spec is None or not spec.session_store:
+        return None
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path(home or Path.home()) / ".local" / "share")
+    return Path(data_home).expanduser() / spec.session_store
+
+
+def _db_session_rows(provider: str, where: str, params: tuple[object, ...], *, home: str | os.PathLike[str] | None) -> list[sqlite3.Row] | None:
+    """Read identity columns only (id, directory, parent, times) from the provider's session table."""
+    path = session_db_path(provider, home=home)
+    if path is None:
+        return None
+    try:
+        info = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        # as_uri() percent-encodes "?", "#" and "%" so they cannot end or change the URI.
+        connection = sqlite3.connect(Path(os.path.abspath(path)).as_uri() + "?mode=ro", uri=True, timeout=1.0)
+    except (OSError, sqlite3.Error):
+        return None
+    try:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT id, directory, parent_id, time_created, time_updated FROM session WHERE " + where + " LIMIT ?",
+            (*params, _DB_MAX_CANDIDATES + 1),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+
+
+def _db_row_identity(provider: str, row: sqlite3.Row, cwd: str) -> NativeSessionIdentity | None:
+    try:
+        if _absolute_cwd(str(row["directory"])) != cwd:
+            return None
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+    spec = bridge_providers.get(provider)
+    if spec is None or not spec.id_pattern.fullmatch(str(row["id"])):
+        return None
+    return NativeSessionIdentity(provider, str(row["id"]), cwd, f"{provider}:session.db")
+
+
+def discover_new_db_session(
+    provider: str,
+    *,
+    cwd: str | os.PathLike[str],
+    started_ns: int,
+    home: str | os.PathLike[str] | None = None,
+) -> NativeSessionIdentity | None:
+    """The one session a Kilo/OpenCode run created after ``started_ns`` in ``cwd``, else ``None``.
+
+    The store is searched for parentless, unarchived sessions created at or after the launch time
+    in exactly this directory. Zero matches or more than one (another run in the same directory,
+    a restored session) is ambiguous and yields ``None``: the next run then starts fresh. Never
+    "the newest session".
+    """
+    if provider not in DB_SESSION_PROVIDERS or started_ns <= 0:
+        return None
+    try:
+        expected_cwd = _absolute_cwd(cwd)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+    # The folder is filtered in SQL, so sessions of other folders cannot crowd the match out of the
+    # candidate limit. A row stores the folder as the CLI saw it: the resolved path, or the path as
+    # given when that differs. Other spellings (symlinks) are not matched; the caller starts fresh.
+    spellings = tuple(dict.fromkeys((expected_cwd, os.path.abspath(os.fspath(cwd)))))
+    marks = ",".join("?" * len(spellings))
+    rows = _db_session_rows(
+        provider,
+        f"parent_id IS NULL AND time_archived IS NULL AND time_created >= ? AND directory IN ({marks})",
+        (started_ns // 1_000_000, *spellings), home=home)
+    if rows is None or len(rows) > _DB_MAX_CANDIDATES:
+        return None
+    identities = [identity for row in rows if (identity := _db_row_identity(provider, row, expected_cwd)) is not None]
+    return identities[0] if len(identities) == 1 else None
+
+
+def _db_session_record(provider: str, session_id: str, cwd: str, *, home: str | os.PathLike[str] | None) -> NativeSessionRecord | None:
+    rows = _db_session_rows(provider, "id = ? AND time_archived IS NULL", (session_id,), home=home)
+    if not rows or len(rows) != 1:
+        return None
+    identity = _db_row_identity(provider, rows[0], cwd)
+    path = session_db_path(provider, home=home)
+    if identity is None or path is None:
+        return None
+    try:
+        modified_ns = int(rows[0]["time_updated"]) * 1_000_000
+    except (TypeError, ValueError, OverflowError):
+        return None  # NULL or non-numeric timestamp: no evidence, so no resume
+    return NativeSessionRecord(identity, path, modified_ns)
 
 
 def parse_session_metadata(
@@ -731,6 +832,8 @@ def provider_session_metadata(
         canonical_cwd = _absolute_cwd(cwd)
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
+    if normalized in DB_SESSION_PROVIDERS:
+        return _db_session_record(normalized, session_id, canonical_cwd, home=home)
     if normalized == "codex":
         codex_home = Path(os.environ.get("CODEX_HOME", str(Path(home or Path.home()) / ".codex"))).expanduser()
         return next((record for record in codex_session_records(codex_home / "sessions", cwd=cwd, max_files=4096, session_id=session_id)
@@ -898,6 +1001,31 @@ def _question_fields(value: object) -> list[dict[str, object]]:
     return result if result else []
 
 
+HELP_PROBE_TIMEOUT_SECONDS = 10
+# (resolved path, mtime_ns, size) -> (return code, help text). A completed probe is remembered for
+# the life of the process, so the CLI's --help runs at most once per controller and installed version.
+_HELP_CACHE: dict[tuple[str, int, int], tuple[int, str]] = {}
+
+
+def _probe_help(resolved: str) -> tuple[int, str] | None:
+    try:
+        info = os.stat(resolved)
+        key: tuple[str, int, int] | None = (resolved, info.st_mtime_ns, info.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _HELP_CACHE:
+        return _HELP_CACHE[key]
+    try:
+        result = subprocess.run([resolved, "--help"], check=False, capture_output=True, text=True,
+                                timeout=HELP_PROBE_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None  # a timeout or launch failure is not cached: the next call may succeed
+    probed = (result.returncode, (result.stdout + "\n" + result.stderr)[:128 * 1024])
+    if key is not None and result.returncode == 0:  # a failed probe is retried next time
+        _HELP_CACHE[key] = probed
+    return probed
+
+
 def _installed_help(
     provider: str,
     executable: str | None,
@@ -911,17 +1039,10 @@ def _installed_help(
     resolved = shutil.which(binary)
     if resolved is None:
         return None
-    try:
-        result = subprocess.run(
-            [resolved, "--help"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
+    probed = _probe_help(resolved)
+    if probed is None:
         return None
-    help_text = (result.stdout + "\n" + result.stderr)[:128 * 1024]
+    returncode, help_text = probed
     pattern: re.Pattern[str] | None
     if option == "resume":
         pattern = capability.help_pattern
@@ -931,7 +1052,7 @@ def _installed_help(
         pattern = _CODEX_NO_DAEMON
     else:
         pattern = None
-    if result.returncode != 0 or pattern is None or not pattern.search(help_text):
+    if returncode != 0 or pattern is None or not pattern.search(help_text):
         return None
     return resolved, help_text
 
@@ -1050,7 +1171,9 @@ __all__ = [
     "codex_session_records",
     "codex_owned_argv",
     "confirm_restored",
+    "discover_new_db_session",
     "discover_owned_codex_session",
+    "session_db_path",
     "discover_owned_codex_root_session",
     "new_session_argv",
     "provider_session_metadata",

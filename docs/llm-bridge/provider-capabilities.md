@@ -11,8 +11,8 @@ Do not edit it by hand. Earlier hand-written discovery notes are in `provider-ca
 | Codex | unverified | unverified | unverified | unverified | unverified | supported | supported | supported | supported | unsupported | none |
 | Claude Code | unverified | unverified | unverified | unverified | unverified | supported | supported | supported | supported | unsupported | none |
 | Copilot | unverified | unverified | unverified | unverified | unverified | supported | unsupported | unsupported | supported | unsupported | none |
-| Kilo | unverified | unverified | unverified | unverified | unverified | unsupported | unsupported | unsupported | unsupported | unsupported | none |
-| OpenCode | unverified | unverified | unverified | unverified | unverified | unsupported | unsupported | unsupported | unsupported | unsupported | none |
+| Kilo | unverified | unverified | unverified | unverified | unverified | supported | unsupported | unsupported | unsupported | unsupported | none |
+| OpenCode | unverified | unverified | unverified | unverified | unverified | supported | unsupported | unsupported | unsupported | unsupported | none |
 | MiniMax | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | none |
 | z.ai | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | none |
 
