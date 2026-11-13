@@ -547,7 +547,7 @@ Requirement text: `docs/distributed/spec/`. Decisions D40 to D47.
 | ORCH-003 | [ ] | Not started. |
 | ORCH-004 | [ ] | Not started. |
 | ORCH-005 | [ ] | Not started. |
-| ORCH-006 | [ ] | Not started. |
+| ORCH-006 | [x] | `mission create --template NAME|PATH` reads a TOML template (`template = 1`: objective, `[[tasks]]` with ids and `depends_on`, `[verifier]`, `[rotation]`, `[policy]`); unknown keys are refused by name, and explicit command-line options win. A NAME resolves to `templates/NAME.toml` next to `config.toml`. The mission and its tasks are created in one store transaction. A template verifier goes through the same path as `--verifier`, so the verifier guard hashes it; `verifier.files` entries outside the mission folder are refused. `mission export [ID] --template PATH|NAME|-` writes the same schema (mode 0600, no overwrite without `--force`, never through a symlink). Remote use is refused. Docs: `docs/llm-bridge/templates.md`. Tests: tests/test_bridge_templates.py::test_create_from_path_builds_objective_tasks_and_dependencies, tests/test_bridge_templates.py::test_template_verifier_is_hashed_and_a_changed_file_needs_approval, tests/test_bridge_templates.py::test_export_round_trips_config_and_task_graph, tests/test_bridge_templates.py::test_failing_task_insert_leaves_no_mission_and_no_tombstone |
 | ORCH-007 | [d] | Deferred beyond 1.6.0 by D42, target 1.7.0. Parallel work is provided by isolated missions (ORCH-001, ORCH-002). |
 | ORCH-008 | [ ] | Not started. |
 | ORCH-009 | [ ] | Not started. |
