@@ -847,7 +847,7 @@ class WorkerSession:
             result = commands.CommandResult(request.request_id, request.operation, "rejected",
                                             error=commands.CommandError("forbidden", "this worker accepts read-only remote operations"))
         else:
-            result = commands.execute(dataclasses.replace(request, target=commands.LOCAL_TARGET))
+            result = commands.execute(dataclasses.replace(request, target=commands.LOCAL_TARGET, remote=True))
         if spec is None or spec.mutating or result.error is not None:
             self.audit("command", operation=request.operation, request_id=request.request_id, mission_id=request.mission_id,
                        outcome=result.outcome, error=result.error.code if result.error else None, duplicate=duplicate)

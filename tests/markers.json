@@ -1091,6 +1091,65 @@
    "subprocess"
   ]
  },
+ "tests/test_bridge_orch_commit_budget.py": {
+  "test_a_commit_that_fails_again_on_resume_holds_the_mission_again": [
+   "subprocess"
+  ],
+  "test_a_failed_commit_is_retried_for_its_own_task_before_the_next_task": [
+   "subprocess"
+  ],
+  "test_a_mission_that_is_not_isolated_never_commits": [
+   "subprocess"
+  ],
+  "test_commit_failure_holds_the_mission_with_an_event": [
+   "subprocess"
+  ],
+  "test_commit_in_a_sub_folder_mission_still_commits_the_whole_worktree": [
+   "subprocess"
+  ],
+  "test_commit_per_task_commits_in_the_worktree_after_the_verifier_passes": [
+   "subprocess"
+  ],
+  "test_commit_with_nothing_staged_is_not_an_error": [
+   "subprocess"
+  ],
+  "test_default_branch_comes_from_the_remote_not_from_the_name_main": [
+   "subprocess"
+  ],
+  "test_failed_mission_push_keeps_the_mission_from_completing": [
+   "subprocess"
+  ],
+  "test_no_commit_without_the_setting_and_none_when_the_verifier_fails": [
+   "subprocess"
+  ],
+  "test_no_git_call_ever_forces": [
+   "subprocess"
+  ],
+  "test_push_failure_holds_the_mission": [
+   "subprocess"
+  ],
+  "test_push_is_refused_when_the_default_branch_cannot_be_determined": [
+   "subprocess"
+  ],
+  "test_push_never_does_not_push": [
+   "subprocess"
+  ],
+  "test_push_per_mission_happens_once_after_the_last_task": [
+   "subprocess"
+  ],
+  "test_push_per_task_pushes_to_the_configured_upstream": [
+   "subprocess"
+  ],
+  "test_push_refuses_the_default_branch_unless_the_mission_was_created_for_it": [
+   "subprocess"
+  ],
+  "test_push_uses_the_configured_push_remote_for_a_new_branch": [
+   "subprocess"
+  ],
+  "test_push_without_a_configured_remote_is_refused_and_invents_none": [
+   "subprocess"
+  ]
+ },
  "tests/test_bridge_output_idle.py": {
   "test_real_scratch_tmux_reports_activity_epoch_of_single_print": [
    "tmux",

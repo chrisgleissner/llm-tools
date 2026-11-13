@@ -393,6 +393,11 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         unsupported_options: list[str] = []
         if getattr(args, "isolate", "none") != "none":
             unsupported_options.append("--isolate")
+        for flag in ("commit", "push", "budget_runs", "budget_minutes", "budget_provider_changes", "budget_spend", "budget_currency"):
+            if getattr(args, flag, None) is not None:
+                unsupported_options.append("--" + flag.replace("_", "-"))
+        if getattr(args, "push_default_branch", False):
+            unsupported_options.append("--push-default-branch")
         if args.verifier_command is not None:
             unsupported_options.append("--verifier")
         if getattr(args, "verifier_after_dashes", None):
@@ -431,14 +436,14 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             "suspend_when_rate_limited": None if args.suspend_when_rate_limited is None else args.suspend_when_rate_limited == "on",
             "colour": None,
         }
+        from .bridge import orchestration_patch_params
+
+        params.update({name: value for name, value in orchestration_patch_params(args).items() if value is not None})  # only the given ones go to the worker
         if all(value is None for value in params.values()):
             raise ValueError("mission set requires at least one setting")
         return make("mission.settings.patch", params), lambda value: str(value.get("detail", "Mission settings updated"))
     if command == "mission" and args.mission_action == "settings":
-        return make("mission.settings.get"), lambda value: (f"Auto-continue {'on' if value['auto_continue'] else 'off'} · "
-            f"capacity-wait suspend {'on' if value['suspend_when_rate_limited'] else 'off'} · "
-            f"teams {'on' if value['execution_policy']['teams_enabled'] else 'off'} · "
-            f"token spend {value['execution_policy']['token_spend']} · colour {value.get('colour') or 'auto'}")
+        return make("mission.settings.get"), lambda value: fmt.format_mission_settings(value) + f" · colour {value.get('colour') or 'auto'}"
     if command == "mission" and args.mission_action in {"colour", "color"}:
         params = {"auto_continue": None, "teams": None, "token_spend": None,
                   "suspend_when_rate_limited": None, "colour": str(args.value)}

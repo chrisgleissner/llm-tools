@@ -198,6 +198,17 @@ class BridgeMissionHooks:
 
         return _safe_decision(selection)
 
+    def _sample_spend(self, selection: dict[str, Any]) -> None:
+        """At each provider selection: turn the rotation providers' reported spend into ``provider-spend`` events (best effort)."""
+        try:
+            from . import bridge_budget
+
+            mission = self.store.get_mission(self.mission_id)
+            if "spend" in bridge_budget.budget_of(mission.get("config")):
+                bridge_budget.sample_spend(self.store, mission, selection)
+        except Exception:  # noqa: BLE001 - a spend reading must never stop provider selection
+            pass
+
     def _cli_version(self, provider: str) -> str:
         """The provider CLI version recorded with each selection (PROV-011); read at most once an hour per provider, since CLIs self-update."""
         now = self._clock()
@@ -210,6 +221,7 @@ class BridgeMissionHooks:
         return seen[1]
 
     def on_selection(self, selection: dict[str, Any]) -> None:
+        self._sample_spend(selection)
         projection = self._selection_projection(selection)
         if projection.get("provider"):
             projection["cli_version"] = self._cli_version(str(projection["provider"]))
@@ -340,6 +352,15 @@ class BridgeMissionHooks:
                 time.sleep(0.5)
                 continue
 
+            if mission["config"].get("hold_reason"):
+                # The operator resumed a mission that Bridge held (budget, commit or push). The budget is checked
+                # again before the next run, so a limit that is still reached holds the mission again.
+                self.store.set_mission_config_values(self.mission_id, {"hold_reason": "", "hold_detail": ""}, event_kind="mission-hold-released")
+                from .bridge_publish import retry_pending
+
+                # A commit or push that failed is redone for its own task before the next task starts.
+                if not retry_pending(self.store, self.store.get_mission(self.mission_id)):
+                    continue
             hold = self.store.sync_review_hold_events(self.mission_id)
             if hold is not None:
                 # A native operator is at the station: do not start the next
@@ -355,6 +376,10 @@ class BridgeMissionHooks:
                 self._operator_wait_state = None
                 self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
+                from . import bridge_budget
+
+                if bridge_budget.hold_if_reached(self.store, mission) is not None:
+                    continue  # held as budget-exhausted; the PAUSED branch waits for the operator
                 current = self.store.begin_iteration(int(task["id"]))
                 self._iteration += 1
                 history = self.store.recent_task_history(self.mission_id, int(current["id"]))
@@ -393,6 +418,11 @@ class BridgeMissionHooks:
                     f"Durable checkpoint (latest bounded history):\n{_format_checkpoint(checkpoint)}\n\n"
                     "Continue from this state. Do not claim work from an earlier provider session unless supported by the evidence above."
                 )
+                from .bridge_publish import policy_prompt
+
+                policy_text = policy_prompt(mission["config"]).strip()
+                if policy_text:
+                    prompt += "\n\n" + policy_text
                 if self.native_tui and not self.headless:
                     prompt += f" {NATIVE_COMPLETION_NOTE}"
                 return {
@@ -418,6 +448,10 @@ class BridgeMissionHooks:
             total = sum(counts.values())
             completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
             if completed and completed + cancelled == total:
+                from .bridge_publish import push_mission
+
+                if not push_mission(self.store, mission):
+                    continue  # the push failed or was refused: the mission is held PAUSED until the operator fixes it
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
             if total and cancelled == total:
@@ -590,6 +624,14 @@ class BridgeMissionHooks:
             return False
         provider = str(selection.get("provider") or scheduler_config.provider)
         route_id = str(selection.get("route") or "")
+        from . import bridge_budget
+
+        if bridge_budget.hold_if_reached(self.store, mission) is not None:
+            return False  # every launch is checked, so a retry of a failed run counts against the limit too
+        if "runs" in bridge_budget.budget_of(mission.get("config")):
+            # A scheduler-internal retry would start a provider process without passing here. With a run limit, each
+            # launch is a new, counted operation instead; Ralph's own loop retries it.
+            scheduler_config.retry_delays = ""
         try:
             operation_id = self.store.begin_operation(int(context["task_id"]), iteration=iteration, station=route_id or provider)
         except TransitionError:
@@ -1753,6 +1795,11 @@ def run_configured_verifier(
             except TransitionError:
                 current = store.get_task(task_id)
                 outcome.update(status=current["status"], passed=False, reason="task-changed-during-verification")
+            else:
+                from .bridge_publish import commit_task
+
+                # Bridge commits (and pushes, per the mission's policy) itself; a failure holds the mission.
+                outcome["committed"] = commit_task(store, store.get_mission(mission_id), store.get_task(task_id), summary)
             return outcome
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             outcome["reason"] = f"invalid-result: {exc}"

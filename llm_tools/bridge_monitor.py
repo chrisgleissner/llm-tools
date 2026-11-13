@@ -415,8 +415,23 @@ def project_snapshot(
             provider_wait = None
         if provider_wait is not None:
             snapshot["provider_wait"] = provider_wait
+    snapshot["budget"] = budget_projection(store, mission_id, mission)
     snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
     return snapshot
+
+
+def budget_projection(store: BridgeStore, mission_id: str, mission: dict[str, Any]) -> dict[str, Any] | None:
+    """``{"limits", "used", "reached", "hold_reason", "hold_detail"}`` for a mission with a budget or a Bridge hold, else ``None``."""
+    from . import bridge_budget
+
+    config = mission.get("config") or {}
+    limits = bridge_budget.budget_of(config)
+    reason = str(config.get("hold_reason") or "")
+    if not limits and not reason:
+        return None
+    used = bridge_budget.usage(store, mission_id, limits) if limits else {}
+    return {"limits": limits, "used": used, "reached": bridge_budget.reached(limits, used),
+            "hold_reason": reason or None, "hold_detail": str(config.get("hold_detail") or "") or None}
 
 
 def _project_snapshot(
