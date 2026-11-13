@@ -159,7 +159,7 @@ fn write_status(dir: &Path, a: &Attempt) {
 
 /// Create `dir` (mode 0700) when it does not exist. The mode of an existing directory is left alone;
 /// diagnostics warn when it is looser than 0700.
-fn ensure_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
     if dir.exists() {
         return Ok(());
     }

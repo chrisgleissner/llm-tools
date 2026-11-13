@@ -28,6 +28,9 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
                                  disk space, last backup age and next due, certificate expiry. Uptime, connected
                                  workers and event lag need the running service (GET /api/v1/diagnostics).
                                  Nothing leaves this host. Exit 0 ok or warn, 1 when a check fails)
+  support-bundle --out FILE  (redacted .tar for bug reports: versions, diagnostics, configuration without secrets,
+                                 database statistics, scrubbed recent log lines; never the database itself or any
+                                 row of it. Review it before sharing)
   restore --input FILE          (needs the server stopped)
   compact                       (needs the server stopped; rebuilds the database file without free pages and
                                  with incremental auto-vacuum; same options as backup; keeps the old file)
@@ -124,7 +127,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             "--cert" => a.cert = Some(value("--cert")?.into()),
             "--web-dir" => a.web_dir = Some(value("--web-dir")?.into()),
-            "--output" => a.output = Some(value("--output")?.into()),
+            "--output" | "--out" => a.output = Some(value(&arg)?.into()),
             "--input" => a.input = Some(value("--input")?.into()),
             "--backup-dir" => a.backup_dir = Some(value("--backup-dir")?.into()),
             "--force" => a.force = true,
@@ -178,6 +181,19 @@ fn open_db(dir: &std::path::Path) -> Result<Db, String> {
         return Err(format!("{} is not an initialised data directory (run `init`)", dir.display()));
     }
     Db::open(&db_path(dir)).map_err(|e| format!("cannot open database: {e}"))
+}
+
+fn journal_lines() -> Vec<String> {
+    use std::process::{Command, Stdio};
+    match Command::new("journalctl")
+        .args(["-u", "bridge-coordinator", "-n", "5000", "--no-pager", "-o", "short-iso"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
 }
 
 async fn run(args: Args) -> Result<(), String> {
@@ -241,6 +257,13 @@ async fn run(args: Args) -> Result<(), String> {
                 s.schema_version,
                 if args.full { "integrity_check" } else { "quick_check" }
             );
+            Ok(())
+        }
+        ["support-bundle"] => {
+            let out = args.output.as_ref().ok_or("--out FILE is required")?;
+            let lines = journal_lines();
+            let names = bridge_coordinator::bundle::create(&dir, out, &lines)?;
+            println!("support bundle written to {} ({} files); review it before sharing", out.display(), names.len());
             Ok(())
         }
         ["diagnostics"] => {

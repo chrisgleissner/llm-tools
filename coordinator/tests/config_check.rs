@@ -20,7 +20,7 @@ const STRICT: CheckOptions = CheckOptions {
     check_paths: true,
 };
 
-const ALL_KEYS: &str = "bind, exposure, lan_enabled, listener_groups, worker_mtls, tls_terminator, security_webhook_url, trusted_proxies, public_origin, max_token_lifetime_days, backup_interval_hours, backup_keep, backup_dir, backup_interval_seconds, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
+const ALL_KEYS: &str = "bind, exposure, lan_enabled, listener_groups, worker_mtls, tls_terminator, security_webhook_url, trusted_proxies, public_origin, max_token_lifetime_days, backup_interval_hours, backup_keep, backup_dir, backup_interval_seconds, update_check, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
 max_connections, max_connections_per_ip, worker_reserve_connections, request_body_timeout_secs, http_idle_timeout_secs, ws_ping_interval_secs, \
 ws_idle_timeout_secs, mutation_limit_per_token, mutation_limit_per_address";
 

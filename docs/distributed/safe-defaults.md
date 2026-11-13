@@ -8,8 +8,9 @@ names a test that does not exist, or when a test in that file is missing from th
 
 Reviewed on 2026-11-06 against the Python client side: Bridge, the worker service, the
 remote CLI, the `llm-usage` sampler service, `llm-scheduler`, `ralph-robin` and
-`llm-sleep-soak`. The Rust coordinator is not covered here; see
-[Coordinator defaults that remain for phase B](#coordinator-defaults-that-remain-for-phase-b).
+`llm-sleep-soak`. The Rust coordinator is covered by
+[Coordinator defaults (Rust coordinator)](#coordinator-defaults-rust-coordinator)
+and `coordinator/tests/defaults.rs`.
 
 ## Network exposure
 
@@ -95,24 +96,67 @@ before the change.
   fallback needs no privilege. Neither path is reached unless a suspend was requested
   (see the suspend rows above).
 
-## Coordinator defaults that remain for phase B
+## Coordinator defaults (Rust coordinator)
 
-The Rust coordinator is being rewritten by another mission. Its defaults need the same
-table, with a test per row, once that work lands. Settings to review:
+The test `coordinator/tests/defaults.rs` reads every setting from `Config::default()`
+through serde, so a setting that is added without a row here, a row for a setting that
+no longer exists, or a value that differs from the code fails the test. The Default
+column holds the value as JSON text.
 
-| Setting | Documented default (`coordinator.md`) |
-|---|---|
-| Bind address | Loopback; a non-loopback bind needs `lan_enabled = true` |
-| CORS | None (same-origin UI; state changes need a CSRF header and an exact `Origin`) |
-| API token expiry | 90 days; `--expires-days 0` is an explicit opt-out |
-| Browser session lifetime | 2 h idle and 12 h absolute; remembered sessions 8 h idle and 7 days absolute |
-| Session cookie | `__Host-` prefix, HttpOnly, Secure, SameSite=Strict |
-| Login rate limits | Per address and per user, reserved before password hashing |
-| Connection, header, body limits | Per-address caps and timeouts |
-| TLS | 1.2 minimum with AEAD suites; name-constrained CA |
-| Backups | `bridge-coordinator backup` exists; no scheduled backup is on by default |
-| Worker registration | Token per worker, revocable, generations per name |
+<!-- coordinator-defaults:begin -->
+| Setting | Default | Reason |
+|---|---|---|
+| `bind` | `"127.0.0.1:8443"` | Loopback keeps the listener unreachable from the network until the operator chooses LAN or Internet exposure. |
+| `listener_groups.console_rest` | `null` | The console uses the combined loopback listener unless the operator configures split listeners. |
+| `listener_groups.worker_channel` | `null` | Workers use the combined loopback listener unless the operator configures split listeners. |
+| `listener_groups.health` | `null` | Health checks use the combined loopback listener unless the operator configures split listeners. |
+| `exposure` | `"loopback"` | Non-loopback exposure requires an explicit operator choice and its associated checks. |
+| `worker_mtls` | `false` | Worker mTLS needs client certificates issued at enrolment and is opt-in. |
+| `tls_terminator` | `false` | A trusted reverse proxy must be explicitly configured before its TLS termination is accepted. |
+| `security_webhook_url` | `null` | Security events stay local until the operator selects an HTTPS notification destination. |
+| `min_tls` | `"1.3"` | TLS 1.3 is required unless the operator opts into TLS 1.2 for compatibility. |
+| `max_events_per_worker` | `50000` | Bounded event retention prevents one worker from growing its event history indefinitely. |
+| `allowed_origins` | `[]` | Empty origins mean no CORS and only same-origin cookie writes. |
+| `trusted_proxies` | `[]` | Forwarded-address headers are ignored until the operator trusts specific proxies. |
+| `web_dir` | `null` | The bundled interface is used unless the operator selects another directory. |
+| `tls_cert_file` | `null` | The internal CA supplies the identity until the operator configures a certificate. |
+| `tls_key_file` | `null` | An operator-managed private key is loaded only from an explicitly configured path. |
+| `tls_cert_name` | `null` | No external SNI identity is selected until the operator configures its hostname. |
+| `public_origin` | `null` | The first passkey registration fixes the canonical origin unless the operator sets it beforehand. |
+| `max_connections` | `256` | A total connection cap bounds resource use under connection floods. |
+| `max_connections_per_ip` | `32` | A per-address connection cap limits how much capacity one client can consume. |
+| `worker_reserve_connections` | `16` | A small reserve keeps authenticated workers connectable when other connection slots are full. |
+| `request_body_timeout_secs` | `30` | A body deadline prevents slow uploads from holding connections indefinitely. |
+| `http_idle_timeout_secs` | `30` | An idle deadline bounds how long incomplete headers or idle keep-alive connections occupy resources. |
+| `ws_ping_interval_secs` | `30` | Regular pings let the coordinator detect unresponsive WebSocket clients. |
+| `ws_idle_timeout_secs` | `90` | Closing silent WebSockets after three ping intervals reclaims resources while allowing time for replies. |
+| `mutation_limit_per_token` | `30` | A per-token mutation budget limits the damage from a looping or compromised client. |
+| `mutation_limit_per_address` | `120` | An address-wide mutation budget bounds aggregate writes across tokens from one client address. |
+| `max_token_lifetime_days` | `3650` | Ten years is a lifetime ceiling while token creation defaults to 90 days. |
+| `backup_interval_hours` | `24` | Daily automatic backups are on by default to limit data loss. |
+| `backup_keep` | `7` | Keeping seven automatic backups provides recovery history with bounded storage. |
+| `backup_dir` | `null` | Backups use the private backups directory under the data directory unless the operator chooses another path. |
+| `backup_interval_seconds` | `0` | The test-only seconds override is disabled so production uses the daily backup schedule. |
+| `update_check` | `false` | The only outbound request the coordinator makes on its own is opt-in and sends only a generic User-Agent. |
+<!-- coordinator-defaults:end -->
 
-The "backups on" requirement needs a decision in phase B: either schedule a backup by
-default in the coordinator container and native unit, or state why a manual `backup`
-command satisfies it.
+<!-- coordinator-fixed-defaults:begin -->
+| Constant | Value | Meaning |
+|---|---|---|
+| `db::SESSION_IDLE_SECS` | `28800` | Remembered device idle lifetime, 8 h. |
+| `db::SESSION_ABSOLUTE_SECS` | `604800` | Remembered device absolute lifetime, 7 days. |
+| `db::SESSION_IDLE_SECS_SHORT` | `7200` | Unremembered device idle lifetime, 2 h. |
+| `db::SESSION_ABSOLUTE_SECS_SHORT` | `43200` | Unremembered device absolute lifetime, 12 h. |
+| `auth::MIN_PASSWORD_LEN` | `12` | Minimum password length in characters. |
+| `http::MAX_BODY` | `1048576` | Maximum HTTP request body size in bytes, 1 MiB. |
+| `db::MAX_ENROLLED_WORKERS` | `256` | Maximum number of enrolled workers. |
+| `db::MAX_MISSIONS_PER_WORKER` | `10000` | Maximum number of missions stored per worker. |
+| `hub::MAX_WORKER_CONNECTIONS` | `64` | Maximum number of simultaneous worker connections. |
+| `http::COOKIE` | `"__Host-bridge_session"` | Cookie prefix; the cookie is HttpOnly, Secure, SameSite=Strict. |
+<!-- coordinator-fixed-defaults:end -->
+
+Token default expiry is 90 days (`token create`, `DEFAULT_TOKEN_DAYS` in `main.rs`);
+`--expires-days 0` is an explicit opt-out. Automatic backups are on by default
+(`backup_interval_hours` 24, `backup_keep` 7). The login and mutation rate limits are
+the `mutation_limit_*` settings above and the per-address login limits described in
+coordinator.md.

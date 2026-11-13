@@ -5,6 +5,7 @@
 pub mod admin_reset;
 pub mod auth;
 pub mod backups;
+pub mod bundle;
 pub mod certs;
 pub mod client_ip;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod diagnostics;
 pub mod http;
 pub mod hub;
 pub mod init;
+pub mod migration_backup;
 pub mod netinfo;
 pub mod openapi;
 pub mod ops;
@@ -23,6 +25,7 @@ pub mod protocol;
 pub mod scopes;
 pub mod server;
 pub mod terminal;
+pub mod update_check;
 pub mod web;
 pub mod ws_worker;
 
