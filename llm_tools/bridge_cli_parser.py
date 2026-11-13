@@ -197,6 +197,10 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     routes_action = create.add_argument("--routes", metavar="LIST", default=None, help=routes_help)
     routes_action.help = routes_help + "%(rotation_routes)s"
     routes_action.rotation_routes = _RotationDefaultText(lambda providers, routes: f" (default: {routes})" if routes else "")  # type: ignore[attr-defined]
+    create.add_argument("--isolate", choices=("none", "worktree"), default="none", help=(
+        "none (default): the providers work in --cwd itself. worktree: create a git worktree under the Bridge state directory on a new branch "
+        "bridge/<name>-<id> from the current commit and run the mission there, so several missions can work on one repository at once; "
+        "needs a git repository with a clean working tree; merge the branch back with git merge bridge/<name>-<id>"))
     create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the first task; repeat for several")
     create.add_argument("--teams", choices=("on", "off"), default=None, help="provider-native team guidance (default: on; global default: [bridge].teams)")
     create.add_argument("--token-spend", choices=("low", "medium", "high"), default=None, help="token spend preference (default: medium; global default: [bridge].token_spend)")
@@ -309,6 +313,7 @@ def _build_parser(
     mission_delete.add_argument("--mission", "-m", metavar="ID", default=None, help=f"mission ID or a unique prefix of {MIN_MISSION_PREFIX}+ characters (required; never inferred from the folder)")
     mission_delete.add_argument("mission_ref", nargs="?", metavar="ID", action=_positional_into("mission"), help="the same as --mission ID")
     mission_delete.add_argument("--yes", action="store_true", help="delete without asking; required when there is no terminal to ask on (scripts). Deleting cannot be undone")
+    mission_delete.add_argument("--force", action="store_true", help="delete a mission whose isolated worktree holds uncommitted or unmerged work; the mission is removed, the worktree and branch are kept")
     _add_json_arg(mission_delete)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)

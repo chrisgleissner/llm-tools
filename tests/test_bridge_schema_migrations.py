@@ -269,3 +269,16 @@ def test_the_cli_exits_with_status_4_and_names_the_backup(tmp_path: Path, monkey
     assert bridge.main(["mission", "list", "--json"]) == 4
     payload = json.loads(capsys.readouterr().out)["error"]
     assert payload["code"] == "schema-too-new" and str(backup) in payload["message"]
+
+
+def test_schema_11_adds_isolation_columns_with_in_place_defaults(tmp_path: Path) -> None:
+    """ORCH-001/002: a schema-10 mission becomes an in-place mission; the new columns exist and the data stays."""
+    path = _install(tmp_path, 10)
+    with sqlite3.connect(path) as db:
+        assert "isolation" not in {row[1] for row in db.execute("PRAGMA table_info(missions)")}
+    BridgeStore(path).close()
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(missions)")}
+        assert {"isolation", "origin_cwd", "branch", "base_commit", "worktree_path"} <= columns
+        assert db.execute("SELECT isolation,origin_cwd,branch,worktree_path FROM missions").fetchall() == [("none", None, None, None)]
+    assert _user_version(path) == SCHEMA_VERSION == 11

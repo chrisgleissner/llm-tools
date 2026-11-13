@@ -241,7 +241,7 @@ def format_mission_list(missions: list[dict[str, Any]], now: float | None = None
     if not missions:
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
     rows = [
-        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), (_clip(item.get("name", ""), _NAME_LIMIT) if sys.stdout.isatty() else " ".join(printable(item.get("name", "")).split())), home_relative(item.get("cwd", ""))]
+        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), (_clip(item.get("name", ""), _NAME_LIMIT) if sys.stdout.isatty() else " ".join(printable(item.get("name", "")).split())), home_relative(item.get("cwd", "")) + (f" [{item.get('branch')}]" if item.get("isolation") == "worktree" and item.get("branch") else "")]
         for item in missions
     ]
     return table(["ID", "STATUS", "UPDATED", "NAME", "FOLDER"], rows)
@@ -849,6 +849,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         f"Folder      {home_relative(mission.get('cwd', ''))}",
         f"Controller  {controller_text}",
     ]
+    if mission.get("isolation") == "worktree":
+        lines.insert(2, f"Isolation   worktree on branch {mission.get('branch')} from {str(mission.get('base_commit') or '')[:10]} in {home_relative(mission.get('origin_cwd') or '')} · merge it back with: git merge {mission.get('branch')}")
     rotation = rotation_names(config)
     if rotation:
         lines.append(f"Rotation    {' → '.join(rotation)}")

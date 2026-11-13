@@ -66,7 +66,7 @@ def _remove_station_files(mission_id: str) -> bool:
         return False
 
 
-def delete_mission(mission_id: str) -> dict[str, Any]:
+def delete_mission(mission_id: str, *, force: bool = False) -> dict[str, Any]:
     """Delete one mission by its full ID; raises ``TransitionError`` when it is not in a deletable state.
 
     The caller has resolved the reference, so a mission that is already gone is reported by the
@@ -76,10 +76,20 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
 
     state = default_state_dir()
     with BridgeStore(store_path(), readonly=True) as reader:
-        status = str(reader.get_mission(mission_id)["status"])
+        before = reader.get_mission(mission_id)
+    status = str(before["status"])
     if status not in DELETABLE_MISSION_STATUSES:
         raise TransitionError(mission_delete_refusal(mission_id, status))
     short = mission_id[:8]
+    if before.get("isolation") == "worktree" and not force:
+        from . import bridge_isolation
+
+        reason = bridge_isolation.unmerged_reason(before)
+        if reason:
+            raise TransitionError(
+                f"mission {short} has work in its worktree {before['worktree_path']} on branch {before['branch']}: {reason}. "
+                f"Merge it from the repository with: git merge {before['branch']}; discard it with: git worktree remove --force {before['worktree_path']}; "
+                f"or delete the mission and keep the worktree and branch with: llm-bridge mission delete {short} --force")
     lock = MissionLock(state / "locks", mission_id)
     try:
         lock.acquire(timeout=LOCK_WAIT_SECONDS)
@@ -103,6 +113,11 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
         (state / "locks" / f"mission-{mission_id}.lock").unlink(missing_ok=True)
     finally:
         lock.release()
+    worktree: dict[str, Any] | None = None
+    if before.get("isolation") == "worktree":
+        from . import bridge_isolation
+
+        worktree = bridge_isolation.release(before)
     return {
         "status": "DELETED",
         "mission_id": mission_id,
@@ -111,5 +126,17 @@ def delete_mission(mission_id: str) -> dict[str, Any]:
         "deleted_at": result["deleted_at"],
         "removed": {"tasks": result["tasks"], "events": result["events"], "operations": result["operations"],
                     "files": files, "station_files": station_files},
-        "detail": f"Deleted mission {short} \"{result['name']}\" ({result['tasks']} tasks, {result['events']} events, {files} files)",
+        "detail": f"Deleted mission {short} \"{result['name']}\" ({result['tasks']} tasks, {result['events']} events, {files} files)" + _worktree_note(worktree),
+        **({"worktree": worktree} if worktree is not None else {}),
     }
+
+
+def _worktree_note(worktree: dict[str, Any] | None) -> str:
+    """The sentence about an isolated mission's worktree: removed, or kept with where it is and why."""
+    if worktree is None:
+        return ""
+    if worktree["removed"]:
+        return f" · removed worktree {worktree['path']} and branch {worktree['branch']}"
+    return (f" · kept worktree {worktree['path']} on branch {worktree['branch']}: {worktree.get('reason', 'unmerged work')}; "
+            f"merge it from the repository with: git merge {worktree['branch']}; "
+            f"discard it with: git worktree remove --force {worktree['path']}")

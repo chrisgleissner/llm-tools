@@ -34,7 +34,7 @@ import sqlite3
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "tests" / "fixtures" / "bridge-schema"
 STORE_SOURCE = "llm_tools/bridge_store.py"
-COMMITS = {2: "219b5f0", 3: "0ace697", 6: "b11b719"}
+COMMITS = {2: "219b5f0", 3: "0ace697", 6: "b11b719", 10: "76260ba9"}
 # version -> (kind, base version the schema is taken from)
 PLAN: dict[int, tuple[str, int]] = {
     1: ("stamped", 2),
@@ -46,6 +46,7 @@ PLAN: dict[int, tuple[str, int]] = {
     7: ("derived", 10),
     8: ("derived", 10),
     9: ("derived", 10),
+    10: ("history", 10),
 }
 # Objects BridgeStore._migrate creates for each version above 7; a derived fixture drops those of later versions.
 ADDED_IN = {
@@ -108,10 +109,16 @@ def git_show(commit: str) -> str:
     return subprocess.run(["git", "show", f"{commit}:{STORE_SOURCE}"], cwd=ROOT, check=True, capture_output=True, text=True).stdout
 
 
+def base_event_version(base: int) -> int:
+    """The ``EVENT_SCHEMA_VERSION`` of the store committed for ``base`` (schemas 2-6 wrote their own number)."""
+    return 7 if base == 10 else base
+
+
 def historic_store_class(version: int) -> Any:
     """The ``BridgeStore`` class committed at ``version``, loaded as a stand-alone module."""
     module = types.ModuleType(f"historic_bridge_store_v{version}")
     module.__dict__["__file__"] = f"<{COMMITS[version]}:{STORE_SOURCE}>"
+    module.__dict__["__package__"] = "llm_tools"  # schema 10 imports its sibling modules (bridge_states, bridge_vocab)
     sys.modules[module.__name__] = module  # dataclasses and typing look the module up by name
     exec(compile(git_show(COMMITS[version]), module.__file__, "exec"), module.__dict__)
     assert module.SCHEMA_VERSION == version, (module.SCHEMA_VERSION, version)
@@ -154,14 +161,7 @@ def finish(path: Path, version: int, drops: list[str]) -> None:
 def build(version: int, kind: str, base: int, work: Path) -> dict[str, Any]:
     name = f"schema-v{version}.sqlite3"
     path = work / name  # BridgeStore insists on a private (0700) parent directory
-    if base == 10:
-        sys.path.insert(0, str(ROOT))
-        from llm_tools.bridge_store import EVENT_SCHEMA_VERSION, SCHEMA_VERSION, BridgeStore
-
-        assert SCHEMA_VERSION == 10, "derived fixtures are defined against schema 10; revisit PLAN before changing it"
-        store_class, event_version = BridgeStore, EVENT_SCHEMA_VERSION
-    else:
-        store_class, event_version = historic_store_class(base), base
+    store_class, event_version = historic_store_class(base), base_event_version(base)
     store = store_class(path)
     store.close()
     insert_content(path, event_version)
@@ -172,7 +172,7 @@ def build(version: int, kind: str, base: int, work: Path) -> dict[str, Any]:
     finish(path, version, drops)
     (OUT / name).write_bytes(path.read_bytes())
     (OUT / name).chmod(0o644)
-    source = {"history": f"{COMMITS.get(base, '')}:{STORE_SOURCE}", "derived": f"schema 10 without the objects added for versions above {version}",
+    source = {"history": f"{COMMITS.get(base, '')}:{STORE_SOURCE}", "derived": f"schema 10 ({COMMITS[10]}) without the objects added for versions above {version}",
               "stamped": f"schema {base} (commit {COMMITS.get(base, 'current')}) stamped user_version={version}"}[kind]
     return {"version": version, "kind": kind, "source": source, "file": name}
 
