@@ -266,6 +266,49 @@
                 "mission": {
                   "additionalProperties": true,
                   "properties": {
+                    "attention": {
+                      "description": "Why the operator is needed, from the worker's mission status (same kinds as the CLI hint). Absent when the worker predates the field; null when nothing is needed.",
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "approval",
+                                "failed",
+                                "blocked",
+                                "operator",
+                                "proposal",
+                                "capacity",
+                                "provider"
+                              ],
+                              "type": "string"
+                            },
+                            "message": {
+                              "maxLength": 240,
+                              "type": "string"
+                            },
+                            "tasks": {
+                              "items": {
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "maxItems": 8,
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "message",
+                            "tasks"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "needs_you": {
                       "oneOf": [
                         {
@@ -294,6 +337,14 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "task_counts": {
+                      "additionalProperties": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "description": "Tasks per status (QUEUED, READY, RUNNING, PAUSED, BLOCKED, VERIFYING, COMPLETED, FAILED, CANCELLED); statuses without tasks are absent. Absent when the worker predates the field.",
+                      "type": "object"
                     }
                   },
                   "type": "object"
@@ -4462,7 +4513,7 @@
         ]
       },
       "post": {
-        "description": "JSON body includes worker and mission.create parameters. The worker's local allow-create and real-path policy remain authoritative; local-only mission options return unsupported-remote-option.",
+        "description": "JSON body includes mission.create parameters and an optional worker. Without worker the coordinator places the mission on the online worker that allows control and creation, has a requested provider ready in its latest usage snapshot and has the fewest active missions (ties by name), and the response carries placement {worker, reason}; with no eligible worker the answer is 409 no-eligible-worker with a reason per worker in error.details.workers. A named worker always wins. The worker's local allow-create and real-path policy remain authoritative. A command template and a verifier command or file return unsupported-remote-option; verifier_name selects a verifier declared in the worker's configuration (unknown-verifier otherwise).",
         "operationId": "post_missions",
         "requestBody": {
           "content": {
@@ -4474,6 +4525,43 @@
                   },
                   {
                     "properties": {
+                      "auto_continue": {
+                        "type": "boolean"
+                      },
+                      "capacity_refresh_seconds": {
+                        "maximum": 3600,
+                        "minimum": 5,
+                        "type": "integer"
+                      },
+                      "include_config": {
+                        "type": "boolean"
+                      },
+                      "log_max_bytes": {
+                        "maximum": 1073741824,
+                        "minimum": 1024,
+                        "type": "integer"
+                      },
+                      "log_retained_runs": {
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "log_rotations": {
+                        "maximum": 20,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "verifier_name": {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9][a-z0-9_-]*$",
+                        "type": "string"
+                      },
+                      "verifier_timeout": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 3600,
+                        "type": "number"
+                      },
                       "worker": {
                         "maxLength": 63,
                         "minLength": 1,
@@ -4481,9 +4569,6 @@
                         "type": "string"
                       }
                     },
-                    "required": [
-                      "worker"
-                    ],
                     "type": "object"
                   }
                 ]

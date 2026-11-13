@@ -194,9 +194,32 @@ The worker sends ordinary mission summaries (see "Mission summaries") only for m
 batch. Every five seconds it checks active native missions for provider
 questions, and sends only summaries whose bounded `needs_you` value changed;
 it does not resend the full inventory with every task event or heartbeat. The
-coordinator applies summary upserts and cursors atomically. `needs_you` contains
+coordinator applies summary upserts and cursors atomically. The coordinator marks the mission copy of a
+worker `stale` only while the worker is offline or `mission_cursor` is behind the event cursor. A
+batch that carries `mission_cursor` sets it. A batch without it (a worker that predates the field)
+leaves it unchanged, except that a batch made only of `controller-heartbeat` and `capacity-refresh`
+events moves it together with the event cursor when it was caught up before the batch. `needs_you` contains
 only the existing status projection's provider message and answer command, not
 terminal content or transcript records.
+
+## Attention in mission summaries
+
+The keys of a mission summary are listed under "Mission summaries" above. The fields below are optional and were added within
+version 1; a coordinator or browser must treat a summary without them as "unknown", and a
+worker that predates them keeps working unchanged.
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `task_counts` | `{"<TASK STATUS>": n}` | Tasks per status (`QUEUED`, `READY`, `RUNNING`, `PAUSED`, `BLOCKED`, `VERIFYING`, `COMPLETED`, `FAILED`, `CANCELLED`). Statuses without tasks are absent. Same shape as `task_counts` in the `mission.status` result. |
+| `attention` | `{"kind", "message", "tasks"}` or `null` | Why the mission needs the operator, from the same decision as the CLI's "Needs you" hint (`bridge_format.needs_attention`). `kind` is `approval`, `failed`, `blocked`, `operator`, `proposal`, `capacity` or `provider`. `message` is that hint's one-line text with control characters removed, at most 240 characters. `tasks` lists at most 8 task numbers. `null` means nothing is needed (a `COMPLETED` or `CANCELLED` mission always has `null`). The field is absent when the worker could not read the projection. |
+| `needs_you` | `{"kind": "provider", "message", "command"}` or `null` | Unchanged: the bounded provider question of an active native mission (message at most 2048 characters, command at most 512). When `attention.kind` is `provider`, `attention.message` is the first 240 characters of the same text. |
+
+The worker sends a summary for every mission in an event batch, except for a mission whose
+only events in the batch are `controller-heartbeat` or `capacity-refresh`: those events never
+change a summary. The five-second scan of active native missions also sends a summary when
+`needs_you` or `attention` changed without a database event. `attention` and `task_counts` are
+computed from the status projection without reading the provider's terminal, and a hello of 300
+missions with the fields adds about 190 bytes per mission.
 
 ## Mission deletion (PRD-038)
 
@@ -248,6 +271,10 @@ replication. Any other result (`conflict`, `confirmation-required`) leaves the c
 not mark them replicated and stops offering them for the rest of that connection. Nothing else is lost, because
 the tombstone message carries no events. Upgrade the coordinator before the workers; until then the coordinator keeps
 listing the deleted mission as stale.
+
+## Mission creation options and verifiers (ORCH-008, D47)
+
+`mission.create` accepts `auto_continue`, `include_config`, `verifier_name`, `verifier_timeout`, `log_max_bytes`, `log_rotations`, `log_retained_runs` and `capacity_refresh_seconds` in addition to its earlier parameters. The worker validates the numeric ranges as `mission create` does locally. `verifier_name` selects `[bridge.verifiers.<name>]` (`argv`, optional `files`, `timeout_seconds`) from the worker's own llm-tools configuration; the worker records its hashes in the verifier guard at creation. A name that is not valid or not declared returns the error code `unknown-verifier`. A command template, a verifier command line and verifier files are not parameters of the operation and return `unsupported-remote-option`.
 
 ## Generation fencing (PROTO-010)
 

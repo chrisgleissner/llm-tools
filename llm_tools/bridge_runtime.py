@@ -47,6 +47,8 @@ from .bridge_sessions import (
     child_pids,
     confirm_restored,
     codex_owned_argv,
+    DB_SESSION_PROVIDERS,
+    discover_new_db_session,
     discover_owned_codex_session,
     new_session_argv,
     provider_session_metadata,
@@ -165,6 +167,8 @@ class BridgeMissionHooks:
         self._session_providers: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
         self._codex_owned_operations: set[str] = set()
+        self._db_session_seen: dict[str, NativeSessionIdentity] = {}  # session seen during a Kilo/OpenCode run, confirmed again at its end
+        self._db_session_operations: dict[str, float] = {}  # Kilo/OpenCode runs awaiting their session row -> next look
         self._codex_observe_schedule: dict[str, tuple[int, float]] = {}  # operation -> (backoff step or -1 once found, next look)
         # The (providers, routes) pair the running Ralph loop currently uses.
         self.applied_rotation: tuple[str, str] | None = None
@@ -747,6 +751,8 @@ class BridgeMissionHooks:
                     expected = None
             if expected is not None:
                 resume = resume_argv(expected, executable=argv[0]) if expected.provider == provider and expected.cwd == cwd else None
+                if resume and provider in DB_SESSION_PROVIDERS and provider_session_metadata(provider, expected.session_id, cwd=cwd) is None:
+                    resume = None  # the saved session is gone from the store: start fresh
                 if resume:
                     self._session_restore_expectations[operation_id] = expected
                     current = provider_session_metadata(provider, expected.session_id, cwd=cwd)
@@ -765,6 +771,12 @@ class BridgeMissionHooks:
                         # the exact resume subcommand and saved session UUID.
                         return [argv[0], *argv[1:-1], *resume[1:], argv[-1]]
                     return [*resume, *argv[1:]]
+            if provider in DB_SESSION_PROVIDERS:
+                # Kilo and OpenCode create their own session id; it is read from the session store
+                # for this run only (parentless, in this directory, created after launch).
+                self._db_session_operations[operation_id] = 0.0
+                self._session_started_ns[operation_id] = time.time_ns()
+                return argv
             if provider not in {"claude", "copilot"} or Path(argv[0]).name != provider:
                 # New Codex IDs are captured only from this operation's owned
                 # writable process descriptors, never from recency scans.
@@ -804,6 +816,14 @@ class BridgeMissionHooks:
 
     def _record_session_outcome(self, operation_id: str, provider: str, cwd: str) -> None:
         expected = self._session_restore_expectations.pop(operation_id, None)
+        if self._db_session_operations.pop(operation_id, None) is not None or operation_id in self._db_session_seen:
+            # Kilo/OpenCode: the session is confirmed once more now. It is kept only if the store
+            # still holds exactly one fitting row and it is the one seen during the run.
+            seen = self._db_session_seen.pop(operation_id, None)
+            self._session_candidates.pop(operation_id, None)
+            found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if expected is None else None
+            if found is not None and (seen is None or seen.session_id == found.session_id):
+                self._session_candidates[operation_id] = found
         candidate = self._session_candidates.pop(operation_id, None)
         baseline = self._session_baselines.pop(operation_id, {})
         started_ns = self._session_started_ns.pop(operation_id, 0)
@@ -842,7 +862,7 @@ class BridgeMissionHooks:
         try:
             self._record_session_outcome(operation_id, provider, str(Path(cwd).expanduser().resolve(strict=True)))
         except Exception:  # noqa: BLE001 - provider session files and the folder can disappear
-            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule):
+            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule, self._db_session_operations, self._db_session_seen):
                 pending.pop(operation_id, None)
             self._codex_owned_operations.discard(operation_id)
             try:
@@ -884,6 +904,20 @@ class BridgeMissionHooks:
             session_id=identity.session_id, cwd=identity.cwd, source=identity.source)
         self._codex_observe_schedule[operation_id] = (-1, 0.0)  # found: stop looking
 
+    def _observe_db_session(self, operation_id: str, provider: str) -> None:
+        """Record the Kilo/OpenCode session once exactly one fits this run; ambiguity records nothing."""
+        due = self._db_session_operations.get(operation_id)
+        now = time.monotonic()
+        if due is None or now < due:
+            return
+        self._db_session_operations[operation_id] = now + 2.0
+        cwd = self._session_cwds.get(operation_id, "")
+        found = discover_new_db_session(provider, cwd=cwd, started_ns=self._session_started_ns.get(operation_id, 0)) if cwd else None
+        if found is None:
+            return
+        self._db_session_seen[operation_id] = found  # persisted only by the end-of-run confirmation
+        self._db_session_operations.pop(operation_id, None)
+
     # Seconds between reads of the provider pane while a native provider runs.
     USAGE_LIMIT_LOOK_SECONDS = 2.0
 
@@ -893,6 +927,7 @@ class BridgeMissionHooks:
         Returns a status when the watch ended the provider run, else ``None``.
         """
         self._observe_owned_codex_session(operation_id)
+        self._observe_db_session(operation_id, provider)
         ended = self._observe_usage_limit(operation_id, provider, route_id)
         if ended is None and operation_id not in self._usage_limited:
             self._deliver_task_notices(operation_id, provider)

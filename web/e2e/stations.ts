@@ -44,6 +44,8 @@ export async function startStation(coord: Coordinator, access: Access): Promise<
   const bridge = (args: string[], input?: string) => execFileSync(python, [join(repo, "llm-bridge"), ...args], { env, encoding: "utf8", input, cwd: repo });
   const created = JSON.parse(bridge(["mission", "create", "--prompt", "Terminal E2E mission", "--cwd", tmpdir(), "--providers", "codex", "--json"])) as { mission: { id: string } };
   const missionId = created.mission.id;
+  // The station below stands for a started mission: the mission page only offers a live session for a mission that has been started.
+  execFileSync(python, ["-c", "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE missions SET status = 'RUNNING' WHERE id = ?\", (sys.argv[2],)); c.commit()", join(state, "bridge.sqlite3"), missionId], { env, cwd: repo });
   const socket = execFileSync(python, ["-c", START_STATION, missionId, tmpdir(), ECHO_LOOP], { env, encoding: "utf8", cwd: repo }).trim();
   const token = coord.cli("worker", "add", "e2e-worker");
   bridge(["worker", "enroll", "--name", "e2e-worker", "--coordinator", coord.url.replace("https://", "wss://"), "--token-file", "-", "--ca-file", join(coord.dir, "ca.pem"), ...(access === "control" ? ["--allow-control"] : access === "view" ? ["--allow-terminal-view"] : [])], token);

@@ -16,8 +16,7 @@ for (const theme of ["dark", "light"] as const) {
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await mockApp(page, { auth: "in", terminalScreen: true });
     await page.goto("/");
-    await expect(page.locator('[data-attention="approval"]')).toBeVisible();
-    await expect(page.locator("#activity li").first()).toBeVisible();
+    await expect(page.locator('[data-section="needs-you"] [data-action="approve"]').first()).toBeVisible();
     await expect(page.locator("#conn")).toContainText("Live");
     await page.addStyleTag({ content: ".toasts { display: none !important; }" });
     await page.evaluate(() => document.fonts.ready);

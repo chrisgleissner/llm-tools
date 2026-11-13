@@ -919,7 +919,7 @@ async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed()
     assert_eq!(created["operation"], "mission.create");
     assert_eq!(created["request"]["mission_id"], Value::Null);
 
-    for option in ["include_config", "command_template", "verifier_argv", "verifier_file"] {
+    for option in ["command_template", "verifier_argv", "verifier_file"] {
         let mut body = json!({"worker":"build-1","prompt":"new","cwd":"/srv/work"});
         body[option] = json!([]);
         let (status, problem) = api.post("/api/v1/missions", body).await;

@@ -304,11 +304,22 @@ both run the same llm-tools version.
 ### unsupported-remote-option
 
 Exit 1 (as a command error). `mission create --target WORKER` was given an
-option that a worker cannot apply, such as `--auto-continue`,
-`--command-template` or a log-retention setting. The message names each option.
+option that a worker cannot apply: `--command-template`, `--verifier`,
+`--verifier-arg`, `--verifier-file` or `-- COMMAND`. These would let the caller
+choose a command or file on the worker. The message names each option.
 
-Create the mission without those options, or create it on the worker itself and
-change the setting there with `llm-bridge mission set`.
+Declare the verifier in the worker's `config.toml` as `[bridge.verifiers.NAME]`
+and give `--verifier-name NAME`, or create the mission on the worker itself.
+
+### unknown-verifier
+
+Exit 1 (as a command error). `mission create --verifier-name NAME` named a
+verifier that the machine running the mission does not declare, or the name is
+not lowercase letters, digits, `-` and `_`.
+
+Add `[bridge.verifiers.NAME]` with `argv` (and optionally `files` and
+`timeout_seconds`) to that machine's llm-tools `config.toml`, or use a name it
+declares.
 
 ### unsupported-version
 

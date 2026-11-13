@@ -22,7 +22,8 @@ def test_without_evidence_probe_capabilities_are_unverified_and_unimplemented_on
     by_name = {entry["provider"]: entry for entry in report["providers"]}
     assert by_name["codex"]["capabilities"]["exact_resume"] == "unverified"
     assert by_name["codex"]["evidence"] is None
-    assert by_name["kilo"]["capabilities"]["finish"] == "unsupported"
+    assert by_name["kilo"]["capabilities"]["finish"] == "supported"
+    assert by_name["minimax"]["capabilities"]["finish"] == "unsupported"
     assert set(by_name["minimax"]["capabilities"].values()) == {"unsupported"}
 
 
@@ -43,9 +44,9 @@ def test_malformed_evidence_is_ignored(tmp_path: Path) -> None:
 
 
 def test_registry_change_changes_the_matrix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setitem(reg.REGISTRY, "kilo", dataclasses.replace(reg.REGISTRY["kilo"], exit_command="/exit"))
+    monkeypatch.setitem(reg.REGISTRY, "kilo", dataclasses.replace(reg.REGISTRY["kilo"], exit_command=None))
     entry = {e["provider"]: e for e in caps.capabilities_report(tmp_path, installed=lambda _n: None)["providers"]}["kilo"]
-    assert entry["capabilities"]["finish"] == "supported"
+    assert entry["capabilities"]["finish"] == "unsupported"
 
 
 def test_text_and_json_output(tmp_path: Path) -> None:

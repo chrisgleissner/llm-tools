@@ -9,13 +9,22 @@ import { startStation } from "./stations";
 const repo = resolve(import.meta.dirname, "../..");
 const python = join(repo, ".venv", "bin", "python");
 
-/** Click a terminal button and wait for the session; the page may re-render while it loads, so retry a click that was lost. */
+/** Connect the session pane and wait until it is live. "#terminal-open" watches (view only); "#terminal-control" takes control.
+ * The page may re-render while it loads, so a lost click is retried. */
 async function openTerminal(page: Page, button: string): Promise<void> {
   const status = page.locator("#terminal-status");
   await expect(async () => {
-    if ((await status.getAttribute("data-state")) === "idle") await page.locator(button).click({ timeout: 2000 });
+    const state = await status.getAttribute("data-state");
+    const mode = await status.getAttribute("data-mode");
+    if (state === "idle" || state === "ended" || (button === "#terminal-control" && state === "live" && mode === "view" && (await page.locator(button).isEnabled()))) await page.locator(button).click({ timeout: 2000 });
     await expect(status).toHaveAttribute("data-state", "live", { timeout: 4000 });
   }).toPass({ timeout: 30_000 });
+}
+
+/** Disconnect through the pane's options menu. */
+async function closeTerminal(page: Page): Promise<void> {
+  await page.locator("#session-menu").click();
+  await page.locator("#terminal-close").click();
 }
 
 /** The rendered terminal rows. xterm.js pauses painting while the terminal is outside the
@@ -45,16 +54,16 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-control")).toBeEnabled({ timeout: 30_000 });
+      // A running mission is watched read-only on arrival, with no click.
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "view");
 
       // 1. Take control: granted write, typed input reaches the provider pane and its output comes back.
       const status = page.locator("#terminal-status");
       await openTerminal(page, "#terminal-control");
       await expect(status).toHaveAttribute("data-mode", "write");
-      await expect(status).toContainText("you have control");
+      await expect(status).toContainText("You have control");
       await expectScreen(page, "ok");
       await page.locator("#terminal-host .xterm-helper-textarea").focus();
       await page.keyboard.type("hello");
@@ -70,8 +79,9 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       const status2 = second.locator("#terminal-status");
       await openTerminal(second, "#terminal-control");
       await expect(status2).toHaveAttribute("data-mode", "view");
-      await expect(status2).toContainText("view only");
-      await expect(status2).toContainText("writer role");
+      await expect(status2).toContainText("read only");
+      // The reason a viewer cannot type is the note beside Take control in the composer, not part of the status line.
+      await expect(second.locator("[data-composer]")).toContainText("writer role");
       await expectScreen(second, "echo:hello"); // fresh snapshot of the shared pane
       await second.locator("#terminal-host .xterm-helper-textarea").focus();
       await second.keyboard.type("blocked");
@@ -89,10 +99,10 @@ test.describe("remote terminal with a real worker and tmux station", () => {
 
       // 3. Closing the writer frees the role: a new "Take control" in the second tab is granted write.
       await page.bringToFront();
-      await page.locator("#terminal-close").click();
+      await closeTerminal(page);
       await expect(page.locator("#terminal-open")).toBeEnabled();
       await second.bringToFront();
-      await second.locator("#terminal-close").click();
+      await closeTerminal(second);
       await openTerminal(second, "#terminal-control");
       await expect(status2).toHaveAttribute("data-mode", "write", { timeout: 20_000 });
       await second.locator("#terminal-host .xterm-helper-textarea").focus();
@@ -123,14 +133,12 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-control")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       const status = page.locator("#terminal-status");
-      await openTerminal(page, "#terminal-control");
+      await openTerminal(page, "#terminal-control"); // asking for control is answered with a view-only grant
       await expect(status).toHaveAttribute("data-mode", "view");
-      await expect(status).toContainText("read-only");
+      await expect(page.locator("[data-composer]")).toContainText("read-only");
       await expectScreen(page, "ok");
       st.killStation();
       await expect(status).toHaveAttribute("data-state", "ended", { timeout: 20_000 });
@@ -146,17 +154,9 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-status")).not.toHaveAttribute("data-state", "idle", { timeout: 30_000 });
       const status = page.locator("#terminal-status");
-      // A presence update can disable the button between Playwright's enabled check and the click
-      // (seen once on firefox-desktop in CI: the status stayed idle). Click again until it leaves idle.
-      await expect(async () => {
-        await page.locator("#terminal-open").click();
-        await expect(status).not.toHaveAttribute("data-state", "idle", { timeout: 2000 });
-      }).toPass({ timeout: 20_000 });
       await expect(status).toContainText("--allow-terminal-view", { timeout: 20_000 });
       await expect(status).not.toHaveAttribute("data-state", "live");
       // The worker refused before sending any output, so nothing was ever written to the terminal.
@@ -170,12 +170,12 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     const st = await startStation(coord, "control");
     try {
       await setupViaUi(page, coord);
-      await expect(async () => {
-        await page.goto(`/missions/e2e-worker/${st.missionId}`);
-        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(`/missions/e2e-worker/${st.missionId}`);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       await st.stopWorker();
-      await expect(page.locator("#terminal-open")).toBeDisabled({ timeout: 20_000 });
+      // With the worker gone Take control is disabled and says so; Watch live is not offered.
+      await expect(page.locator("#terminal-control")).toBeDisabled({ timeout: 20_000 });
+      await expect(page.locator("[data-composer]")).toContainText("offline");
     } finally {
       st.cleanup();
     }
