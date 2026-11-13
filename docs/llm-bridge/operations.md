@@ -1727,6 +1727,25 @@ cycle ID and wake unit.
   restoration and context recall. Claude and Copilot live restoration is
   unverified.
 
+## Provider capabilities and prompt visibility
+
+`llm-bridge doctor --capabilities` (add `--json` for machine output) prints, for each provider and
+capability, `supported`, `unsupported` or `unverified`, with the evidence date and CLI version from
+`llm_tools/provider_evidence/<provider>.json`. `unverified` means Bridge implements the capability but no
+evidence file records it. `docs/llm-bridge/provider-capabilities.md` is generated from the same registry
+(`llm_tools/bridge_providers.py`); regenerate it with `python -m llm_tools.bridge_capabilities --write-doc`.
+`doctor` also warns when an installed provider CLI has a newer minor version than its evidence.
+
+Native missions cannot run on MiniMax (`mmx` offers text chat only) or z.ai (capacity only, no CLI).
+Starting one fails with a message that names the alternative: a route on Kilo or OpenCode.
+
+Prompt visibility: Bridge passes the prompt to Claude Code, Codex, Copilot, Kilo and OpenCode as a
+command-line argument, so it is visible to other local users in the process list. For Kilo 7.3.45 and
+OpenCode 1.18.3 the help of `run` documents a positional `message..` and `--file` (an attachment that
+does not replace the message); it documents no prompt-file or standard-input option, so Bridge cannot
+keep the prompt out of the arguments for them. The registry field `prompt_channel` records this per
+provider and switches a provider to a file or standard-input form once its CLI documents one.
+
 ## Provider trust boundary
 
 Providers run as your user, in your mission folder. Bridge narrows what a provider

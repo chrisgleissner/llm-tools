@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - exercised on Windows CI
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -5825,3 +5825,79 @@ def suspend_with_wake(
             should_interrupt=should_interrupt,
             env=env,
         )
+
+
+# --- Failure backoff -------------------------------------------------------
+
+FAILURE_BACKOFF_BASE_DEFAULT = 30
+FAILURE_BACKOFF_MAX_DEFAULT = 900
+
+
+@dataclass(frozen=True)
+class FailureBackoffPolicy:
+    """Bounded exponential delay before the same provider or route is launched again.
+
+    The n-th consecutive failure waits ``min(cap, base * 2 ** (n - 1))`` seconds.
+    A ``base`` of 0 disables the delay.
+    """
+
+    base: int = FAILURE_BACKOFF_BASE_DEFAULT
+    cap: int = FAILURE_BACKOFF_MAX_DEFAULT
+
+    def delay(self, consecutive_failures: int) -> int:
+        if self.base <= 0 or consecutive_failures <= 0:
+            return 0
+        exponent = min(consecutive_failures - 1, 62)
+        return int(min(max(self.cap, 0), self.base * (2 ** exponent)))
+
+
+def failure_backoff_policy(config: dict[str, Any] | None = None, env: dict[str, str] | None = None) -> FailureBackoffPolicy:
+    """Policy from ``LLM_TOOLS_FAILURE_BACKOFF_BASE``/``_MAX`` (seconds), then the ``failure_backoff_base``/``_max`` config keys, then the defaults."""
+    env = os.environ if env is None else env
+    config = config or {}
+
+    def seconds(env_name: str, key: str, default: int) -> int:
+        for raw in (env.get(env_name), config.get(key)):
+            if raw is None or raw == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return int(value)
+        return default
+
+    return FailureBackoffPolicy(
+        base=seconds("LLM_TOOLS_FAILURE_BACKOFF_BASE", "failure_backoff_base", FAILURE_BACKOFF_BASE_DEFAULT),
+        cap=seconds("LLM_TOOLS_FAILURE_BACKOFF_MAX", "failure_backoff_max", FAILURE_BACKOFF_MAX_DEFAULT),
+    )
+
+
+@dataclass
+class FailureBackoff:
+    """Consecutive non-rate-limit failures per provider or route key, and when each may launch again."""
+
+    policy: FailureBackoffPolicy = field(default_factory=FailureBackoffPolicy)
+    failures: dict[str, int] = field(default_factory=dict)
+    not_before: dict[str, int] = field(default_factory=dict)
+
+    def record_failure(self, key: str, now: int) -> int:
+        """Count one more failure of ``key`` and return the delay before it may launch again."""
+        count = self.failures.get(key, 0) + 1
+        self.failures[key] = count
+        delay = self.policy.delay(count)
+        if delay > 0:
+            self.not_before[key] = now + delay
+        return delay
+
+    def record_success(self, key: str) -> None:
+        self.failures.pop(key, None)
+        self.not_before.pop(key, None)
+
+    def blocked(self, now: int) -> set[str]:
+        return {key for key, until in self.not_before.items() if until > now}
+
+    def earliest_release(self, keys: set[str], now: int) -> int | None:
+        times = [self.not_before[k] for k in keys if self.not_before.get(k, 0) > now]
+        return min(times) if times else None

@@ -587,6 +587,7 @@ def _build_parser(
     _add_mission_arg(doctor, default_mission, inferred=False)
     doctor.add_argument("--include-config", action="store_true", help="with --json, include the mission's saved copy of the llm-tools config (large; left out by default)")
     doctor.add_argument("--bundle", nargs="?", const="", default=None, metavar="PATH", help="write a redacted diagnostic archive for bug reports (default: llm-bridge-bundle-<UTC time>.tar.gz here; never overwrites)")
+    doctor.add_argument("--capabilities", action="store_true", help="print, per provider and capability, supported / unsupported / unverified with the evidence date and CLI version")
     _add_json_arg(doctor)
 
     theme = sub.add_parser("theme", help="show the detected terminal background, the active colour theme and a swatch per role")
