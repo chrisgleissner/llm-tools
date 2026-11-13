@@ -1,7 +1,8 @@
 // Generated from llm_tools.bridge_tui._HUMANIZERS by generate_event_phrases.py. Do not edit.
 // Kinds whose phrase is the kind spelled out as words (task-added: Task added) are omitted; src/event-humanizer.ts derives them.
 export const TUI_EVENT_PHRASES: Readonly<Record<string, string>> = Object.fromEntries(
-  `capacity-refresh	Capacity refreshed: providers
+  `budget-exhausted	Budget exhausted · mission held
+capacity-refresh	Capacity refreshed: providers
 capacity-refresh-error	Capacity refresh failed
 capacity-wake-plan	Shared wake plan updated
 capacity-wake-resume-unverified	Capacity wake could not be verified
@@ -12,7 +13,10 @@ controller-heartbeat-error	controller heartbeat failed
 controller-mode	Controller mode: unknown
 controller-ownership	Controller ownership verified
 dependency-added	Task now waits for
+mission-budget-changed	Budget changed
 mission-colour	Mission colour back to automatic
+mission-commit-policy-changed	Commit policy 
+mission-hold-released	Hold released
 mission-status	Mission changed
 mission-suspend-when-rate-limited	Capacity-wait suspend off
 mission-waiting-for-operator	Waiting for you · no task can run
@@ -30,14 +34,17 @@ provider-handoff-selected	Handing off to ?
 provider-orphaned	Provider process ? could not be stopped
 provider-result-diagnosed	Provider result recorded
 provider-selection	Selected
+provider-spend	Spend
 provider-switched	Switched provider ? → ?
 provider-usage-limit	Provider usage limit reached, reset time unknown
 provider-wait	Waiting for capacity
+push-failed	Push failed · mission held
 repository-checkpoint	Repository checkpoint saved
 review-hold	Holding the next task for your review
 rotation-applied	Rotation applied: default
 rotation-changed	Rotation changed to default
 rotation-rejected	Rotation change rejected
+spend-baseline	Spend baseline recorded
 station-handoff	Switched provider ? → ?
 station-observation	Provider screen observed
 station-stopped	Provider station stopped
@@ -48,12 +55,15 @@ suspend-provider-started	Provider resumed after verified sleep
 suspend-refused	Capacity suspend refused
 suspend-work-resumed	Capacity-wait work resumed
 task-awaiting-answer	Task asked a question and is waiting for you · see the provider output
+task-commit-failed	Task commit failed · mission held
+task-committed	Task committed ·  on 
 task-notice-deferred	Provider not told about queued task changes yet · its prompt holds unsent text
 task-notice-delivered	Provider told about queued task changes
 task-priority	Task priority changed
 task-proposal-accepted	Proposal accepted: task
 task-proposal-rejected	Proposal rejected: task
 task-proposed	Agent proposed task
+task-pushed	Pushed to  
 task-ready	Task updated
 task-rejected	Task sent back
 task-status	Task updated

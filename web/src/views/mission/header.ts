@@ -35,6 +35,8 @@ export interface HeaderHandlers {
   stop(): void;
   start(): void;
   cancel(): void;
+  finish(): void;
+  forceStop(): void;
   remove(): void;
   runNext(): void;
   approve(t: Task): void;
@@ -149,6 +151,7 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
   const off = gate(m.blocked);
   const items: MenuItem[] = [];
   if (m.status === "RUNNING") items.push({ label: "Run next task now", onSelect: hd.runNext, ...off });
+  if (m.status === "RUNNING") items.push({ label: "Finish: ask the provider to exit", onSelect: hd.finish, ...off, attrs: { "data-action": "finish" } });
   // On a phone the header keeps Approve, Pause and Stop in one row; Reject is here (and on the task row).
   const awaiting = !finished(m.status) && m.state.id === "needs-approval" ? approvalOrdinals(m) : [];
   if (awaiting.length === 1) {
@@ -157,6 +160,7 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
   }
   items.push({ label: "Copy mission ID", onSelect: () => copy(m.missionId, "mission ID") });
   if (m.folder) items.push({ label: "Copy folder path", onSelect: () => copy(m.folder, "folder path") });
+  if (["RUNNING", "PAUSED", "STOPPING"].includes(m.status)) items.push({ label: "Force stop", danger: true, onSelect: hd.forceStop, ...off, attrs: { "data-action": "force-stop" } });
   if (!finished(m.status)) items.push({ label: "Cancel mission", danger: true, onSelect: hd.cancel, ...off });
   // Only a mission that never started or has ended or stopped can be deleted (the worker enforces the same set, PRD-038).
   if (["CREATED", "COMPLETED", "FAILED", "CANCELLED", "STOPPED"].includes(m.status)) items.push({ label: "Delete mission", danger: true, onSelect: hd.remove, ...off, attrs: { "data-action": "delete-mission" } });

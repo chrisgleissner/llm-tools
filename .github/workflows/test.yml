@@ -129,10 +129,22 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
 
+  # The browser tests took 37 to 43 minutes on main in one job (limit 45): they run as two Playwright shards in parallel. Shard 1 keeps the job name
+  # that was there before; shard 2 adds " shard 2" and also runs the visual regression step.
   web:
-    name: web UI (TypeScript, Playwright)
+    name: web UI (TypeScript, Playwright)${{ matrix.suffix }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: "1/2"
+            suffix: ""
+            artifact: web-playwright
+          - shard: "2/2"
+            suffix: " shard 2"
+            artifact: web-playwright-shard-2
     permissions:
       contents: read
     steps:
@@ -166,12 +178,14 @@ jobs:
           npm run build
       - name: Browser tests (official Playwright image)
         working-directory: web
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           # The layout, accessibility and timing specs of PRD-037 measure text and boxes, so they are calibrated for the fonts of the Playwright
           # image and cannot pass on a runner with other fonts. The image has no Python and no tmux: the worker and terminal specs get a venv
           # (the project, installed editable) and tmux inside the container. The screenshot comparison is a step of its own below.
           version=$(node -p "require('@playwright/test/package.json').version")
-          docker run --rm --ipc=host -e CI=1 -e BRIDGE_SKIP_VISUAL=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+          docker run --rm --ipc=host -e CI=1 -e BRIDGE_SKIP_VISUAL=1 -e SHARD -e CARGO_TARGET_DIR=/work/coordinator/target \
             -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" bash -ec '
               apt-get update -qq
               apt-get install -y -qq tmux python3-venv > /dev/null
@@ -180,15 +194,16 @@ jobs:
               /work/.venv/bin/python -c "import llm_tools"
               playwright="node node_modules/@playwright/test/cli.js test"
               # Behaviour, layout, accessibility and mobile tests on all four projects.
-              $playwright --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile
+              $playwright --shard="$SHARD" --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile
               # PRD-037 T45: the device matrix (nine viewports, Chromium): fold budgets, reflow, target sizes, axe and keyboard simulation at
               # 2560x1440, 1280x720, 768x1024, 1024x768, 430x932, 360x640, 320x568 and the landscape phones 740x360 and 568x320.
-              $playwright --project="matrix-*"
+              $playwright --shard="$SHARD" --project="matrix-*"
               # PRD-037 UXR-043 to UXR-046: the inventoried operator tasks (interaction counts), typing above a keyboard that covers half the
               # screen, and thumb reach, at 320x568 and 360x640 (the same specs run at 1440x900 and 353x745 above).
-              $playwright --project="paths-*"
+              $playwright --shard="$SHARD" --project="paths-*"
             '
       - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
+        if: matrix.shard == '2/2'
         working-directory: web
         run: |
           version=$(node -p "require('@playwright/test/package.json').version")
@@ -199,7 +214,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: web-playwright
+          name: ${{ matrix.artifact }}
           path: |
             web/playwright-report
             web/test-results/load-metrics.json

@@ -1,0 +1,9 @@
+/* Session details and the scrollback search of the session pane (PRD-015). */
+.session-turns { margin: 0; padding-inline-start: var(--sp-5); display: grid; gap: var(--sp-1); }
+.session-turns-title { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-sm); }
+.transcript-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-1) var(--sp-2); }
+.transcript-tools[hidden] { display: none; }
+.transcript-tools .transcript-search { flex: 1 1 10rem; min-inline-size: 0; }
+.transcript mark { background: var(--accent-tint); color: inherit; border-radius: 2px; }
+.transcript mark.current { outline: 2px solid var(--accent, currentColor); }
+[data-q="session-glance"] { margin-inline-start: var(--sp-2); }

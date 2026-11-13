@@ -110,6 +110,11 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
     const items: MenuItem[] = [];
     if (["QUEUED", "READY", "RUNNING"].includes(t.status)) items.push({ label: "Pause task", onSelect: () => actions.pause(t), ...off });
     if (!["COMPLETED", "FAILED", "CANCELLED"].includes(t.status)) items.push({ label: "Cancel task", danger: true, onSelect: () => actions.cancel(t), ...off });
+    if (!["COMPLETED", "CANCELLED"].includes(t.status)) {
+      items.push({ label: "Change priority", onSelect: () => actions.priority(t), ...off, attrs: { "data-action": "task-priority" } });
+      items.push({ label: "Add prerequisite", onSelect: () => actions.depend(t), ...off, attrs: { "data-action": "task-depend" } });
+      items.push({ label: "Amend prompt", onSelect: () => actions.amend(t), ...off, attrs: { "data-action": "task-amend" } });
+    }
     items.push({ label: "Copy title", onSelect: () => copy(taskTitle(t), "title") });
     items.push({
       label: "Copy prompt",

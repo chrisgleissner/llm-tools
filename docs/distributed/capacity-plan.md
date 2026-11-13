@@ -1,8 +1,8 @@
 # Coordinator capacity plan (PRD-009)
 
-Status: plan only. No measurement in this document has been run. The results table in
-the last section is empty and is filled in phase B, after the coordinator with the
-fixes below is merged.
+Status: measured on 2026-11-13 (see Results). Findings F1 to F10 have dispositions in the last
+sections. The sections up to "Findings" are the original plan and describe the code before the
+fixes; Results and Dispositions describe the code after them.
 
 ## Summary
 
@@ -350,52 +350,171 @@ unpaged mission list size. Each is listed under its dimension above with the tes
 
 ## Results (phase B)
 
-Fill after the merged coordinator is measured. Empty cells are intentional. Each row
-is one step: one dimension, one hardware target, one N or R or V value, three runs,
-and the median. Record the spread in the notes column.
+Load generator: `scripts/coordinator_capacity.py` (fake workers, browsers and terminal producers over
+TLS; one Python process at nice 19). Raw summaries, one JSON line per run:
+`docs/distributed/capacity-measurements/x86-64.jsonl`, `emulated-pi.jsonl`, `find-009-emulated-pi.jsonl`.
 
-| Dimension | Step (N / R / V) | Hardware | Run | RSS peak (MiB) | CPU (%) | p99 latency (ms) | Error rate | Queue depth (max) | DB growth (MiB) | Result | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Workers | 1 | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Workers | 64 | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Workers | 65 (refusal) | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Workers | 1 | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Workers | 64 | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Workers | 65 (refusal) | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Missions | 6 400 total | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Missions | 320 000 total | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Missions | 6 400 total | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Missions | 320 000 total | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Events/s | 500 | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Events/s | 5 000 | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Events/s | 500 | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Events/s | 5 000 | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Browser sessions | 240 | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Browser sessions | 240 (half stalled) | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Browser sessions | 240 | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
-| Terminal viewers | 240 viewers, 1 session | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Terminal viewers | 32 viewers, 64 sessions | x86-64 CI runner | 1 / 2 / 3 | | | | | | | | |
-| Terminal viewers | 240 viewers, 1 session | Raspberry Pi Zero 2 W | 1 / 2 / 3 | | | | | | | | |
+Deviations from the method above, all because of time and host constraints:
 
-## Open items
+- Windows are 45 s after a 10 s warm-up instead of 10 min after 60 s. Rows marked "3 runs" were run three
+  times and show the median; other rows are one run.
+- There is no GitHub-hosted runner run. The x86-64 rows are from the developer host only.
+- The Pi rows are from the emulated Pi (QEMU raspi3b TCG, 4 emulated Cortex-A53, 478 MB, DietPi, the
+  aarch64-musl build, in a 96 MiB / MemoryHigh 80 MiB cgroup without swap, same limits as the shipped unit).
+  TCG is far slower than the board. **Memory figures carry over; latency, CPU and throughput figures do
+  not**, and on the emulated Pi the load generator and the coordinator compete for the same emulated
+  CPUs, so steps with many TLS handshakes stalled (see notes). Physical Pi timing is not measured here.
+- The fake clients are Python threads. Fan-out and relay latency above about 100 ms at 128 browser clients
+  is the client's own scheduling; the coordinator-side figure is lower. The `closed` count in the events
+  rows is a load generator artefact (a TLS socket shared by a reader and a writer thread reports EOF); the
+  coordinator logged no error and no worker saw an `error` frame or a nack.
+- The per-address cap (32) was raised to 1000 for all runs, because every fake client uses 127.0.0.1.
 
-- The soak harness (`scripts/bridge_soak.py`, PRD-007) must provide the capabilities
-  listed under Measurement method. Phase B cannot start until it does.
-- Findings F1 to F10 are not implemented by this document. Each needs its own change and
-  test. F9 is a prerequisite for phase B measurements.
-- The provisional thresholds need an owner decision before phase B.
+x86-64 developer host (Intel Core i7-6700K, glibc release build of this branch, 2026-11-13):
+
+| Dimension | Step | RSS peak (MiB) | CPU (%) | p99 (ms) | Errors | Result and notes |
+|---|---|---|---|---|---|---|
+| Workers | 1 | 11.6 | 2.8 | 54 (command round trip) | 0 | pass |
+| Workers | 16 | 16.0 | 13.2 | 62 | 0 | pass |
+| Workers | 64 (3 runs) | 27.1 (26.7 to 29.6) | 31.7 | 60 (59 to 68) | 0 | pass; round trip floor is about 53 ms (the wait for a command result polls) |
+| Workers | 65 | n/a | n/a | n/a | 1 designed | 503 `too many worker connections`; the 64 stay connected |
+| Missions | 1 000 total | 15.7 | n/a | 14 (paged list p95) | 0 | pass |
+| Missions | 5 000 total | 35.6 | n/a | 19 | 0 | pass |
+| Missions | 10 000 total | 49.1 to 52.1 | n/a | 26 to 41 | 0 | pass; this is the cap |
+| Missions | 20 000 and 50 000 offered | 65 | n/a | n/a | refused | measured before the per-worker rule: 10 000 accepted in total, the rest refused (superseded, see F6) |
+| Events/s | 500 | 20.7 | 4.3 | 75 (visibility) | 0 | achieved 501/s |
+| Events/s | 2 000 | 25.1 | 9.4 | 85 | 0 | achieved 2 001/s |
+| Events/s | 5 000 (3 runs) | 28.0 (26.0 to 28.0) | 14.3 | 41 (33 to 101) | 0 | achieved 5 002/s, database +95 MiB per 45 s before retention |
+| Events/s | 10 000 | 37.6 | 18.8 | 91 | 0 | achieved 10 005/s; no limit reached |
+| Events/s | 5 000 with 8 browsers | 31.4 | 16.9 | 37 | 0 | pass |
+| Browser sessions | 1 | 12.7 | 3.9 | 3 (fan-out) | 0 | pass |
+| Browser sessions | 64 | 27.5 | 19.6 | 125 | 0 | pass |
+| Browser sessions | 128 | 39.5 | 26.8 | 478 (client-limited) | 0 | pass; this is the cap, about 0.2 MiB per socket |
+| Browser sessions | 235 and 260 offered (3 runs) | 47.5 (43.4 to 50.8) | 27.3 | n/a | 107 to 132 designed | 128 admitted, the rest 503 `busy` with Retry-After |
+| Browser sessions | 40, 20 not reading | 21.8 | 33.6 | 74 | 0 | all 20 stalled sockets closed with 1013 `client too slow`; none of the 20 active clients closed |
+| Terminal sessions | 1 | 9.6 | 0.4 | 2.5 (relay) | 0 | 16 KiB/s |
+| Terminal sessions | 16 | 14.1 | 5.4 | 4.2 | 0 | 16 KiB/s each |
+| Terminal sessions | 64 (3 runs) | 28.9 (28.7 to 29.1) | 12.5 | 5.6 (5.2 to 6.9) | 0 | 16 KiB/s each |
+| Terminal sessions | 65 | 28.7 | 12.3 | 5.3 | 1 designed | `x` frame `too many terminal sessions on this coordinator` |
+| Terminal sessions | 64 at 64 KiB/s | 29.3 | 10.2 | 37 | 0 | pass |
+| Terminal sessions | 16 at 256 KiB/s, 4 not reading | 16.7 | 5.3 | 45 | 0 | the 4 stalled viewers were disconnected by the coordinator; the other 12 were not affected |
+
+Emulated Pi (memory figures only; 10 s sampling interval through SSH, 2026-11-13):
+
+| Dimension | Step | RSS peak (MiB) | cgroup peak (MiB) | Notes |
+|---|---|---|---|---|
+| Workers | 16 | 26.9 | 36.7 | connected; command round trips timed out (emulated CPU saturated) |
+| Workers | 64 | 21.2 | 28.8 | only 19 workers completed the handshake before the load generator's timeouts; not a coordinator limit |
+| Missions | 5 000 total | 44.5 | 45.0 | hello p50 4.7 s, paged list p95 2.5 s (emulated) |
+| Missions | 10 000 total | 60.8 | 66.4 | below the 76.8 MiB threshold; this is why the cap is 10 000 |
+| Events/s | 500 offered, 8 workers | 16.7 | 22.1 | achieved 500/s |
+| Events/s | 20 000 offered (prefill) | 32.1 to 58.7 | 79.7 to 80.4 | achieved 374/s (old binary) and 532/s (this branch); the cgroup reaches MemoryHigh because of page cache |
+| Browser sessions | 128 | 34.0 | 36.6 | 71 opened before the emulated CPU stalled the handshakes; not a coordinator limit |
+| Terminal sessions | 16 | 12.0 | 20.9 | relay latency not meaningful |
+| Terminal sessions | 64 | 15.9 | 20.9 | 21 of 64 viewers timed out waiting for the worker; emulated CPU |
+
+### Measured limits
+
+| Resource | x86-64 | Emulated Pi (memory) | Limit now enforced |
+|---|---|---|---|
+| Worker connections | 64 within the thresholds, RSS 27 MiB | RSS 21 to 27 MiB | 64 (503) |
+| Missions indexed | 10 000 at 49 to 52 MiB | 10 000 at 61 MiB | 10 000 per worker (oldest finished dropped first); 5 000 per hello |
+| Events per second | 10 000/s, RSS 38 MiB, not saturated | 500/s with 17 MiB; 374 to 532/s ingest while prefilling | not limited (F7 deferred) |
+| Browser sessions | 128 (cap), RSS 40 MiB | RSS 34 MiB for 71 clients | 128 (503 `busy`) |
+| Terminal sessions | 64 (cap), RSS 29 MiB | RSS 16 MiB | 16 per worker, 64 total |
+
+Memory findings made during the measurement, all fixed:
+
+- The mission list parsed every mission summary into a JSON tree on each request, about 10 KiB per mission.
+  Only the fields that the filters and the sort read are parsed for every row now; the full summary is parsed
+  for the returned page.
+- The parsed `hello` (every mission summary plus the capability list) stayed allocated for as long as the
+  worker's connection lived. It is dropped after the database write. For 20 000 missions over 10 connections
+  the RSS after the hellos fell from 109 MiB to 37 MiB (musl build, same allocator as the Pi). Together with
+  the list change, 10 000 missions went from 84 MiB to 42 MiB peak on the x86-64 musl build.
+- An upgraded WebSocket no longer holds a TCP connection slot, so the 256-slot cap does not bound `/stream`
+  clients (260 were accepted in the first run, before the cap). The explicit cap of 128 is therefore the
+  only bound.
+
+### Thresholds
+
+The provisional thresholds are adopted unchanged:
+
+| Threshold | Value | Evidence |
+|---|---|---|
+| Command round trip p99 | at most 500 ms | 54 to 68 ms on x86-64 up to 64 workers. Not verifiable on the emulated Pi; re-check on the board. |
+| Browser fan-out p99 | at most 500 ms | Met up to 128 clients on x86-64 (478 ms, mostly client scheduling). |
+| Terminal relay p99 | at most 200 ms | 2.5 to 45 ms on x86-64. Not verifiable on the emulated Pi. |
+| Error rate | 0 apart from designed refusals | 0 in every run. |
+| RSS peak on the Pi | at most 80 % of 96 MiB (76.8 MiB) | Highest emulated-Pi process RSS 66.4 MiB (event ingest with backup, pre-DOG-024 binary), 63.4 MiB (this branch); 60.8 MiB at 10 000 missions. |
+
+## FIND-009: coordinator memory on the Pi
+
+The earlier physical-Pi logs recorded a kernel out-of-memory kill of the coordinator at about 93 MiB against
+the 96 MiB limit (`PI-SYS-005`, `PI-VERIFY-005`, `PI-VERIFY-011`). The cause was never identified.
+
+Method. Emulated Pi, a throw-away coordinator in a cgroup with `MemoryMax=96M`, `MemoryHigh=80M` and no
+swap. Phase 1: 8 fake workers offered 20 000 events/s for 240 s (the database reached 36 to 52 MiB, not the
+220 MiB the 50 000-event cap allows, because the emulated board ingests only 374 to 532 events/s). Phase 2:
+500 events/s from 8 workers and 8 `/stream` clients for 420 s, with an online `backup` started 90 s into it.
+The pre-DOG-024 binary is the one installed on the emulated Pi (built 2026-11-06); the other is this branch.
+The pre-DOG-024 binary's phase 2 could not start (see below), so for that binary the backup ran on an idle
+coordinator and its phase 2 RSS is the figure after the whole run.
+
+| | Pre-DOG-024 binary | This branch |
+|---|---|---|
+| Process peak RSS (VmHWM), prefill | 58.7 MiB | 32.1 MiB |
+| Process peak RSS, whole run | 60.9 to 66.4 MiB (two runs) | 63.4 MiB (event load and backup) |
+| cgroup peak (includes page cache) | 84.2 to 84.3 MiB | 84.6 MiB |
+| `anon` / `file` at the end | 57.5 to 62.8 / 18.3 to 19.1 MiB | 59.8 / 20.9 MiB |
+| `oom_kill` | 0 | 0 |
+| `memory.high` events (throttling at 80 MiB) | 568 to 1702 | 33 to 894 |
+| Online backup of the 35 to 57 MiB database | 52 to 123 s, 37 to 51 MiB written | 11 s, 0.2 MiB written (7.2 MiB in use) |
+
+Result.
+
+- The kernel did not kill either binary at 96 MiB under this load. Anonymous memory peaked at about 60 MiB, so
+  the headroom to the limit is about 36 MiB. The cgroup total sits at the 80 MiB `memory.high` line because
+  of page cache, which the kernel reclaims; this throttles the process but does not kill it.
+- The DOG-024 change did not change the steady process RSS (60 to 66 MiB under load). It changed the backup:
+  the new backup copies only pages in use, took 11 s instead of 52 to 123 s and did not move RSS.
+- The 93 MiB kill was not reproduced, so this measurement does not prove its cause. The earlier physical run
+  was 24 hours long with the pre-DOG-024 binary, whose backup ran concurrently with the coordinator and wrote
+  GiBs (D29). The likeliest contributor is the page cache and dirty-page accounting of that backup in the
+  same cgroup, which DOG-024 removed, but that is an inference from D29 and not a measurement. The emulated
+  card is a file on a fast host disk, so slow-card writeback pressure is not reproduced here.
+- After the prefill, the pre-DOG-024 binary did not complete a TLS handshake within 30 s in two of two runs,
+  so its phase 2 could not enrol workers. The new binary did not show this. It was not investigated further.
+- Recommendation: keep the 96 MiB limit. Anonymous memory is about 60 MiB with 8 workers, 8 browsers and
+  a 500 events/s stream, and 61 MiB at the 10 000 mission cap. A physical-Pi run of at least 24 hours with
+  the new binary and `memory.events` sampled is still needed to close the question; it is the only evidence
+  that can show the kill gone on the board itself.
 
 ## Dispositions
 
-| Finding | Disposition |
-| --- | --- |
-| F1 | FIND-006 |
-| F2 | FIND-006 |
-| F3 | FIND-006 |
-| F4 | FIND-006 |
-| F5 | FIND-006 |
-| F6 | FIND-006 |
-| F7 | FIND-006 |
-| F8 | FIND-006 |
-| F9 | FIND-006 |
-| F10 | FIND-006 |
+| Finding | Disposition | Evidence |
+|---|---|---|
+| F1 | fixed (before this change): the stream ring holds 32 notices of at most 4 KiB, with no event or result bodies | `worker.rs` `hub_fanout_keeps_only_small_change_notifications_for_multiple_browsers`, `browser_stream_gets_change_notices_not_event_bodies_or_command_results` |
+| F2 | fixed (by the existing byte caps: 64 KiB per pending request, 512 KiB per worker, 8 MiB in total bound the outbound queue; measured depth was 0 in every step) | `worker.rs` `command_journal_refuses_excess_pending_bytes`; `resources.outbound_queue_depth_*` in diagnostics |
+| F3 | fixed (before this change): 128 KiB per session; this change adds the dropped-frame counter | `terminal.rs` `terminal_input_queue_refuses_bytes_above_its_per_session_budget` |
+| F4 | no change (not applicable). A terminal session has exactly one browser viewer (the browser socket is the session), so the 64-session cap bounds viewers at 64 and their queues at 16 MiB. Dimension 5 is measured as sessions | measured above |
+| F5 | fixed: 256 enrolled workers, 409 `too-many-workers`; the existing-name check, count and insert are one transaction | `capacity.rs` `enrolment_is_capped_at_256_workers_with_a_clear_error` |
+| F6 | fixed: the unpaged list already returned one page (default 100); this change keeps at most 10 000 summaries per worker (oldest finished dropped first; if all are active, the newest excess is not indexed and diagnostics shows `missions-over-cap`; a hello is never answered with an error for this), plus the list memory fix and the hello memory fix. A coordinator-wide cap was dropped because refusing a hello caused reconnect storms | `capacity.rs` `total_missions_are_capped_and_an_unpaged_list_is_one_page` |
+| F7 | FIND-006 (deferred). No rate was found at which the coordinator fails: 10 000 events/s on x86-64 at 38 MiB, with no nacks; storage per worker is bounded by `max_events_per_worker`. A limit needs a protocol error code and worker retry behaviour. Revisit with a physical-Pi measurement, where ingest is CPU-bound at about 6 000 events/s | measured above |
+| F8 | FIND-006 (partly fixed; the rest is deferred). `/stream` is capped at 128 in total and 16 per session or token, with HTTP 503 `busy` and Retry-After. Deferred: the silent drop above the 256 TCP slots, which needs a bounded 503 path in the accept loop. Upgraded WebSockets release their TCP slot, so the remaining case is plain HTTP over 256 connections | `capacity.rs` `stream_sockets_are_capped_at_128_with_a_clear_error` |
+| F9 | fixed: `/diagnostics` has `enrolled_workers`, `missions_indexed` and `resources` (`worker_connections`, `outbound_queue_depth_max`, `outbound_queue_depth_total`, `stream_clients`, `terminal_sessions`, `terminal_input_frames_dropped`) | `capacity.rs` `diagnostics_expose_connection_and_queue_counters` |
+| F10 | fixed: tests for the 64-worker cap, the 5 000 mission hello, the 500 event batch, the `/stream` 1013 lag path, the unpaged list size, the 10 000 mission cap, the enrolment cap and the stream cap | `coordinator/tests/capacity.rs` |
+
+The `hello` error for more than 5 000 missions now says `too many missions`; before it said
+"capabilities and missions must be lists". With 300-byte summaries the 1 MiB message limit is reached at
+about 3 000 missions, before the 5 000 limit.
+
+## Open items
+
+- Physical Raspberry Pi Zero 2 W run of `scripts/coordinator_capacity.py` for the time figures, and the
+  24-hour run with `memory.events` sampling for FIND-009.
+- GitHub-hosted runner repeat of the x86-64 rows (three runs of 10 minutes).
+- F7 and the rest of F8.
+- Replay rows beyond the per-worker cap are inserted and then evicted again on every reconnect of a worker that holds
+  more than 10 000 summaries. This costs database writes per reconnect, not memory, and the result is the same set each
+  time. Accepted; the worker could stop sending replay rows once the coordinator reports the cap in a `notice`.

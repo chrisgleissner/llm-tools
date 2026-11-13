@@ -2,6 +2,7 @@ import { test as base, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -9,6 +10,54 @@ const repo = resolve(import.meta.dirname, "../..");
 const targetDir = process.env.CARGO_TARGET_DIR ?? join(repo, "coordinator", "target");
 export const BIN = process.env.BRIDGE_COORDINATOR_BIN ?? join(targetDir, "release", "bridge-coordinator");
 export const PASSWORD = "correct horse battery";
+/**
+ * Bound for the first element of a freshly opened page. A new browser context fetches and parses the bundle
+ * and waits for the auth-state answer before anything renders; on the hosted Windows runners that took more
+ * than the 10 s default of `expect` right after the coordinator started (auth-ux and passkey-login in CI).
+ * Later assertions on the same page keep the default.
+ */
+export const FIRST_RENDER = { timeout: 30_000 } as const;
+
+/** One GET against the coordinator, trusting only its own CA. Resolves with the status and body. */
+function get(url: string, ca: Buffer, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((ok, fail) => {
+    const req = httpsRequest(new URL(path, url), { ca, servername: "localhost", timeout: 5_000 }, (res) => {
+      let body = "";
+      res.on("data", (d: Buffer) => (body += d.toString()));
+      res.on("end", () => ok({ status: res.statusCode ?? 0, body }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`GET ${path} timed out`)));
+    req.on("error", fail);
+    req.end();
+  });
+}
+
+/**
+ * The browser's first requests are the page, its script and the auth state. Make each of them once before a
+ * test starts, so the server's first database read, the file cache and the TLS set-up are not part of the
+ * test's first-render budget, and a coordinator that listens but cannot answer fails the fixture with a clear
+ * message instead of a locator timeout.
+ */
+async function waitUntilServing(url: string, data: string): Promise<void> {
+  const ca = readFileSync(join(data, "ca.pem"));
+  const deadline = Date.now() + 30_000;
+  const fetchOk = async (path: string): Promise<string> => {
+    for (;;) {
+      try {
+        const r = await get(url, ca, path);
+        if (r.status === 200) return r.body;
+      } catch {
+        // not answering yet
+      }
+      if (Date.now() > deadline) throw new Error(`coordinator listens on ${url} but did not answer GET ${path} with 200 within 30 s`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  const page = await fetchOk("/");
+  await fetchOk("/api/v1/auth/state");
+  const script = /<script[^>]*\ssrc="([^"]+)"/.exec(page)?.[1];
+  if (script) await fetchOk(script);
+}
 
 export interface Coordinator {
   url: string;
@@ -40,6 +89,7 @@ async function startCoordinator(): Promise<{ coord: Coordinator; stop: () => Pro
     });
     child.on("exit", (code) => fail(new Error(`coordinator exited with ${code}: ${buf}`)));
   });
+  await waitUntilServing(url, data);
   const coord: Coordinator = {
     url,
     dir: data,
@@ -74,7 +124,7 @@ export { expect };
 /** Complete first-run setup through the UI (the page then signs in automatically). */
 export async function setupViaUi(page: Page, coord: Coordinator, username = "admin"): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "First-run setup" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "First-run setup" })).toBeVisible(FIRST_RENDER);
   await page.getByLabel("Setup token").fill(coord.setupToken());
   await page.getByLabel("Administrator username").fill(username);
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);

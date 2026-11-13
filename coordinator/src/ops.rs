@@ -645,7 +645,15 @@ fn vacuum_into(src: &Path, tmp: &Path, pace: Pace) -> Result<(), String> {
     from.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
     // A small cache makes the output pager write as it goes instead of holding megabytes until the end.
     from.pragma_update(None, "cache_size", -1024).map_err(|e| e.to_string())?;
-    from.pragma_update(None, "auto_vacuum", 2).map_err(|e| e.to_string())?;
+    // `PRAGMA auto_vacuum = 2` commits a write transaction on the source even when the source already has
+    // that mode: it takes the write lock of the live database and syncs the log. A serving coordinator's
+    // transaction that has read and then writes gets SQLITE_BUSY at once while the lock is held (the busy
+    // timeout does not apply to such an upgrade), and the worker connection ends. The pragma is therefore
+    // set only on a source in another mode, which only an older database is.
+    let mode: i64 = from.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if mode != 2 {
+        from.pragma_update(None, "auto_vacuum", 2).map_err(|e| e.to_string())?;
+    }
     let mut pace = pace;
     let pace_cancel = pace.cancel.clone();
     pace.sync = std::fs::File::open(tmp).ok();
