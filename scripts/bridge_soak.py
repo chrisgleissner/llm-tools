@@ -70,6 +70,8 @@ def chosen_bounds(args: argparse.Namespace) -> dict[str, h.SlopeBound]:
     chosen: dict[str, h.SlopeBound] = {}
     for metric, bound in h.DEFAULT_BOUNDS.items():
         floor = bound.floor * (args.count_floor_multiplier if metric.endswith(COUNT_METRIC_SUFFIXES) else 1.0)
+        if metric == "coordinator_rss_kib" and args.coordinator_rss_floor_kib is not None:
+            floor = args.coordinator_rss_floor_kib
         chosen[metric] = h.SlopeBound(getattr(args, f"bound_{metric}"), floor, bound.unit, bound.per_process)
     return chosen
 
@@ -102,6 +104,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--count-floor-multiplier", type=float, default=1.0, metavar="FACTOR",
                         help="multiply the floors of the descriptor and thread metrics by this factor (default: 1). A run of a minute or less cannot "
                              "settle the coordinator's thread pool, which grows while database calls overlap, so a short run needs a floor above that growth")
+    parser.add_argument("--coordinator-rss-floor-kib", type=float, default=None, metavar="KIB",
+                        help=f"replace the floor of the coordinator RSS slope check (default: {h.DEFAULT_BOUNDS['coordinator_rss_kib'].floor:g}). The check fails only when the slope is "
+                             "above its per-hour bound and the fitted rise is above this floor, so in a run too short to settle the allocator the floor is the "
+                             "absolute rise that the run allows; the short end-to-end test uses 12288 (see soak-and-chaos.md)")
     parser.add_argument("--report", type=Path, help="write the JSON report here (default: soak-report.json in the run directory)")
     parser.add_argument("--keep", action="store_true", help="keep the run directory (always kept on failure)")
     parser.add_argument("--run-dir", type=Path, help="use this empty directory instead of a new temporary one")

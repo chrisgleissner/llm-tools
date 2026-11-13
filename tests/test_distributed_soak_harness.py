@@ -782,7 +782,10 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     started = time.monotonic()
     code = bridge_soak.main([
         "--duration", str(int(scaled(60))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--warmup-seconds", "30", "--limit-every", "20", "--limit-seconds", "8",
-        "--settle-seconds", str(int(scaled(60))), "--count-floor-multiplier", "8", "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
+        "--settle-seconds", str(int(scaled(60))), "--count-floor-multiplier", "8",
+        # A 30 s fit cannot separate the coordinator's allocator ramp from a leak: its RSS rose 2.7 to 7.2 MiB over the window in 10 loaded runs
+        # (2 of 10 failed the 4 MiB floor). Judge the absolute rise against 12 MiB instead; the full-size soak keeps the slope bound and the 4 MiB floor.
+        "--coordinator-rss-floor-kib", "12288", "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
     ])
     report = json.loads(report_path.read_text())
     failed = [item for item in report["checks"] if item["verdict"] != "pass"]
@@ -791,6 +794,20 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     assert len(report["samples"]) >= 6 and {item["class"] for item in report["latency"]} == {"read", "submit", "roundtrip"}
     assert report["workload"]["task_statuses"].get("COMPLETED", 0) > 0
     assert time.monotonic() - started < scaled(300)
+
+
+def test_short_soak_judges_the_coordinator_rss_rise_absolutely_and_still_fails_a_leak():
+    """The coordinator's RSS is still ramping 30 to 60 s after the start. The worst of 10 loaded runs rose 7.2 MiB over the fit window, which the
+    default 4 MiB floor failed (slope 873740/h). A leak of 500 KiB per second must still fail with the 12 MiB floor the short soak uses."""
+    ramp = [(30.0, 32304.0), (35.0, 32532.0), (40.0, 32748.0), (46.0, 34656.0), (51.0, 35408.0), (56.0, 37020.0), (60.0, 39796.0)]
+    default = h.DEFAULT_BOUNDS["coordinator_rss_kib"]
+    short = h.SlopeBound(default.per_hour, 12288.0, default.unit)
+    assert h.check_slope("coordinator_rss_kib", ramp, default, warmup_seconds=0.0).verdict == "fail"
+    assert h.check_slope("coordinator_rss_kib", ramp, short, warmup_seconds=0.0).verdict == "pass"
+    leaking = [(t, kib + 500.0 * (t - 30.0)) for t, kib in ramp]
+    assert h.check_slope("coordinator_rss_kib", leaking, short, warmup_seconds=0.0).verdict == "fail"
+    assert bridge_soak.chosen_bounds(bridge_soak.parse_args(["--coordinator-rss-floor-kib", "12288"]))["coordinator_rss_kib"].floor == 12288.0
+    assert bridge_soak.chosen_bounds(bridge_soak.parse_args([]))["coordinator_rss_kib"].floor == default.floor  # the full-size soak is unchanged
 
 
 def test_coordinator_memory_growth_with_its_rows_is_not_a_leak_but_growth_without_rows_is():
