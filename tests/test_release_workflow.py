@@ -26,13 +26,25 @@ def test_the_workflow_runs_on_tags_and_on_pull_requests() -> None:
 
 
 def test_the_dry_run_builds_every_artifact_and_pushes_nothing() -> None:
-    body = jobs(WORKFLOW.read_text(encoding="utf-8"))["dry-run"]
-    assert "if: github.event_name == 'pull_request'" in body
-    for needed in ("python -m build", "container/build.sh --oci", "for arch in amd64 arm64", "bridge-coordinator-linux-$arch",
+    text = WORKFLOW.read_text(encoding="utf-8")
+    header = text[:text.index("\njobs:")]
+    body = jobs(text)["dry-run"]
+    assert re.search(r"^    if: github.event_name == 'pull_request'$", body, re.M)
+    for needed in ("python -m build", "container/build.sh --push", "install-syft", "cosign generate-key-pair",
+                   "cosign sign", "cosign verify ", "cosign attest", "cosign verify-attestation",
                    "release_checksums.py", "sha256sum --check"):
         assert needed in body, needed
-    for forbidden in ("--push", "docker/login-action", "cosign sign", "id-token", "packages: write", "contents: write", "gh-release"):
+    for line in body.splitlines():
+        if "--push" in line:
+            assert "REGISTRY" in line or "localhost:5000" in line, line
+        if re.match(r"^\s*cosign (?:sign|attest|verify)\b", line):
+            assert "--key" in line, line
+    for forbidden in ("docker/login-action", "id-token", "packages: write", "contents: write",
+                      "attestations: write", "secrets.", "ghcr.io", "softprops/action-gh-release"):
         assert forbidden not in body, forbidden
+    pull_request = re.search(r"^  pull_request:\n(?P<body>(?:^(?!  [A-Za-z_][A-Za-z0-9_-]*:).*(?:\n|$))*)", header, re.M)
+    assert pull_request, "workflow must run on pull requests"
+    assert "paths:" not in pull_request.group("body"), "dry run must run on every pull request"
 
 
 def test_publishing_is_tag_only() -> None:
@@ -46,6 +58,14 @@ def test_the_container_workflow_signs_and_pushes_only_for_tags() -> None:
     text = CONTAINER_WORKFLOW.read_text(encoding="utf-8")
     header = text[:text.index("\njobs:")]
     assert "tags:" in header and "pull_request" not in header
+    body = jobs(text)["publish"]
+    assert re.match(r"^    if: github.ref_type == 'tag'\n", body)
+    assert "id-token: write" in body
+    signing = next(line for line in body.splitlines() if "cosign sign --yes \"$IMAGE@$DIGEST\"" in line)
+    assert "cosign sign --yes \"$IMAGE@$DIGEST\"" in signing
+    assert "--key" not in signing
+    assert "attest-build-provenance" in body
+    assert "install-syft" in body
 
 
 def test_release_checksums_script_writes_a_verifiable_file(tmp_path) -> None:
