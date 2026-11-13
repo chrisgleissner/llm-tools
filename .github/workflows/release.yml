@@ -63,10 +63,12 @@ jobs:
     permissions:
       contents: read
     env:
-      BRIDGE_BUILD_DIR: ${{ runner.temp }}/bridge-image-build
       CARGO_TARGET_DIR: ${{ github.workspace }}/coordinator/target
       REGISTRY: localhost:5000
     steps:
+      - name: Set the image build directory
+        # The runner context is not available in a job-level env block.
+        run: echo "BRIDGE_BUILD_DIR=$RUNNER_TEMP/bridge-image-build" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

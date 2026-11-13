@@ -78,3 +78,10 @@ def test_release_checksums_script_writes_a_verifiable_file(tmp_path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     assert subprocess.run([sys.executable, str(ROOT / "scripts" / "release_checksums.py"), str(empty), str(empty / "S")], capture_output=True).returncode == 1
+
+
+def test_job_level_env_does_not_use_the_runner_context() -> None:
+    """GitHub rejects the whole workflow when a job-level env value reads the runner context (found on the first dry-run push)."""
+    for name, body in jobs(WORKFLOW.read_text(encoding="utf-8")).items():
+        env = re.search(r"^    env:\n((?:      .*\n)+)", body, re.M)
+        assert not env or "runner." not in env.group(1), name
