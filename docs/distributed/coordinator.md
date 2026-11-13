@@ -271,6 +271,7 @@ logged and recorded as `skipped` with the reason, and retried after at most an h
 | `backup_keep` | 7 | Backups kept (1 to 365). |
 | `backup_dir` | unset | Directory; unset means `backups` in the data directory. |
 | `backup_interval_seconds` | 0 | Test hook: when above 0, replaces `backup_interval_hours`. |
+| `update_check` | false | Opt-in. When true, the serving process asks the public GitHub releases API once a day whether a newer release exists. |
 
 `GET /api/v1/diagnostics` (admin) and `bridge-coordinator diagnostics [--json]` return `status` (`ok`,
 `warn` or `fail`, the worst check), `checks` and `backup`. Each check is
@@ -279,8 +280,8 @@ logged and recorded as `skipped` with the reason, and retried after at most an h
 `last_backup_bytes`, `last_attempt_at`, `last_result` (`ok`, `skipped`, `failed`), `last_reason` and
 `next_due_at`. The command line reads the database and files directly, so it cannot know uptime,
 connected workers, event lag or growth; those checks show `null` there. It exits 1 when a check fails.
-Nothing is sent off the host. An update-availability check is not implemented; it would need an
-outbound request and would be opt-in only.
+Nothing is sent off the host unless `update_check` is enabled. The optional update check is described
+under [Update check](#update-check-prd-011-d57) below.
 
 All thresholds are in one table, `diagnostics::THRESHOLDS`:
 
@@ -299,6 +300,7 @@ All thresholds are in one table, `diagnostics::THRESHOLDS`:
 | `ca_certificate` | under 90 days left | under 30 days |
 | `schema_version` (database file against this binary) | none | any difference; the command line never migrates |
 | `backup_directory` | exists and is accessible to group or others (Unix); its mode is left unchanged | none |
+| `update_check` | warn when the cached result says a newer release exists ("update available: X"); ok otherwise, including "off", "up to date", "not checked yet" and "check failed: ..." | none |
 | `version` | none | none |
 
 `last_backup` takes the worse of the age grade and the result of the last attempt, so an old backup is a
@@ -320,6 +322,85 @@ Scheduled backups and the integrity check of the copy are interrupted at shutdow
 Restore stays on the command line (`bridge-coordinator restore`, service stopped; see `install.md`).
 A guided restore in the web console needs an administrator step-up (SEC2-008), an integrity check
 before replacing the file and a restart of the service; it is not implemented in the API.
+
+#### Update check (PRD-011, D57)
+
+The update check is off by default (`update_check = false`). When it is enabled, a background task makes
+one `GET` request to `https://api.github.com/repos/chrisgleissner/llm-tools/releases/latest`. It makes at
+most one such request every 24 hours. The loop wakes hourly, so a failed check is retried at the next
+wake-up. A successful result is reused for 24 hours.
+
+Exactly what is sent:
+
+- a TCP and TLS connection from this host;
+- the HTTP request line and the `Host` header;
+- `User-Agent: bridge-coordinator`;
+- `Accept: application/vnd.github+json`.
+
+No cookies, no authorization header, no install ID, no version number, no host name, no worker or mission
+data and no query string. Redirects are not followed. The timeout is 5 seconds. GitHub sees this host's
+public IP address, as it does for any request.
+
+The result is cached in `update-check.json` in the data directory, with mode 0600. The file holds the
+check time, the latest version, and the error text when the check failed (for example `HTTP 403` or
+`network error`). The response body is not stored. The result appears as the `update_check` check in
+`bridge-coordinator diagnostics` and in `GET /api/v1/diagnostics` ("update available: X").
+
+The coordinator never downloads or installs anything. To turn the check off, remove the key or set it to
+`false`. With the default configuration the coordinator makes no outbound request for this feature. Tests:
+`default_config_makes_no_request` in `src/update_check.rs`, and `default_config_makes_no_update_request_and_reports_off`
+in `tests/update_check.rs`.
+
+#### Support bundle (PRD-012)
+
+`bridge-coordinator support-bundle --out FILE` writes an uncompressed tar archive. The file mode is 0600,
+and the command refuses to overwrite an existing file. The members sit under `bridge-support-bundle/`:
+
+- `manifest.json`
+- `version.json`: coordinator, protocol and expected schema versions, SQLite version, OS and architecture
+- `diagnostics.json`
+- `config.json`
+- `database.json`
+- `logs.txt`
+
+Redaction is an allow-list. Structured members copy only fields known to be safe and mark everything else
+as omitted. A setting added later is omitted until it is listed in `bundle::config_view`.
+
+- `config.json`: numbers and booleans of limits and switches, `exposure`, `min_tls`, the bind address
+  only as a scope (loopback, private or other) and the port. For every optional string or list, it
+  records only whether the value is set or how many entries it has.
+- `diagnostics.json`: numbers, booleans, status words and static fix text. Strings such as directory
+  paths and error text become `[omitted]`. Worker names are replaced by `worker_1`, `worker_2` and so on.
+- `database.json`: schema version, page counts, file and WAL sizes, and a row count per table name. It
+  never contains a row or a column value. The database file itself is never included.
+- `logs.txt`: the last 300 lines from `journalctl -u bridge-coordinator`, when available. The lines are
+  scrubbed by patterns: URLs, e-mail addresses, bearer values, values of keys such as `token`, `password`,
+  `secret`, `totp`, `key`, `hash` and `user`, IP addresses, and long token-like strings. Lines that mention
+  a prompt are dropped. This member is pattern-scrubbed, not allow-listed. Read it before attaching the
+  bundle to a bug report.
+
+The test `tests/support_bundle.rs` seeds a password hash, API token hashes, a TOTP secret, a prompt,
+private addresses, a webhook URL with a token and a host name. It builds the bundle and asserts that none
+of these values appears in any member.
+
+#### Schema migration and downgrade (PRD-003)
+
+The schema version is `PRAGMA user_version`. Migrations are forward only and run automatically at start.
+Before the first migration of an older database, the coordinator copies the database to
+`pre-migration-v<from>-to-v<to>-<UTC time>.sqlite3` in the backup directory. The copy uses the same online
+backup code as `bridge-coordinator backup`, and its integrity is checked. The file name does not match the
+automatic rotation pattern, so the coordinator never deletes it. If the backup fails, the coordinator does
+not start.
+
+A database written by a newer coordinator is refused at start. The refusal message names both schema
+versions, the newest backup found in the backup directory, and the `bridge-coordinator restore` command.
+The database is not modified.
+
+Tests: `tests/migrations.rs` opens a fixture database for every schema version that existed (1 to 14, 16,
+17 and 18; schema 15 was never written by a release of the code). The fixtures are generated by
+`scripts/make_coordinator_schema_fixtures.py` from the commit that introduced each version. The test asserts
+that the seeded rows survive and that `user_version` reaches the current version. A test fails when a new
+schema version has no fixture. The old-worker and new-coordinator protocol matrix is not part of this change.
 
 ### Browser stream
 

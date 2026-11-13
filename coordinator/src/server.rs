@@ -112,6 +112,8 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         Ok(problems) => return Err(corruption_message(data_dir, &db_file, &problems.join("; "))),
         Err(e) => return Err(open_failure(data_dir, &db_file, &e)),
     }
+    crate::migration_backup::check_not_newer(data_dir, &cfg, &db_file)?;
+    crate::migration_backup::backup_before_migration(data_dir, &cfg, &db_file, crate::now())?;
     let db = Arc::new(Db::open(&db_file).map_err(|e| open_failure(data_dir, &db_file, &e))?);
     if let Ok((free, total, incremental)) = db.free_space() {
         if !incremental && free >= 32 * 1024 * 1024 && free * 4 >= total {
@@ -223,6 +225,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         state.monitor.record(crate::now(), d["db_bytes"].as_u64().unwrap_or(0));
     }
     tokio::spawn(crate::diagnostics::sample_loop(state.clone()));
+    tokio::spawn(crate::update_check::run(state.cfg.clone(), data_dir.to_path_buf()));
     let limits = ConnLimits {
         max_connections: state.cfg.max_connections,
         per_ip: state.cfg.max_connections_per_ip,
