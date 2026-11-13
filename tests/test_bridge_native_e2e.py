@@ -17,13 +17,14 @@ def cli(env, *args):
     return result.stdout
 
 
-def wait(predicate, timeout=15):
+def wait(predicate, timeout=15, describe=None):
+    """Poll until ``predicate`` holds; on timeout fail with ``describe()`` so a CI failure shows the state."""
     deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(.05)
-    assert predicate(), "native controller did not reach expected state"
+    assert predicate(), "native controller did not reach expected state" + (f"\n{describe()}" if describe else "")
 
 
 @pytest.mark.parametrize("provider", ["claude", "copilot", "codex"])
@@ -76,6 +77,17 @@ time.sleep(1.5 if provider == 'codex' else .1)
     def task_state(task):
         with BridgeStore(database) as store:
             return store.get_task(task)["status"]
+    def describe():
+        """Mission and task status, the latest events and the tail of the controller logs."""
+        lines = []
+        with BridgeStore(database) as store:
+            lines.append("mission " + str(store.get_mission(mid)["status"]) + ", tasks " + ", ".join(
+                f"{row['id']}={row['status']}" for row in store.db.execute("SELECT id,status FROM tasks WHERE mission_id=?", (mid,))))
+            lines += [f"event {row['kind']}: {row['data_json'][:200]}" for row in store.db.execute(
+                "SELECT kind,data_json FROM events WHERE mission_id=? ORDER BY id DESC LIMIT 15", (mid,))]
+        for log in sorted((state / "runtime" / f"mission-{mid}").rglob("*.log"))[:6]:
+            lines.append(f"{log.name}: " + log.read_text(errors="replace")[-600:])
+        return "\n".join(lines)
     def released():
         lock = MissionLock(state / "locks", mid)
         try:
@@ -86,7 +98,7 @@ time.sleep(1.5 if provider == 'codex' else .1)
         return True
     try:
         cli(env, "start", "--mission", mid)
-        wait(lambda: task_state(first) == "VERIFYING")
+        wait(lambda: task_state(first) == "VERIFYING", describe=describe)
         initial_ready = json.loads(ready_file.read_text())
         with BridgeStore(database) as store:
             saved_id = store.get_mission(mid)["config"]["native_sessions"][provider]["session_id"]
@@ -95,7 +107,7 @@ time.sleep(1.5 if provider == 'codex' else .1)
         second = json.loads(cli(env, "task", "add", "--mission", mid, "--prompt", "Second native task", "--json"))["id"]
         cli(env, "task", "verify", "--mission", mid, "--task", first, "--approve")
         cli(env, "resume", "--mission", mid)
-        wait(lambda: task_state(second) == "VERIFYING")
+        wait(lambda: task_state(second) == "VERIFYING", describe=describe)
         restarted_ready = json.loads(ready_file.read_text())
         assert restarted_ready["startup_token"] != initial_ready["startup_token"]
         with BridgeStore(database) as store:

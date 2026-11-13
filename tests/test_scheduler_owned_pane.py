@@ -11,6 +11,7 @@ import pytest
 
 from llm_tools import common, scheduler
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import wait_for
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
@@ -104,10 +105,8 @@ def test_scheduler_refuses_to_send_shell_command_into_a_live_native_pane(tmp_pat
     )
     monkeypatch.setenv("LLM_SCHEDULER_TMUX_TIMEOUT", "2")
     try:
-        import time
-
-        time.sleep(0.2)
-        assert "READY_FOR_NATIVE_INPUT" in backend.capture(handle, pane="provider")
+        # The provider is a Python start-up inside tmux; a fixed 0.2 s sleep left the pane empty on a loaded host.
+        wait_for(lambda: "READY_FOR_NATIVE_INPUT" in backend.capture(handle, pane="provider"), message="the provider pane never printed its ready line")
         logs = common.setup_run_logs(tmp_path / "busy-logs", "codex")
         cfg = scheduler.SchedulerConfig(
             provider="codex",
