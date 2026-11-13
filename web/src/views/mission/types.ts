@@ -1,6 +1,7 @@
 // Shared types of the mission detail page (PRD-037 WP-3).
 import type { NeedsYou } from "../../api";
 import { absTime } from "../../dom";
+import type { ToastAction } from "../../ui";
 
 export interface Task {
   id: number;
@@ -13,6 +14,8 @@ export interface Task {
 }
 
 export type Tab = "session" | "tasks" | "activity";
+
+export type TaskVerb = "approve" | "reject" | "retry" | "resume" | "pause" | "cancel" | "priority" | "depend" | "amend";
 
 /** What the task panel, the evidence block and the header need from the page, so the modules do not import each other. */
 export interface PageCtx {
@@ -31,7 +34,7 @@ export interface PageCtx {
   /** The verifier result of a task whose evidence was read ("" when none is recorded): the header quotes it. */
   verified(ordinal: number, text: string): void;
   /** Send a task change, toast the outcome once ("Approved task 2" or "Could not approve task 2. ..."), then reload. */
-  mutateTask(verb: "approve" | "reject" | "retry" | "resume" | "pause" | "cancel", operation: string, task: Task, params?: Record<string, unknown>): Promise<void>;
+  mutateTask(verb: TaskVerb, operation: string, task: Task, params?: Record<string, unknown>, undo?: ToastAction): Promise<void>;
 }
 
 /** The text of a plain-words age: "14:02 (3m ago)". */

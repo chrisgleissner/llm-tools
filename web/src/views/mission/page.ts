@@ -8,6 +8,9 @@ import { humanizeEvent } from "../../event-humanizer";
 import { hasDigest, listedNeeds, missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import { announceNextPage, announceStreamEvent, confirmDialog as confirm, reportOutcome, type ToastAction } from "../../ui";
 import { aboutBlock } from "./about";
+import { controlBlock } from "./control";
+import { sessionInfo } from "./session-info";
+import { hasLine, lastLine, loadLines, onDetails } from "../../rows";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
 import { approvalOrdinals, buildHeader, headerSubject, providerModel, type HeaderHandlers, type HeaderModel } from "./header";
@@ -16,7 +19,7 @@ import { sessionReserve } from "../../session-box";
 import { crumbs, finished, known, note, record, refused, since } from "./kit";
 import { loadSession, type SessionHandle } from "./session";
 import { tasksPanel, type TaskPanelData } from "./tasks";
-import { asOfText, type PageCtx, type Tab, type Task } from "./types";
+import { asOfText, type PageCtx, type Tab, type Task, type TaskVerb } from "./types";
 
 const EVENT_WINDOW = 300;
 const NEVER_STARTED = new Set(["CREATED", "QUEUED", "READY"]);
@@ -149,11 +152,13 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const tasksP = tasksPanel(ctx, actions, addTask);
   const activityP = activityPanel(loadOlderEvents);
   const about = aboutBlock();
+  const info = sessionInfo();
+  const control = controlBlock({ workerName, missionId, blocked });
   const panel = (id: Tab, el: HTMLElement) => h("div", { class: `mission-panel panel-${id}`, role: "tabpanel", id: `panel-${id}`, "aria-labelledby": `tab-${id}` }, el);
   const tasksWrap = panel("tasks", tasksP.el);
   const activityWrap = panel("activity", activityP.el);
   const side = h("div", { class: "mission-side" }, tasksWrap, activityWrap);
-  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, h("div", { class: "mission-about" }, about.el));
+  const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, h("div", { class: "mission-about" }, info.el, control.el, about.el));
   const wrap = h("div", { class: "mission-wrap" }, page);
   // The page is shown once what decides the header's height is known: the attention of the mission (carried by the list entry, else read with the status),
   // so a late "Needs approval" does not push the session pane down after the page was on screen. The wait is bounded.
@@ -208,6 +213,13 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
+  /** PAR-005: Stop with `force`, which ends the provider's session at once instead of after its current step. */
+  async function forceStop(): Promise<void> {
+    if (!(await confirmed("Force stop", "Force stop ends the provider's session at once, without waiting for its current step. Work in that step can be lost."))) return;
+    reportOutcome(await api.mutateMission(workerName, "mission.stop", missionId, { force: true }), "Mission force-stopped", "force-stop the mission");
+    await reloadAll();
+  }
+
   // ---- header
   /** A handler for a mission change: `op` is the operation suffix, `action` the words of the failure message. Stop and Cancel ask first (`ask`: the button and dialog word, the sentence under it). */
   const change = (did: string, action: string, op: string, optimisticStatus: string | null, ask?: [string, string], undo?: ToastAction) => async (): Promise<void> => {
@@ -219,6 +231,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     start: change("Mission started", "start the mission", "start", "RUNNING"),
     runNext: change("Next task started", "run the next task now", "continue", null),
     stop: change("Mission stopped", "stop the mission", "stop", "STOPPING", ["Stop", "Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open."]),
+    forceStop,
+    finish: change("The provider was asked to exit", "ask the provider to exit", "finish", null, ["Finish", "The provider is asked to exit through its own exit command, and the mission stays as it is. Stop ends the mission's session instead."]),
     cancel: change("Mission cancelled", "cancel the mission", "cancel", null, ["Cancel", "This cannot be undone from the browser."]),
     remove,
     approve: actions.approve,
@@ -350,7 +364,29 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     activityP.update({ events: all, error: eventError, loaded: eventsLoaded, more: eventStart > 0 });
   }
 
+  /** The full status projection (it carries the provider runs), read separately because a digest answers the header without a worker round trip. */
+  let detail: Record<string, unknown> | null = null;
+  async function loadDetail(): Promise<void> {
+    if (!online()) return;
+    detail = await api.missionStatus(workerName, missionId).catch(() => detail);
+    if (!disposed) renderInfo();
+  }
+  const scheduleDetail = debounce(loadDetail, 1500);
+  function renderInfo(): void {
+    const e = entry();
+    info.update({ snapshot: detail ?? snapshot, lastLine: e && status() === "RUNNING" ? lastLine(e) : "", nowMs: Date.now() });
+  }
+  const offDetails = onDetails(renderInfo);
+  const infoClock = window.setInterval(() => {
+    if (document.visibilityState !== "visible" || disposed) return;
+    const e = entry();
+    if (e && status() === "RUNNING" && online()) void loadLines([e], () => disposed);
+    renderInfo();
+  }, 15000);
+
   function renderAbout(): void {
+    renderInfo();
+    control.sync();
     const created = record(snapshot?.["mission"])["created_at"];
     about.update({ missionId, folder: folder(), workerName, worker: worker(workerName), createdAt: typeof created === "string" ? created : null });
   }
@@ -373,6 +409,9 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     headSignature = "";
     renderAll();
     reveal();
+    void loadDetail();
+    const e = entry();
+    if (e && status() === "RUNNING" && !hasLine(e)) void loadLines([e], () => disposed);
   }
 
   async function loadTasks(): Promise<void> {
@@ -461,16 +500,20 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   // One task read for the several triggers (a task event and a digest change usually arrive together).
-  const scheduleTasks = debounce(loadTasks, 150);
+  const scheduleTasks = debounce(() => {
+    void loadTasks();
+    scheduleDetail();
+  }, 150);
 
   async function reloadAll(): Promise<void> {
     await Promise.all([refresh().catch(() => {}), loadSnapshot(), loadTasks()]);
   }
 
   // ---- mutations
-  const DID = { approve: "Approved", reject: "Rejected", retry: "Retry queued for", resume: "Resumed", pause: "Paused", cancel: "Cancelled" };
-  async function mutateTask(verb: keyof typeof DID, operation: string, task: Task, params: Record<string, unknown> = {}): Promise<void> {
-    reportOutcome(await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params }), `${DID[verb]} task ${task.ordinal}`, `${verb} task ${task.ordinal}`);
+  const DID: Record<TaskVerb, string> = { approve: "Approved", reject: "Rejected", retry: "Retry queued for", resume: "Resumed", pause: "Paused", cancel: "Cancelled", priority: "Changed the priority of", depend: "Added a prerequisite to", amend: "Amended" };
+  const DOING: Record<TaskVerb, string> = { approve: "approve", reject: "reject", retry: "retry", resume: "resume", pause: "pause", cancel: "cancel", priority: "change the priority of", depend: "add a prerequisite to", amend: "amend" };
+  async function mutateTask(verb: TaskVerb, operation: string, task: Task, params: Record<string, unknown> = {}, undo?: ToastAction): Promise<void> {
+    reportOutcome(await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params }), `${DID[verb]} task ${task.ordinal}`, `${DOING[verb]} task ${task.ordinal}`, undo);
     await reloadAll();
   }
 
@@ -590,6 +633,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   return () => {
     disposed = true;
     resizeObserver?.disconnect();
+    offDetails();
+    window.clearInterval(infoClock);
     window.clearTimeout(revealTimer);
     document.removeEventListener(SHORTCUT_EVENT, onShortcut);
     offStream();

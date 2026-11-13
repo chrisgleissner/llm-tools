@@ -1,14 +1,75 @@
 // Parts of the session pane that are needed only after an interaction: full screen, the soft-keyboard layout, the resize
 // confirmation and the transcript text. A separate chunk keeps them out of the terminal chunk's size budget.
 import type { Terminal } from "@xterm/xterm";
-import { h } from "./dom";
+import { copyText, h, hooks } from "./dom";
 export { runSteer } from "./steer";
+import { findMatches, matchLabel, stepMatch } from "./transcript-search";
 import { confirmDialog } from "./ui";
 
 export const transcriptText = (t: Terminal): string => {
   const b = t.buffer.active;
   return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true) ?? "").join("\n").replace(/\n+$/, "");
 };
+
+export interface TranscriptView {
+  /** Show `text` (the whole scrollback) with the current search highlighted. */
+  show(text: string): void;
+  focusSearch(): void;
+}
+
+/** Search and copy for the transcript (PRD-015): fills `tools` with the search field, Previous, Next, the match count and Copy, and draws `pre` with each match marked. */
+export function transcriptView(pre: HTMLElement, tools: HTMLElement): TranscriptView {
+  let text = "";
+  let query = "";
+  let at = 0;
+  let total = 0;
+  const input = h("input", { type: "search", class: "transcript-search", "aria-label": "Search scrollback", placeholder: "Search scrollback", autocomplete: "off" });
+  const count = h("span", { class: "transcript-count muted small", role: "status", "aria-live": "polite" });
+  const step = (by: 1 | -1) => (): void => {
+    at = stepMatch(at, by, total);
+    paint(true);
+  };
+  const prev = h("button", { type: "button", class: "btn small", "data-action": "search-prev", "aria-label": "Previous match", onclick: step(-1) }, h("span", {}, "Previous"));
+  const next = h("button", { type: "button", class: "btn small", "data-action": "search-next", "aria-label": "Next match", onclick: step(1) }, h("span", {}, "Next"));
+  const copy = h("button", { type: "button", class: "btn small", "data-action": "copy-scrollback", onclick: () => void copyText(text).then((ok) => hooks.say(ok ? "Copied the scrollback." : "Could not copy the scrollback; select it and copy manually.")) }, h("span", {}, "Copy scrollback"));
+  input.addEventListener("input", () => {
+    query = input.value;
+    at = 0;
+    paint(true);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1)();
+    }
+  });
+  tools.replaceChildren(input, prev, next, count, copy);
+
+  function paint(scroll: boolean): void {
+    const ranges = findMatches(text, query);
+    total = ranges.length;
+    if (at >= total) at = 0;
+    prev.disabled = next.disabled = total === 0;
+    count.textContent = matchLabel(query, at, total);
+    if (!total) return void (pre.textContent = text);
+    const parts: Array<Node | string> = [];
+    let from = 0;
+    ranges.forEach((r, i) => {
+      parts.push(text.slice(from, r.start), h("mark", { class: i === at ? "current" : "" }, text.slice(r.start, r.end)));
+      from = r.end;
+    });
+    parts.push(text.slice(from));
+    pre.replaceChildren(...parts);
+    if (scroll) pre.querySelector("mark.current")?.scrollIntoView?.({ block: "center" });
+  }
+  return {
+    show(next) {
+      text = next;
+      paint(false);
+    },
+    focusSearch: () => input.focus(),
+  };
+}
 
 /** The explicit "resize the shared session to this screen" confirmation. */
 export const confirmResize = async (): Promise<boolean> => (await confirmDialog({ title: "Resize the session to this screen?", message: "Other viewers and the tmux station will change size.", confirmLabel: "Resize" })) !== null;
