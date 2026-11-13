@@ -1302,7 +1302,7 @@ class TmuxTerminalBackend:
             return False
         return cls._BRIDGE_CONFIG_MARKER in content
 
-    def _remove_dead_server_artifacts(self, handle: TerminalHandle) -> None:
+    def _remove_dead_server_artifacts(self, handle: TerminalHandle, probed: os.stat_result | None = None) -> None:
         """Remove a dead server's socket and Bridge config, tolerating concurrent cleanup.
 
         Several callers can reach a dead socket at once: `stop()`, the
@@ -1330,10 +1330,28 @@ class TmuxTerminalBackend:
                 if config_path.exists():
                     raise
                 config_exists = False
-        if socket_exists:
+        if socket_exists and self._socket_is_still_the_dead_one(socket_path, probed):
             socket_path.unlink(missing_ok=True)
         if config_exists:
             config_path.unlink(missing_ok=True)
+
+    def _socket_is_still_the_dead_one(self, socket_path: Path, probed: os.stat_result | None) -> bool:
+        """Whether the path still holds the socket that was judged dead.
+
+        A server may bind the path between the probe and the unlink. When the caller recorded the
+        socket's identity at probe time (``probed``), the path must still have that device and inode and
+        must still refuse connections; otherwise it is left alone. Without a recorded identity the
+        previous behaviour applies.
+        """
+        if probed is None:
+            return True
+        try:
+            now = socket_path.lstat()
+        except FileNotFoundError:
+            return True  # gone already; the unlink is a no-op
+        if (now.st_dev, now.st_ino) != (probed.st_dev, probed.st_ino):
+            return False
+        return self._socket_listener_state(socket_path) == self._SERVER_ABSENT
 
     def reclaim_dead_station(self, socket_path: str | Path) -> bool:
         """Remove the artifacts of a station whose server is gone.
@@ -1355,7 +1373,11 @@ class TmuxTerminalBackend:
         if self._socket_listener_state(socket_path) != self._SERVER_ABSENT:
             return False
         present = socket_path.exists() or config_path.exists()
-        self._remove_dead_server_artifacts(TerminalHandle(socket_path, config_path, "", "", "", 6))
+        try:
+            probed = socket_path.lstat()
+        except FileNotFoundError:
+            probed = None
+        self._remove_dead_server_artifacts(TerminalHandle(socket_path, config_path, "", "", "", 6), probed=probed)
         return present
 
     def _require_owned(self, handle: TerminalHandle) -> None:
@@ -1602,6 +1624,8 @@ class TmuxTerminalBackend:
 
         return MissionLock(default_state_dir() / "locks", match.group(1))
 
+    _FAILED_ATTACH_RECLAIM_SECONDS = 3.0
+
     def _reclaim_after_failed_attach(self, handle: TerminalHandle) -> None:
         """Remove the dead socket of a failed attach, unless a controller may be binding it.
 
@@ -1617,9 +1641,22 @@ class TmuxTerminalBackend:
             except (BlockingIOError, OSError):
                 return
         try:
-            self.reclaim_dead_station(handle.socket_path)
-        except (OSError, RuntimeError):
-            pass
+            # The client returns as soon as the server told it the session does not exist. The server
+            # that attach-session started closes its listener a moment later, and until then the
+            # socket accepts connections and must not be touched. Wait for it to go.
+            deadline = time.monotonic() + self._FAILED_ATTACH_RECLAIM_SECONDS
+            while True:
+                # A cheap connect test, not a tmux command: tmux is asked once, when the socket refuses.
+                state = self._socket_listener_state(handle.socket_path)
+                if state == self._SERVER_ABSENT:
+                    try:
+                        self.reclaim_dead_station(handle.socket_path)
+                    except (OSError, RuntimeError):
+                        pass
+                    return
+                if state != "reachable" or time.monotonic() >= deadline:
+                    return  # not a socket we can judge, or a listener that stays: leave it
+                time.sleep(0.02)
         finally:
             if lock is not None:
                 lock.release()

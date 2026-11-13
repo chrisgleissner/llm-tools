@@ -217,7 +217,7 @@ struct Worker {
 }
 
 impl Worker {
-    async fn connect(port: u16, tls: &Arc<rustls::ClientConfig>, token: &str, cursor: u64) -> Worker {
+    async fn connect(port: u16, tls: &Arc<rustls::ClientConfig>, token: &str, cursor: u64, serve_log: &Path) -> Worker {
         let mut w = Worker {
             ws: ws_connect(port, tls, token).await,
             generation: 0,
@@ -231,7 +231,14 @@ impl Worker {
             "missions": [{"id": "m1", "name": "mission", "status": "running", "folder": "proj", "updated_at": null}], "event_cursor": cursor}),
         )
         .await;
-        let welcome = w.recv_type("welcome").await.expect("the coordinator answers the worker hello");
+        let welcome = match w.recv_type("welcome").await {
+            Some(v) => v,
+            // The log names the database call that kept the writer connection (slow database call ...).
+            None => panic!(
+                "the coordinator answers the worker hello\nserver log: {}",
+                std::fs::read_to_string(serve_log).unwrap_or_default()
+            ),
+        };
         w.generation = welcome["payload"]["generation"].as_u64().unwrap();
         w
     }
@@ -378,7 +385,7 @@ async fn scenario(control: bool, out_file: Option<PathBuf>) {
         .timeout(Duration::from_secs(120))
         .build()
         .unwrap();
-    let mut worker = Worker::connect(port, &tls, &token, events / 3).await;
+    let mut worker = Worker::connect(port, &tls, &token, events / 3, &serve_log).await;
 
     let stop = Arc::new(AtomicBool::new(false));
     // Pollers: the process health route (no database) and the auth state route (reads the database).

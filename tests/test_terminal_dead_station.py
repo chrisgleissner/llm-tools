@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket as unix_socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,87 @@ def test_attach_removes_the_socket_a_failed_attach_leaves_behind(tmp_path: Path,
     monkeypatch.setattr("llm_tools.terminal.subprocess.run", attach)
     assert backend.attach(handle) != 0
     assert not socket_path.exists()
+
+
+def test_failed_attach_waits_for_the_server_it_started_to_close_its_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failed client returns before the server it started has closed its listener.
+
+    Until then the socket accepts connections and must be left alone. The reclaim after a failed attach
+    waits with cheap connect tests (measured: a socket was left behind in 6 of 200 concurrent attaches
+    to a missing session without waiting) and asks tmux once, when the socket refuses.
+    """
+    socket_path = _dead_socket(_private_dir(tmp_path) / "station.sock")
+    handle = TerminalHandle(socket_path, socket_path.with_name("station.sock.conf"), "gone", "%0", "%1", 6)
+    backend = TmuxTerminalBackend()
+    states = iter(["reachable", "reachable", "reachable"])
+    real_state = backend._socket_listener_state
+    monkeypatch.setattr(backend, "_socket_listener_state", lambda path: next(states, None) or real_state(path))
+    reclaims: list[int] = []
+    real_reclaim = backend.reclaim_dead_station
+    monkeypatch.setattr(backend, "reclaim_dead_station", lambda path: (reclaims.append(1), real_reclaim(path))[1])
+    backend._reclaim_after_failed_attach(handle)
+    assert reclaims == [1]
+    assert not socket_path.exists()
+
+
+def test_failed_attach_ends_after_one_probe_when_a_listener_stays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = _private_dir(tmp_path)
+    socket_path = directory / "station.sock"
+    listener = unix_socket.socket(unix_socket.AF_UNIX, unix_socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(16)
+    # A listener that never accepts fills its backlog after a few probes. Linux then answers a connect
+    # with EAGAIN, macOS with ECONNREFUSED, which the probe correctly reads as "no listener". A live
+    # server accepts, so the test's listener does too.
+    stop_accepting = threading.Event()
+
+    def accept_loop() -> None:
+        listener.settimeout(0.05)
+        while not stop_accepting.is_set():
+            try:
+                listener.accept()[0].close()
+            except OSError:
+                pass
+
+    acceptor = threading.Thread(target=accept_loop, daemon=True)
+    acceptor.start()
+    try:
+        handle = TerminalHandle(socket_path, socket_path.with_name("station.sock.conf"), "gone", "%0", "%1", 6)
+        backend = TmuxTerminalBackend()
+        monkeypatch.setattr(TmuxTerminalBackend, "_FAILED_ATTACH_RECLAIM_SECONDS", 0.1)
+        tmux_probes: list[int] = []
+        monkeypatch.setattr(backend, "reclaim_dead_station", lambda path: tmux_probes.append(1) or False)
+        backend._reclaim_after_failed_attach(handle)
+        assert tmux_probes == [], "a live listener must not be probed through tmux"
+        assert socket_path.exists()
+    finally:
+        stop_accepting.set()
+        acceptor.join(timeout=2)
+        listener.close()
+
+
+def test_removal_leaves_a_socket_that_was_replaced_after_the_probe(tmp_path: Path) -> None:
+    """A server binds the path between the probe and the unlink: same name, new inode."""
+    backend, handle = _dead_station(tmp_path)
+    probed = handle.socket_path.lstat()
+    handle.socket_path.unlink()
+    replacement = unix_socket.socket(unix_socket.AF_UNIX, unix_socket.SOCK_STREAM)
+    replacement.bind(str(handle.socket_path))
+    replacement.listen(1)
+    handle.socket_path.chmod(0o600)
+    try:
+        backend._remove_dead_server_artifacts(handle, probed=probed)
+        assert handle.socket_path.exists(), "the new server's socket must survive"
+    finally:
+        replacement.close()
+
+
+def test_removal_leaves_a_socket_that_accepts_again_with_the_same_inode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    backend, handle = _dead_station(tmp_path)
+    probed = handle.socket_path.lstat()
+    monkeypatch.setattr(backend, "_socket_listener_state", lambda path: "reachable")
+    backend._remove_dead_server_artifacts(handle, probed=probed)
+    assert handle.socket_path.exists()
 
 
 # stop(), an attach client that lost its server, and reclaim_dead_station() can
