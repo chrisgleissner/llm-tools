@@ -12,7 +12,7 @@ from pathlib import Path
 from llm_tools import common, ralph_robin, scheduler
 from llm_tools.bridge_power import _root, _write_plan, shared_wake_target, update_wake_request
 from llm_tools.bridge_runtime import BridgeMissionHooks
-from llm_tools.bridge_store import BridgeStore
+from llm_tools.bridge_store import BridgeStore, MissionLock
 from tests.conftest import scaled
 
 
@@ -201,9 +201,13 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
     template = shlex.join([sys.executable, str(provider)])
 
     def call(*args: object) -> None:
+        # A hang bound, not a speed assertion. `stop` of a finished mission waits up to
+        # TERMINAL_STOP_LOCK_WAIT_SECONDS (15 s) for its controller to exit, and a call took up to 5 s
+        # in measurements at a load average of 45 on 8 cores, so 10 s was shorter than the product's
+        # own wait.
         result = subprocess.run(
             [sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-            env=env, text=True, capture_output=True, timeout=scaled(10),
+            env=env, text=True, capture_output=True, timeout=scaled(40),
         )
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -228,6 +232,9 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
                 int(operation["exit_code"]) if operation and operation["exit_code"] is not None else None,
             )
 
+    def controller_running(mission_id: str) -> bool:
+        return MissionLock.is_held(state / "locks", mission_id)
+
     def wait_for(predicate, timeout: float = 6) -> None:
         deadline = time.monotonic() + scaled(timeout)
         while time.monotonic() < deadline:
@@ -243,16 +250,23 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
     try:
         call("start", "--mission", mission_id, "--headless")
         wait_for(waiting_event)
-        started = time.monotonic()
         call("pause", "--mission", mission_id)
+        # The bound is the controller's reaction to the request. The `pause` process itself needs
+        # a Python start-up and an import of the Bridge, which is several seconds on a loaded host,
+        # so the clock starts when the command has returned.
+        started = time.monotonic()
         wait_for(lambda: current()[0] == "PAUSED")
         assert time.monotonic() - started < scaled(2.0)
         assert current() == ("PAUSED", "READY", "", None)
         assert not (tmp_path / "ran").exists()
         call("stop", "--mission", mission_id)
         wait_for(lambda: current()[0] == "STOPPED")
+        # The detached controller records STOPPED before it exits. Leaving the test before it has
+        # exited leaves a live process for the process-hygiene check.
+        wait_for(lambda: not controller_running(mission_id), timeout=30)
     finally:
         try:
-            call("stop", "--mission", mission_id)
+            if controller_running(mission_id):
+                call("stop", "--force", "--mission", mission_id)
         except (AssertionError, subprocess.SubprocessError):
             pass
