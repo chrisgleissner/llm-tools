@@ -427,6 +427,8 @@ export function rowSig(item: Item, o: RowOptions): string {
 
 export function missionRow(item: Item, o: RowOptions): HTMLElement {
   const e = item.entry;
+  // UXR-056: the digest of a finished mission has no provider. A failed row asks once for its activity line (which names the provider of its last run), so the cell is not blank. An answer, even without a provider, is kept and not asked for again.
+  if (o.layout === "cells" && item.state.id === "failed" && !providerLabel(e) && !hasLine(e)) void loadLines([e]);
   const name = e.mission.name || "Untitled mission";
   const reasons = reasonLines(item);
   const updated = age(e.mission.updated_at);
@@ -441,7 +443,7 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
       ...reasons.map((line) => {
         const evidence = rowEvidence(item);
         if (!evidence) return h("span", { class: item.state.id === "needs-approval" ? "row-reason one" : "row-reason clamp-2", title: line }, line);
-        return h("span", { class: "row-reason one", title: `${line} - ${evidence}` }, h("span", {}, line), h("span", { class: "tail" }, ` - ${evidence}`));
+        return h("span", { class: "row-reason one", title: `${line} - ${evidence}` }, h("span", {}, line), h("span", { class: "tail" }, h("span", {}, ` - ${evidence}`)));
       }),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);

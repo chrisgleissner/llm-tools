@@ -30,6 +30,7 @@
 .mrow[data-layout="cells"] { grid-template-areas: "pill title sub menu"; padding-block: 3px; }
 .mrow.selected { background: var(--accent-tint); }
 .mrow > .pill { grid-area: pill; justify-self: start; }
+@container (min-width: 36rem) { .mrow > .pill { white-space: nowrap; } .row-reason.one > span { flex: none; } }
 .row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
 @media (hover: hover) { .row-title:hover { text-decoration: underline; } }
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
@@ -39,6 +40,9 @@
 /* With what an approval rests on (verifier result, size of the change) the line is two boxes side by side, each cut at its own end, so the late arrival of the second does not widen the text block of the reason (LCP, T37) */
 .row-reason.one:has(.tail) { display: flex; overflow: visible; }
 .row-reason.one > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* UXR-055: the reason is never cut; the summary after it takes the rest of the line and is one clamped line, so it is cut after a whole word and ends in an ellipsis. The clamp is on an inner span: a flex item is blockified and loses the clamp. */
+.row-reason.one .tail { flex: 1 1 0; overflow: visible; }
+.tail > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; white-space: pre-wrap; }
 .tail { max-width: 22rem; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }

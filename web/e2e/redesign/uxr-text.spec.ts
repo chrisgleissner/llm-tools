@@ -66,7 +66,7 @@ for (const def of TEXT_PAGES) {
         const clampProblems: string[] = [];
         for (const el of main.querySelectorAll<HTMLElement>("*")) {
           const clamp = getComputedStyle(el).getPropertyValue("-webkit-line-clamp");
-          if (clamp && clamp !== "none" && clamp !== "2") clampProblems.push(`${describe(el)} clamps at ${clamp} lines`);
+          if (clamp && clamp !== "none" && clamp !== "2" && !(clamp === "1" && el.closest(".tail"))) clampProblems.push(`${describe(el)} clamps at ${clamp} lines`);
         }
         const titleEl = [...main.querySelectorAll<HTMLElement>("*")].filter((el) => el.children.length === 0 && (el.textContent ?? "").startsWith(longTitle) && el.getBoundingClientRect().width > 0)[0];
         const title = titleEl ? { height: titleEl.getBoundingClientRect().height, line: lineHeight(titleEl), full: titleEl.title || titleEl.closest("[title]")?.getAttribute("title") || "" } : null;

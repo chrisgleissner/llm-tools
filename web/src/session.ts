@@ -55,6 +55,9 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   const narrow = window.matchMedia(NARROW);
   const status = h("p", { id: "terminal-status", class: "term-status", role: "status", "aria-live": "polite", "data-state": "idle", "data-mode": "view" }, "Not connected.");
   const host = h("div", { id: "terminal-host", class: "term-host", role: "region", "aria-label": "Terminal output", hidden: true });
+  // UXR-057: a narrow screen scrolls the terminal sideways. Edge cues say so, and which way: a chevron at the edge that has more behind it.
+  const cue = (side: string, glyph: string): HTMLElement => h("span", { class: `pan-cue ${side}`, "aria-hidden": "true", hidden: true }, glyph);
+  const [cueMore, cueBack] = [cue("more", "\u203A"), cue("back", "\u2039")];
   const transcript = h("pre", { class: "transcript", tabindex: "0", "aria-label": "Session transcript", hidden: true });
   const tools = h("div", { class: "transcript-tools", hidden: true, role: "search", "aria-label": "Search the scrollback" });
   const jump = button("Jump to latest", () => toBottom(), { kind: "small", icon: "chevronDown" });
@@ -87,7 +90,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session", tabindex: "-1" },
     bar,
     tools,
-    h("div", { class: "session-main" }, host, transcript, waiting, jump),
+    h("div", { class: "session-main" }, host, cueBack, cueMore, transcript, waiting, jump),
     input.element,
     keybar,
   );
@@ -238,6 +241,15 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     };
   }
 
+  /** Show the chevron at each edge that has more terminal behind it (UXR-057). The mask that fades the right edge is only there while there is more to the right. */
+  function syncCue(): void {
+    const room = narrow.matches ? host.scrollWidth - host.clientWidth - 1 : 0;
+    const more = room > 0 && host.scrollLeft < room;
+    cueMore.hidden = !more;
+    cueBack.hidden = !(room > 0 && host.scrollLeft > 1);
+    host.classList.toggle("pan-more", more);
+  }
+
   /** The explicit resize: the only way a phone changes the size of the shared PTY. */
   async function resizeToScreen(): Promise<void> {
     if (!(await (await extras()).confirmResize())) return;
@@ -329,6 +341,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       resizeTimer = window.setTimeout(() => {
         const pan = narrow.matches && host.scrollWidth > host.clientWidth + 1;
         host.classList.toggle("pan", pan);
+        syncCue();
         if (panning !== pan) ((panning = pan), paint());
         // Never auto-resize on a narrow screen: the PTY is shared with other viewers and the tmux station (UXR-041).
         if (mode !== "write" || narrow.matches) return;
@@ -337,6 +350,9 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       }, 150);
     });
     observer.observe(host);
+    const screen = host.querySelector(".xterm-screen"); // its width changes with the columns of the shared PTY, without the pane changing size
+    if (screen) observer.observe(screen);
+    host.addEventListener("scroll", syncCue, { passive: true });
     term = t;
     return t;
   }

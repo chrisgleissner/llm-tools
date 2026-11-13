@@ -10,20 +10,22 @@ const FOUNDATIONS = ["WP-0", "WP-1"] as const;
 uxr({ t: "T22", uxr: ["UXR-014"], needs: [...FOUNDATIONS, "WP-4"] }, "the header shows provider, scope and percent with 0 interactions; the reset time is in the title", async ({ page }, info) => {
   const app = await openApp(page, { auth: "in" }, "/");
   const header = page.locator("header").first();
-  await expect(header).toContainText(/Claude\s+5h\s+4%/);
   const vp = viewport(page);
-  if (vp.width >= 480) await expect(header).toContainText(/Codex\s+5h\s+75%/);
+  // Wide enough for the full chips: the scope and the percent; otherwise the compact form (UXR-053) without the scope.
+  await expect(header).toContainText(vp.width >= 480 ? /Claude\s+5h\s+4%/ : /Claude\s*4%/);
+  await expect(header).toContainText(vp.width >= 480 ? /Codex\s+5h\s+75%/ : /Codex\s*75%/);
   expect(await header.locator('[title*="reset" i]').count(), "a chip carries the reset time in its title").toBeGreaterThan(0);
   expect(await app.ix.count(), "interactions needed to read capacity").toBe(0);
   await evidence(page, info, ["UXR-014"], "capacity-chips");
 });
 
-uxr({ t: "T22", uxr: ["UXR-014"], needs: [...FOUNDATIONS, "WP-4"] }, "below 30rem only the limiting provider shows; above it both do", async ({ page }) => {
+uxr({ t: "T22", uxr: ["UXR-014"], needs: [...FOUNDATIONS, "WP-4"] }, "below 30rem every provider keeps its percentage in a compact form; above it the chips have scope and meter", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });
   await openApp(page, { auth: "in" }, "/");
   const header = page.locator("header").first();
-  await expect(header).toContainText(/Claude/);
-  await expect(header, "the non-limiting provider is hidden on a narrow header").not.toContainText(/Codex/);
+  await expect(header).toContainText(/Claude\s*4%/);
+  await expect(header, "the non-limiting provider keeps its percentage on a narrow header").toContainText(/Codex\s*75%/);
+  await expect(header, "the compact form has no scope").not.toContainText(/5h/);
 });
 
 uxr({ t: "T22", uxr: ["UXR-014"], needs: [...FOUNDATIONS, "WP-4", "WP-5"] }, "one click on the chip opens Usage, where every meter has a text value and a reset time", async ({ page }) => {

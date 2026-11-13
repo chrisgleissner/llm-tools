@@ -553,6 +553,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         "task.list": { tasks: ownTasks.map((t) => fullTask(t, entry.mission.id)), total: ownTasks.length, offset: 0 },
         "task.show": ((): unknown => { const n = Number(request.params?.["task_number"] ?? request.params?.["task_id"] ?? 0); const found = ownTasks.find((t) => t.ordinal === n || t.id === n); return found ? fullTask(found, entry.mission.id) : null; })(),
         ...TASK_READS,
+        ...(entry.mission.status === "FAILED" ? { "mission.activity_line": { available: false, line: null, task: null, provider: "codex" } } : {}), // a mission that ran and failed names the provider of its last run; other missions keep the default answer
         "session.list": { sessions: opts.sessions === "none" ? [] : SESSIONS },
         "usage.snapshot": opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : USAGE,
       };
