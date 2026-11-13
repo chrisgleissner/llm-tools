@@ -27,7 +27,7 @@ Last updated: 2026-11-13 21:00 UTC.
 ## Open pull requests
 
 - [ ] #104 CI flakes (settle wait, toast hold, short-soak RSS floor, db_lock_burst): merge on green CI
-- [ ] #100 UXR-053..057: home-page blocking-time regression fixed, merge main, then merge on green
+- [ ] #100 UXR-053..057: blocking-time fix + main merged (671c765e); checking a lost session subtitle in one baseline, then merge on green
 - [ ] #101 PRD-013 diagnostics view: merge main after #100; PRD-013 must stay [~] (guided restore not done)
 - [ ] #103 batch C (PRD-017/018 close; 019/020/021/032 stay [~]): merge main after #101
 - [ ] #74 Playwright 1.65 (FIND-016): after the web PRs, regenerate baselines in the 1.65 image
@@ -35,10 +35,9 @@ Last updated: 2026-11-13 21:00 UTC.
 - [ ] #108 WP1 Resource API (API-001..016): in progress; needs a security review before ready
 - [ ] #64 secapi draft: source for WP1 to WP4 only; close when the last split merges
 
-## In progress (not yet a PR)
-
-- [ ] WP9a coordinator operations: PRD-011 update check (off by default), PRD-012 support bundle,
-      PRD-026 safe-defaults test, PRD-003 migration tests (branch `feat/coordinator-ops-wp9a`)
+- [ ] #110 WP9a coordinator operations: PRD-011 update check (off by default), PRD-012 support bundle,
+      PRD-026 safe-defaults test, PRD-003 migration tests; security review running; squash on merge
+- [ ] #109 this task list: merge before the 1.5.0 tag
 
 ## Next
 
