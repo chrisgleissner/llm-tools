@@ -115,10 +115,27 @@ export function workers(root: HTMLElement): () => void {
     add.classList.toggle("primary", store.workers.length > 0);
     if (store.workers.length === 0) {
       const loaded = store.loaded;
-      answers.set(loaded ? { what: "No workers are enrolled.", needMe: "A worker has to be enrolled before missions can run.", next: "Add one, then enrol it on its machine." } : loading);
+      answers.set(loaded ? { what: "No workers are enrolled.", needMe: "A worker has to be enrolled before missions can run.", next: "Add one, then run the command shown here on its machine." } : loading);
+      const emptyCommand = `llm-bridge worker enroll --name NAME --coordinator wss://${location.host} --token-file - --ca-file ca.pem\nllm-bridge worker run`;
       patch(body, [
         loaded
-          ? emptyState({ icon: "workers", title: "No workers enrolled", text: "A worker runs missions on a machine and reports them here. Add one, then enrol it on that machine with the command shown afterwards.", action: el("div", "actions", button("Add worker", addDialog, { kind: "primary", icon: "plus" })) })
+          ? emptyState({
+              icon: "workers",
+              title: "No workers enrolled",
+              text: "A worker runs missions on a machine and reports them here.",
+              action: h(
+                "div",
+                {},
+                h("ol", { class: "steps" },
+                  h("li", {}, "Add a worker with the button below. The console shows its token once."),
+                  h("li", {}, "On the worker machine, copy ca.pem from the coordinator data directory, then run the command below. Paste the token, press Enter, then Ctrl-D."),
+                  h("li", {}, "When the worker connects, it appears in this list with an Online mark, and its missions appear under Missions."),
+                ),
+                el("div", "actions", button("Add worker", addDialog, { kind: "primary", icon: "plus" })),
+                h("div", { class: "actions" }, h("pre", { class: "cmd", tabindex: "0", "aria-label": "Worker enrolment command" }, emptyCommand), copyButton(emptyCommand, "commands")),
+                h("p", {}, h("a", { href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/operations.md#worker-service", target: "_blank", rel: "noopener noreferrer" }, "Installation and operations guide")),
+              ),
+            })
           : h("p", { class: "muted" }, "Loading..."),
       ]);
       return;
