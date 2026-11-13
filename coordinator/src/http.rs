@@ -3286,14 +3286,19 @@ async fn diagnostics(State(st): State<St>, _a: Authed) -> ApiResult {
     d["link_bytes"] = st.hub.link_bytes();
     d["sqlite_version"] = json!(rusqlite::version());
     // PRD-011/013: `status`, per-value `checks` ({value, status, fix}) and the `backup` summary.
-    let runtime = crate::diagnostics::Runtime {
-        uptime_secs: st.started.elapsed().as_secs(),
-        connected: st.hub.connected(),
-        monitor: &st.monitor,
-    };
-    let db = st.db.clone();
-    let (data_dir, cfg) = (st.data_dir.clone(), st.cfg.clone());
-    let report = crate::diagnostics::collect(&data_dir, &cfg, &db, Some(runtime)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", e))?;
+    // Reads the database and several files: off the runtime threads.
+    let state = st.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        let runtime = crate::diagnostics::Runtime {
+            uptime_secs: state.started.elapsed().as_secs(),
+            connected: state.hub.connected(),
+            monitor: &state.monitor,
+        };
+        crate::diagnostics::collect(&state.data_dir, &state.cfg, &state.db, Some(runtime))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", e))?;
     if let (Some(dst), Some(src)) = (d.as_object_mut(), report.as_object()) {
         for (k, v) in src {
             dst.insert(k.clone(), v.clone());

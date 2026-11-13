@@ -64,32 +64,60 @@ pub fn classify(error: &str) -> AttemptResult {
 
 pub struct Found {
     pub path: PathBuf,
+    /// Time in the file name (UTC), never later than now.
     pub modified: i64,
     pub bytes: u64,
 }
 
-/// Finished backups in `dir` (`coordinator-*.sqlite3`, not hidden partial files), oldest first.
+/// A stamp later than this many seconds after now is treated as a wrong clock or a stray file: the file is
+/// not counted, aged or rotated.
+const FUTURE_SLACK_SECS: i64 = 86_400;
+
+/// `(epoch, sequence)` of an automatic backup name `coordinator-YYYYMMDDTHHMMSSZ[-N].sqlite3`.
+pub fn parse_name(name: &str) -> Option<(i64, u32)> {
+    let mid = name.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    let (stamp, n) = match mid.split_once('-') {
+        Some((s, n)) => (s, n.parse::<u32>().ok()?),
+        None => (mid, 0),
+    };
+    let b = stamp.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    if b.len() != 16 || b[8] != b'T' || b[15] != b'Z' || !digits(0..8) || !digits(9..15) {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| stamp[r].parse::<i64>().ok();
+    let epoch = crate::diagnostics::days_from_civil(num(0..4)?, num(4..6)?, num(6..8)?) * 86_400 + num(9..11)? * 3600 + num(11..13)? * 60 + num(13..15)?;
+    Some((epoch, n))
+}
+
+/// Finished automatic backups in `dir`, oldest first by the stamp in the file name (never by modification time).
+/// Only regular files (not symbolic links) whose names match the automatic pattern exactly count; manual
+/// backups and other files are left alone, and so are names stamped more than a day in the future.
 pub fn list(dir: &Path) -> Vec<Found> {
-    let mut v: Vec<Found> = std::fs::read_dir(dir)
+    let now = crate::now();
+    let mut v: Vec<((i64, u32), Found)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(PREFIX) || !name.ends_with(SUFFIX) {
+            let key = parse_name(&name)?;
+            if key.0 > now + FUTURE_SLACK_SECS {
                 return None;
             }
-            let meta = e.metadata().ok().filter(|m| m.is_file())?;
-            let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
-            Some(Found {
-                path: e.path(),
-                modified,
-                bytes: meta.len(),
-            })
+            let meta = std::fs::symlink_metadata(e.path()).ok().filter(|m| m.file_type().is_file())?;
+            Some((
+                key,
+                Found {
+                    path: e.path(),
+                    modified: key.0.min(now),
+                    bytes: meta.len(),
+                },
+            ))
         })
         .collect();
-    v.sort_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)));
-    v
+    v.sort_by_key(|a| a.0);
+    v.into_iter().map(|(_, f)| f).collect()
 }
 
 /// Delete all but the newest `keep` backups; returns how many were removed.
@@ -109,7 +137,7 @@ pub fn rotate(dir: &Path, keep: usize) -> usize {
 pub fn read_status(dir: &Path) -> Option<Attempt> {
     let v: Value = serde_json::from_slice(&std::fs::read(dir.join(STATUS_FILE)).ok()?).ok()?;
     Some(Attempt {
-        at: v["attempted_at"].as_i64()?,
+        at: v["attempted_at"].as_i64()?.min(crate::now()),
         result: match v["result"].as_str()? {
             "ok" => AttemptResult::Ok,
             "skipped" => AttemptResult::Skipped,
@@ -129,19 +157,37 @@ fn write_status(dir: &Path, a: &Attempt) {
     }
 }
 
+/// Create `dir` (mode 0700) when it does not exist. The mode of an existing directory is left alone;
+/// diagnostics warn when it is looser than 0700.
 fn ensure_dir(dir: &Path) -> Result<(), String> {
-    if !dir.exists() {
-        let mut b = std::fs::DirBuilder::new();
-        b.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            b.mode(0o700);
-        }
-        b.create(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    if dir.exists() {
+        return Ok(());
     }
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    // The mode given to `DirBuilder` is reduced by the umask and applies to parents too: set the last one.
     crate::restrict_permissions(dir, 0o700);
     Ok(())
+}
+
+/// True when `dir` exists and group or others can access it (Unix only).
+pub fn dir_is_loose(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o077 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
+    }
 }
 
 /// Remove hidden partial files that a crashed backup left behind (older than an hour).
@@ -199,15 +245,17 @@ pub fn attempt(data_dir: &Path, backup_dir: &Path, keep: usize, opts: &BackupOpt
     result
 }
 
-/// Epoch second at which the next automatic backup is due. `newest` is the modification time of the
-/// newest backup, `last` the last attempt as (time, succeeded).
-pub fn next_due(newest: Option<i64>, last: Option<(i64, bool)>, interval: u64, now: i64) -> i64 {
+/// Epoch second at which the next automatic backup is due. `newest` is the time of the newest backup,
+/// `last` the last attempt as (time, succeeded) and `anchor` the process start: with nothing to go by, the
+/// first backup is due `STARTUP_DELAY_SECS` (at most one interval) after it, a fixed point that does not move
+/// while the scheduler waits.
+pub fn next_due(newest: Option<i64>, last: Option<(i64, bool)>, interval: u64, anchor: i64) -> i64 {
     let interval = interval as i64;
     let retry = interval.min(RETRY_SECS as i64);
     let Some(newest) = newest else {
         return match last {
             Some((at, false)) => at + retry,
-            _ => now + (STARTUP_DELAY_SECS as i64).min(interval),
+            _ => anchor + (STARTUP_DELAY_SECS as i64).min(interval),
         };
     };
     let due = newest + interval;
@@ -217,9 +265,18 @@ pub fn next_due(newest: Option<i64>, last: Option<(i64, bool)>, interval: u64, n
     }
 }
 
-pub fn due_at(dir: &Path, interval: u64, now: i64) -> i64 {
+pub fn due_at(dir: &Path, interval: u64, anchor: i64) -> i64 {
     let last = read_status(dir).map(|a| (a.at, a.result == AttemptResult::Ok));
-    next_due(list(dir).last().map(|f| f.modified), last, interval, now)
+    next_due(list(dir).last().map(|f| f.modified), last, interval, anchor)
+}
+
+/// Longest single sleep of the scheduler. A monotonic sleep does not count the time a suspended machine
+/// spent asleep, so the wall-clock due time is read again after every chunk.
+pub const WAKE_CHUNK_SECS: i64 = 60;
+
+/// How long to sleep now for a backup due at `due`: the wall-clock difference, within 200 ms and one chunk.
+pub fn sleep_chunk(due: i64, now: i64) -> Duration {
+    Duration::from_secs((due - now).clamp(0, WAKE_CHUNK_SECS) as u64).max(Duration::from_millis(200))
 }
 
 /// The scheduler task: sleeps until the next backup is due, then backs up on a blocking thread.
@@ -231,16 +288,26 @@ pub async fn run(st: St) {
     let dir = st.cfg.backup_directory(&st.data_dir);
     let keep = st.cfg.backup_keep.max(1) as usize;
     let mut shutdown = st.shutdown.clone();
+    let anchor = crate::now() - st.started.elapsed().as_secs() as i64;
+    // Held in memory too, so an attempt whose result cannot be written (read-only directory) is not retried in a loop.
+    let mut last_try: Option<i64> = None;
     loop {
         let now = crate::now();
-        let wait = Duration::from_secs((due_at(&dir, interval, now) - now).max(0) as u64).max(Duration::from_millis(200));
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return; } }
+        let mut due = due_at(&dir, interval, anchor);
+        if let Some(t) = last_try {
+            due = due.max(t + interval.min(RETRY_SECS) as i64);
+        }
+        if due > now {
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_chunk(due, now)) => {}
+                changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return; } }
+            }
+            continue;
         }
         if *shutdown.borrow() {
             return;
         }
+        last_try = Some(crate::now());
         let (data_dir, backup_dir) = (st.data_dir.clone(), dir.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         let opts = BackupOptions {
@@ -274,9 +341,32 @@ mod tests {
         let day = 86_400;
         assert_eq!(next_due(None, None, day as u64, 1000), 1000 + 60);
         assert_eq!(next_due(None, None, 10, 1000), 1010);
+        // The first backup is due at a fixed point after the process start, not "a minute from now".
+        assert_eq!(next_due(None, None, day as u64, 1000), next_due(None, None, day as u64, 1000));
         assert_eq!(next_due(Some(500), Some((500, true)), day as u64, 1000), 500 + day);
         assert_eq!(next_due(Some(0), Some((100_000, false)), day as u64, 100_010), 100_000 + 3600);
         assert_eq!(next_due(None, Some((50, false)), 5, 52), 55);
+    }
+
+    #[test]
+    fn sleeps_are_short_chunks_re_read_against_the_wall_clock() {
+        assert_eq!(sleep_chunk(1_000_000, 0), Duration::from_secs(WAKE_CHUNK_SECS as u64));
+        assert_eq!(sleep_chunk(30, 0), Duration::from_secs(30));
+        assert_eq!(sleep_chunk(0, 100), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn names_parse_exactly() {
+        assert!(parse_name("coordinator-20261113T074639Z.sqlite3").is_some());
+        assert_eq!(parse_name("coordinator-20261113T074639Z-3.sqlite3").unwrap().1, 3);
+        for bad in [
+            "coordinator-manual.sqlite3",
+            "coordinator-20261113T074639Z.sqlite3.bak",
+            "coordinator-20261113T07463Z.sqlite3",
+            "x.sqlite3",
+        ] {
+            assert!(parse_name(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]

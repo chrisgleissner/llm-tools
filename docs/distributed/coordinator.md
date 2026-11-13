@@ -296,10 +296,25 @@ All thresholds are in one table, `diagnostics::THRESHOLDS`:
 | `last_backup`, automatic backups off | older than 48 h, or none | older than 7 days |
 | `server_certificate` | under 30 days left | under 7 days or expired |
 | `ca_certificate` | under 90 days left | under 30 days |
+| `schema_version` (database file against this binary) | none | any difference; the command line never migrates |
+| `backup_directory` | exists and is accessible to group or others (Unix); its mode is left unchanged | none |
 | `version` | none | none |
+
+`last_backup` takes the worse of the age grade and the result of the last attempt, so an old backup is a
+failure even when the last attempt was only skipped. The backup age comes from the time stamp in the file
+name, not from the modification time, and a stamp or attempt time in the future is not trusted.
 
 The coordinator does not know a worker's newest event, so event lag is the silence of the worker link,
 not a count of missing events.
+
+Rotation owns the file name pattern `coordinator-YYYYMMDDTHHMMSSZ[-N].sqlite3` in `backup_dir`: only regular
+files (not symbolic links) with exactly such a name are counted, ordered by the stamp and deleted beyond
+`backup_keep`. Other files, including manual backups with other names, are never touched, and neither is
+a file whose stamp lies more than a day in the future. A directory that already exists keeps its mode; the
+coordinator sets 0700 only on a directory it creates. The scheduler sleeps at most 60 seconds at a time and
+reads the wall clock again, so a backup that fell due while the machine was suspended is taken on resume.
+Scheduled backups and the integrity check of the copy are interrupted at shutdown.
+`bridge-coordinator diagnostics` opens the database read-only without migrating it.
 
 Restore stays on the command line (`bridge-coordinator restore`, service stopped; see `install.md`).
 A guided restore in the web console needs an administrator step-up (SEC2-008), an integrity check

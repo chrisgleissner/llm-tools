@@ -20,10 +20,15 @@ fn names(dir: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-fn fake_backup(dir: &Path, name: &str, age_secs: u64) {
+/// A file that the scheduler counts as an automatic backup made `age_secs` ago (the age is in the name).
+fn fake_backup(dir: &Path, age_secs: u64) -> String {
+    let name = format!(
+        "coordinator-{}.sqlite3",
+        bridge_coordinator::utc_stamp_at(bridge_coordinator::now() - age_secs as i64)
+    );
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join(name), b"x").unwrap();
-    set_age(&dir.join(name), age_secs);
+    std::fs::write(dir.join(&name), b"x").unwrap();
+    name
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -85,20 +90,17 @@ async fn interval_zero_disables_automatic_backups() {
 #[test]
 fn rotation_removes_only_the_oldest_finished_backups() {
     let dir = tmp_dir();
-    for (i, age) in [500u64, 400, 300, 200, 100].iter().enumerate() {
-        fake_backup(&dir, &format!("coordinator-{i}.sqlite3"), *age);
+    let made: Vec<String> = [500u64, 400, 300, 200, 100].iter().map(|age| fake_backup(&dir, *age)).collect();
+    // Modification times run the other way round: the order must come from the names.
+    for (i, n) in made.iter().enumerate() {
+        set_age(&dir.join(n), 100 + 100 * i as u64);
     }
     // Files that are not finished backups are never touched.
-    fake_backup(&dir, ".coordinator-x.partial-1", 900);
-    fake_backup(&dir, "notes.txt", 900);
+    std::fs::write(dir.join(".coordinator-x.partial-1"), b"x").unwrap();
+    std::fs::write(dir.join("notes.txt"), b"x").unwrap();
     assert_eq!(backups::rotate(&dir, 3), 2);
     let left = names(&dir);
-    assert_eq!(
-        left,
-        ["coordinator-2.sqlite3", "coordinator-3.sqlite3", "coordinator-4.sqlite3"]
-            .map(String::from)
-            .into()
-    );
+    assert_eq!(left, made[2..].iter().cloned().collect::<BTreeSet<_>>());
     assert!(dir.join("notes.txt").exists() && dir.join(".coordinator-x.partial-1").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -107,7 +109,7 @@ fn rotation_removes_only_the_oldest_finished_backups() {
 async fn budget_refusal_is_recorded_as_a_skip_and_keeps_old_backups() {
     let env = boot().await;
     let dir = env.dir.join("backups");
-    fake_backup(&dir, "coordinator-old.sqlite3", 60);
+    fake_backup(&dir, 60);
     let opts = BackupOptions {
         budget: Duration::ZERO,
         assume_bytes_per_sec: Some(1024 * 1024),
@@ -128,7 +130,7 @@ async fn budget_refusal_is_recorded_as_a_skip_and_keeps_old_backups() {
 async fn diagnostics_carry_the_fields_and_warn_on_backup_age() {
     let env = boot_with(|t| t.replace("backup_interval_hours = 24", "backup_interval_hours = 0")).await;
     let dir = env.dir.join("backups");
-    fake_backup(&dir, "coordinator-a.sqlite3", 3600);
+    fake_backup(&dir, 3600);
     let api = env.admin().await;
     let (st, d) = api.get("/api/v1/diagnostics").await;
     assert_eq!(st, 200);
@@ -152,7 +154,8 @@ async fn diagnostics_carry_the_fields_and_warn_on_backup_age() {
     assert_eq!(d["checks"]["last_backup"]["status"], "ok");
     assert!(d["checks"]["server_certificate"]["value"]["days_left"].as_i64().unwrap() > 30);
     // A three-day-old backup with automatic backups off is a warning with a fix.
-    set_age(&dir.join("coordinator-a.sqlite3"), 3 * 86_400);
+    std::fs::remove_dir_all(&dir).unwrap();
+    fake_backup(&dir, 3 * 86_400);
     let (_, d) = api.get("/api/v1/diagnostics").await;
     assert_eq!(d["checks"]["last_backup"]["status"], "warn");
     assert!(d["checks"]["last_backup"]["fix"].as_str().unwrap().contains("backup"));
@@ -196,6 +199,7 @@ async fn diagnostics_warn_when_the_ca_certificate_is_close_to_expiry() {
 fn diagnostics_command_prints_checks_without_a_running_service() {
     let dir = tmp_dir();
     bridge_coordinator::init::init(&dir, &sans()).unwrap();
+    drop(bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&dir)).unwrap());
     let bin = env!("CARGO_BIN_EXE_bridge-coordinator");
     let o = std::process::Command::new(bin)
         .args(["diagnostics", "--json", "--data-dir"])
@@ -281,4 +285,176 @@ async fn shutdown_cancels_a_running_scheduled_backup() {
     assert!(partials(&backup_dir).is_empty(), "{:?}", partials(&backup_dir));
     assert_eq!(backups::read_status(&backup_dir).unwrap().result.as_str(), "cancelled");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn cli(dir: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_bridge-coordinator"))
+        .args(args)
+        .arg("--data-dir")
+        .arg(dir)
+        .output()
+        .unwrap()
+}
+
+fn user_version(db: &Path) -> i64 {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+}
+
+fn data_dir_with_database() -> std::path::PathBuf {
+    let dir = tmp_dir();
+    bridge_coordinator::init::init(&dir, &sans()).unwrap();
+    drop(bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&dir)).unwrap());
+    dir
+}
+
+#[test]
+fn the_diagnostics_command_does_not_touch_the_database_and_fails_on_an_old_schema() {
+    let dir = data_dir_with_database();
+    let db = bridge_coordinator::db_path(&dir);
+    let before = std::fs::metadata(&db).unwrap();
+    let o = cli(&dir, &["diagnostics", "--json"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let after = std::fs::metadata(&db).unwrap();
+    assert_eq!((before.len(), before.modified().unwrap()), (after.len(), after.modified().unwrap()));
+    // An older schema is reported as a failed check, not migrated.
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.pragma_update(None, "user_version", 1).unwrap();
+    drop(c);
+    let o = cli(&dir, &["diagnostics", "--json"]);
+    assert_eq!(o.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["checks"]["schema_version"]["status"], "fail", "{v}");
+    assert_eq!(v["checks"]["schema_version"]["value"]["found"], 1);
+    assert_eq!(user_version(&db), 1, "the command must not migrate");
+    // A newer schema as well.
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.pragma_update(None, "user_version", 9999).unwrap();
+    drop(c);
+    let v: Value = serde_json::from_slice(&cli(&dir, &["diagnostics", "--json"]).stdout).unwrap();
+    assert!(v["checks"]["schema_version"]["fix"].as_str().unwrap().contains("newer"));
+    assert_eq!(user_version(&db), 9999);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn text_output_survives_multibyte_values() {
+    let long = "é".repeat(200);
+    assert_eq!(bridge_coordinator::diagnostics::truncate_chars(&long, 100).chars().count(), 103);
+    let report = serde_json::json!({"status": "ok", "checks": {"x": {"value": long, "status": "ok", "fix": null}}, "backup": {}});
+    assert!(bridge_coordinator::diagnostics::render_text(&report).contains("éééé"));
+}
+
+#[test]
+fn an_integrity_check_honours_the_cancel_flag() {
+    let dir = data_dir_with_database();
+    let db = bridge_coordinator::db_path(&dir);
+    fill(&db, 8);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    assert_eq!(
+        bridge_coordinator::ops::integrity_ok_cancellable(&db, Some(&flag)).unwrap_err(),
+        bridge_coordinator::ops::BACKUP_CANCELLED
+    );
+    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(bridge_coordinator::ops::integrity_ok_cancellable(&db, Some(&flag)).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_exactly_named_regular_files_count_and_future_stamps_are_ignored() {
+    let dir = tmp_dir();
+    let ok = fake_backup(&dir, 100);
+    let ok_seq = ok.replace(".sqlite3", "-1.sqlite3");
+    std::fs::write(dir.join(&ok_seq), b"x").unwrap();
+    // A manual backup, a look-alike and a stray file.
+    for n in [
+        "coordinator-manual.sqlite3",
+        "coordinator-2026111.sqlite3",
+        "coordinator-20261113T000000Zx.sqlite3",
+        "coordinator-.sqlite3",
+    ] {
+        std::fs::write(dir.join(n), b"x").unwrap();
+    }
+    // A symbolic link with an automatic name.
+    #[cfg(unix)]
+    {
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, b"x").unwrap();
+        let link = format!("coordinator-{}.sqlite3", bridge_coordinator::utc_stamp_at(bridge_coordinator::now() - 50));
+        std::os::unix::fs::symlink(&target, dir.join(&link)).unwrap();
+    }
+    // A name stamped ten years ahead (wrong clock when it was made).
+    let future = format!(
+        "coordinator-{}.sqlite3",
+        bridge_coordinator::utc_stamp_at(bridge_coordinator::now() + 10 * 365 * 86_400)
+    );
+    std::fs::write(dir.join(&future), b"x").unwrap();
+    assert_eq!(names(&dir), [ok.clone(), ok_seq.clone()].into_iter().collect::<BTreeSet<_>>());
+    // Rotation to one keeps the newest counted file and touches none of the others.
+    assert_eq!(backups::rotate(&dir, 1), 1);
+    assert_eq!(names(&dir), [ok_seq].into_iter().collect::<BTreeSet<_>>());
+    for n in ["coordinator-manual.sqlite3", "elsewhere", future.as_str()] {
+        assert!(dir.join(n).exists(), "{n} must stay");
+    }
+    #[cfg(unix)]
+    assert!(
+        std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_type().unwrap().is_symlink()),
+        "the link stays"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_future_attempt_time_does_not_postpone_the_schedule() {
+    let dir = tmp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let future = bridge_coordinator::now() + 10 * 365 * 86_400;
+    std::fs::write(
+        dir.join(backups::STATUS_FILE),
+        serde_json::json!({"attempted_at": future, "result": "failed", "reason": "x", "file": null, "bytes": null}).to_string(),
+    )
+    .unwrap();
+    let now = bridge_coordinator::now();
+    assert!(backups::read_status(&dir).unwrap().at <= now + 1);
+    // Failed attempt, no backup: retry within an hour, not in ten years.
+    assert!(backups::due_at(&dir, 86_400, now) <= now + 3601);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_loose_backup_directory_is_reported_and_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmp_dir();
+    let loose = dir.join("backups");
+    std::fs::create_dir_all(&loose).unwrap();
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // `boot_with` makes its own directory; start the server on this one instead.
+    bridge_coordinator::init::init(&dir, &sans()).unwrap();
+    edit_config(&dir, |t| {
+        t.replace("8443", "0").replace("backup_interval_hours = 24", "backup_interval_hours = 0")
+    });
+    let srv = bridge_coordinator::server::start(&dir).await.unwrap();
+    let ca = std::fs::read(dir.join("ca.pem")).unwrap();
+    let tls = client_tls(&ca);
+    let client = reqwest::Client::builder().use_preconfigured_tls((*tls).clone()).build().unwrap();
+    let env = Env {
+        addr: srv.addr,
+        dir: dir.clone(),
+        srv,
+        tls,
+        client,
+    };
+    let api = env.admin().await;
+    let (_, d) = api.get("/api/v1/diagnostics").await;
+    let c = &d["checks"]["backup_directory"];
+    assert_eq!(c["status"], "warn", "{c}");
+    assert!(c["fix"].as_str().unwrap().contains("chmod 700"));
+    assert_eq!(std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777, 0o755);
+    // Taking a backup into it does not change the mode either.
+    let a = backups::attempt(&env.dir, &loose, 7, &BackupOptions::default());
+    assert_eq!(a.result.as_str(), "ok", "{a:?}");
+    assert_eq!(std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777, 0o755);
+    env.stop().await;
 }

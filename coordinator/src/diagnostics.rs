@@ -9,7 +9,7 @@
 
 use crate::backups::{self, Attempt, AttemptResult};
 use crate::config::Config;
-use crate::db::Db;
+use crate::db::{self, Db};
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -130,6 +130,8 @@ pub struct BackupInputs {
     pub newest_bytes: Option<u64>,
     pub last: Option<Attempt>,
     pub next_due_at: Option<i64>,
+    /// The backup directory exists and group or others can access it.
+    pub dir_loose: bool,
 }
 
 pub struct Inputs {
@@ -141,6 +143,8 @@ pub struct Inputs {
     pub connected: Option<Vec<String>>,
     pub queue_depths: Value,
     pub db_bytes: u64,
+    /// Schema version found in the database file and the one this binary expects.
+    pub schema: (i64, i64),
     pub growth_per_day: Option<f64>,
     pub disk_free: Option<u64>,
     pub backup: BackupInputs,
@@ -164,6 +168,18 @@ pub fn build(i: &Inputs, t: &Thresholds) -> Value {
     };
 
     add("version", check(i.versions.clone(), Status::Ok, ""));
+    add(
+        "schema_version",
+        check(
+            json!({"found": i.schema.0, "expected": i.schema.1}),
+            if i.schema.0 == i.schema.1 { Status::Ok } else { Status::Fail },
+            if i.schema.0 > i.schema.1 {
+                "the database was written by a newer coordinator: install that version, or restore a backup made by this one"
+            } else {
+                "the database is from an older coordinator and is not migrated by this command: start the service once to migrate it, or restore a matching backup"
+            },
+        ),
+    );
     add(
         "uptime_seconds",
         match i.uptime_secs {
@@ -303,6 +319,17 @@ pub fn build(i: &Inputs, t: &Thresholds) -> Value {
     );
 
     add("last_backup", backup_check(i, t));
+    add(
+        "backup_directory",
+        check(
+            json!({"dir": i.backup.dir, "world_or_group_accessible": i.backup.dir_loose}),
+            if i.backup.dir_loose { Status::Warn } else { Status::Ok },
+            &format!(
+                "the backup directory is accessible to other users and holds copies of every credential hash: run `chmod 700 {}`",
+                i.backup.dir
+            ),
+        ),
+    );
 
     for (name, expiry, warn, fail, fix) in [
         (
@@ -357,31 +384,17 @@ fn backup_check(i: &Inputs, t: &Thresholds) -> (Value, Status) {
     let b = &i.backup;
     let age = b.newest_at.map(|a| (i.now - a).max(0));
     let value = json!({"age_seconds": age, "bytes": b.newest_bytes, "last_result": b.last.as_ref().map(|a| a.result.as_str()), "last_reason": b.last.as_ref().and_then(|a| a.reason.clone())});
-    let failed_since = b
-        .last
-        .as_ref()
-        .filter(|a| !matches!(a.result, AttemptResult::Ok | AttemptResult::Cancelled) && b.newest_at.is_none_or(|n| a.at > n));
-    if let Some(a) = failed_since {
-        let why = a.reason.clone().unwrap_or_default();
-        return check(
-            value,
-            Status::Warn,
-            &format!(
-                "the last automatic backup was {}: {why}. Free disk space, or raise backup limits with a manual `bridge-coordinator backup --force`",
-                a.result.as_str()
-            ),
-        );
-    }
-    let (status, fix) = match (b.interval_secs, age) {
+    // The age is graded first; a failed or skipped last attempt can only make the result worse.
+    let (mut status, mut fix) = match (b.interval_secs, age) {
         (Some(_), None) => (
             if i.uptime_secs.is_some_and(|u| u < t.backup_first_grace_secs) { Status::Ok } else { Status::Warn },
-            "no backup exists yet: the first one is taken a minute after start; if none appears, read the journal for `automatic backup`",
+            "no backup exists yet: the first one is taken a minute after start; if none appears, read the journal for `automatic backup`".to_string(),
         ),
         (Some(iv), Some(a)) => (
             grade_high(a as u64, iv * t.backup_age_warn_intervals, iv * t.backup_age_fail_intervals),
-            "the newest backup is older than the schedule allows: read the journal for `automatic backup`, check free disk space, or take one with `bridge-coordinator backup --output FILE`",
+            "the newest backup is older than the schedule allows: read the journal for `automatic backup`, check free disk space, or take one with `bridge-coordinator backup --output FILE`".to_string(),
         ),
-        (None, None) => (Status::Warn, "automatic backups are off and no backup exists: set backup_interval_hours = 24 in config.toml, or schedule `bridge-coordinator backup`"),
+        (None, None) => (Status::Warn, "automatic backups are off and no backup exists: set backup_interval_hours = 24 in config.toml, or schedule `bridge-coordinator backup`".to_string()),
         (None, Some(a)) => (
             if a >= t.backup_manual_fail_secs {
                 Status::Fail
@@ -390,10 +403,23 @@ fn backup_check(i: &Inputs, t: &Thresholds) -> (Value, Status) {
             } else {
                 Status::Ok
             },
-            "automatic backups are off and the newest backup is old: set backup_interval_hours = 24 in config.toml, or run `bridge-coordinator backup`",
+            "automatic backups are off and the newest backup is old: set backup_interval_hours = 24 in config.toml, or run `bridge-coordinator backup`".to_string(),
         ),
     };
-    check(value, status, fix)
+    let failed_since = b
+        .last
+        .as_ref()
+        .filter(|a| !matches!(a.result, AttemptResult::Ok | AttemptResult::Cancelled) && b.newest_at.is_none_or(|n| a.at > n));
+    if let Some(a) = failed_since {
+        let why = a.reason.clone().unwrap_or_default();
+        let attempt_fix = format!(
+            "the last automatic backup was {}: {why}. Free disk space, or raise backup limits with a manual `bridge-coordinator backup --force`",
+            a.result.as_str()
+        );
+        fix = if status == Status::Ok { attempt_fix } else { format!("{fix}; {attempt_fix}") };
+        status = status.max(Status::Warn);
+    }
+    check(value, status, &fix)
 }
 
 // ---------------------------------------------------------------- growth samples
@@ -459,7 +485,7 @@ fn tlv(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, b.get(off..end)?, b.get(end..)?))
 }
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -514,21 +540,101 @@ pub struct Runtime<'a> {
     pub monitor: &'a Monitor,
 }
 
-/// Collect the inputs from the database, files and (when serving) the process, and build the report.
-pub fn collect(data_dir: &Path, cfg: &Config, db: &Db, runtime: Option<Runtime<'_>>) -> Result<Value, String> {
-    let now = crate::now();
-    let d = db.diagnostics().map_err(|e| e.to_string())?;
-    let db_bytes = d["db_bytes"].as_u64().unwrap_or(0);
-    let workers = db
-        .workers_list()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|w| WorkerInfo {
-            name: w.name,
-            last_seen: w.last_seen,
-            last_event_at: w.last_event_at,
+/// What the report needs from the database.
+pub struct DbFacts {
+    pub db_bytes: u64,
+    pub queue_depths: Value,
+    pub workers: Vec<WorkerInfo>,
+    pub schema: (i64, i64),
+}
+
+impl DbFacts {
+    /// From the live connection of the serving process.
+    pub fn from_db(db: &Db) -> Result<DbFacts, String> {
+        let d = db.diagnostics().map_err(|e| e.to_string())?;
+        let workers = db
+            .workers_list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|w| WorkerInfo {
+                name: w.name,
+                last_seen: w.last_seen,
+                last_event_at: w.last_event_at,
+            })
+            .collect();
+        Ok(DbFacts {
+            db_bytes: d["db_bytes"].as_u64().unwrap_or(0),
+            queue_depths: d["command_queue_depths"].clone(),
+            workers,
+            schema: (db::SCHEMA_VERSION, db::SCHEMA_VERSION),
         })
-        .collect();
+    }
+
+    /// For the command line: a read-only connection that runs no migration and writes no pragma. A schema
+    /// version other than the binary's is reported (the tables are not read) instead of being migrated.
+    pub fn read_only(path: &Path) -> Result<DbFacts, String> {
+        use rusqlite::{Connection, OpenFlags};
+        if !path.exists() {
+            return Err(format!("no database at {}; start the service once to create it", path.display()));
+        }
+        let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .map_err(|e| format!("cannot open {} read-only: {e}", path.display()))?;
+        c.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
+        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let wal = std::fs::metadata(format!("{}-wal", path.display())).map(|m| m.len()).unwrap_or(0);
+        let mut facts = DbFacts {
+            db_bytes: size + wal,
+            queue_depths: json!({}),
+            workers: vec![],
+            schema: (version, db::SCHEMA_VERSION),
+        };
+        if version != db::SCHEMA_VERSION {
+            return Ok(facts);
+        }
+        let q = |e: rusqlite::Error| e.to_string();
+        let mut st = c
+            .prepare("SELECT worker, state, COUNT(*) FROM commands WHERE state!='done' GROUP BY worker, state")
+            .map_err(q)?;
+        let mut depths = Map::new();
+        for r in st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+            .map_err(q)?
+        {
+            let (w, s, n) = r.map_err(q)?;
+            depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
+        }
+        facts.queue_depths = Value::Object(depths);
+        let mut st = c.prepare("SELECT name, last_seen, last_event_at FROM workers").map_err(q)?;
+        facts.workers = st
+            .query_map([], |r| {
+                Ok(WorkerInfo {
+                    name: r.get(0)?,
+                    last_seen: r.get(1)?,
+                    last_event_at: r.get(2)?,
+                })
+            })
+            .map_err(q)?
+            .collect::<Result<_, _>>()
+            .map_err(q)?;
+        Ok(facts)
+    }
+}
+
+/// Report of the serving process (blocking: call it from `spawn_blocking`).
+pub fn collect(data_dir: &Path, cfg: &Config, db: &Db, runtime: Option<Runtime<'_>>) -> Result<Value, String> {
+    Ok(report(data_dir, cfg, DbFacts::from_db(db)?, runtime))
+}
+
+/// Report from the files alone: nothing is written or migrated.
+pub fn collect_read_only(data_dir: &Path, cfg: &Config) -> Result<Value, String> {
+    Ok(report(data_dir, cfg, DbFacts::read_only(&crate::db_path(data_dir))?, None))
+}
+
+fn report(data_dir: &Path, cfg: &Config, facts: DbFacts, runtime: Option<Runtime<'_>>) -> Value {
+    let now = crate::now();
+    let anchor = now - runtime.as_ref().map_or(0, |r| r.uptime_secs as i64);
+    let db_bytes = facts.db_bytes;
     let dir = cfg.backup_directory(data_dir);
     let found = backups::list(&dir);
     let interval = cfg.backup_interval();
@@ -541,10 +647,11 @@ pub fn collect(data_dir: &Path, cfg: &Config, db: &Db, runtime: Option<Runtime<'
         now,
         uptime_secs: runtime.as_ref().map(|r| r.uptime_secs),
         versions: json!({"coordinator": env!("CARGO_PKG_VERSION"), "protocol": crate::protocol::PROTOCOL_VERSION, "sqlite": rusqlite::version()}),
-        workers,
+        workers: facts.workers,
         connected: runtime.as_ref().map(|r| r.connected.clone()),
-        queue_depths: d["command_queue_depths"].clone(),
+        queue_depths: facts.queue_depths,
         db_bytes,
+        schema: facts.schema,
         growth_per_day: runtime
             .as_ref()
             .and_then(|r| r.monitor.growth_per_day(now, db_bytes, THRESHOLDS.growth_min_window_secs)),
@@ -557,12 +664,22 @@ pub fn collect(data_dir: &Path, cfg: &Config, db: &Db, runtime: Option<Runtime<'
             newest_at: found.last().map(|f| f.modified),
             newest_bytes: found.last().map(|f| f.bytes),
             last: backups::read_status(&dir),
-            next_due_at: interval.map(|iv| backups::due_at(&dir, iv, now)),
+            next_due_at: interval.map(|iv| backups::due_at(&dir, iv, anchor)),
+            dir_loose: backups::dir_is_loose(&dir),
         },
         server_cert_not_after: cert_expiry(&server_cert),
         ca_cert_not_after: cert_expiry(&data_dir.join("ca.pem")),
     };
-    Ok(build(&inputs, &THRESHOLDS))
+    build(&inputs, &THRESHOLDS)
+}
+
+/// At most `max` characters of `text` (never a slice inside a multi-byte character), with `...` when cut.
+pub fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}...", text.chars().take(max).collect::<String>())
+    }
 }
 
 /// Plain-text rendering for the command line.
@@ -570,8 +687,7 @@ pub fn render_text(report: &Value) -> String {
     let mut out = format!("overall: {}\n", report["status"].as_str().unwrap_or("?"));
     if let Some(checks) = report["checks"].as_object() {
         for (name, c) in checks {
-            let value = c["value"].to_string();
-            let value = if value.len() > 100 { format!("{}...", &value[..100]) } else { value };
+            let value = truncate_chars(&c["value"].to_string(), 100);
             out.push_str(&format!("{:<32} {:<5} {}\n", name, c["status"].as_str().unwrap_or("?"), value));
             if let Some(fix) = c["fix"].as_str() {
                 out.push_str(&format!("{:<32}       fix: {fix}\n", ""));
@@ -605,6 +721,7 @@ mod tests {
             connected: Some(vec![]),
             queue_depths: json!({}),
             db_bytes: 1000,
+            schema: (db::SCHEMA_VERSION, db::SCHEMA_VERSION),
             growth_per_day: None,
             disk_free: Some(50 << 30),
             backup: BackupInputs {
@@ -616,6 +733,7 @@ mod tests {
                 newest_bytes: Some(10),
                 last: None,
                 next_due_at: None,
+                dir_loose: false,
             },
             server_cert_not_after: Some(10_000_000 + 400 * 86_400),
             ca_cert_not_after: Some(10_000_000 + 1000 * 86_400),
@@ -695,6 +813,27 @@ mod tests {
         let r = build(&i, &THRESHOLDS);
         assert_eq!(status(&r, "last_backup"), "warn");
         assert!(r["checks"]["last_backup"]["fix"].as_str().unwrap().contains("not enough free space"));
+    }
+
+    #[test]
+    fn an_old_backup_fails_even_when_the_last_attempt_also_failed() {
+        let mut i = base();
+        i.backup.newest_at = Some(i.now - 30 * 86_400);
+        i.backup.last = Some(Attempt {
+            at: i.now,
+            result: AttemptResult::Skipped,
+            reason: Some("not enough free space".into()),
+            file: None,
+            bytes: None,
+        });
+        let r = build(&i, &THRESHOLDS);
+        assert_eq!(status(&r, "last_backup"), "fail");
+        let fix = r["checks"]["last_backup"]["fix"].as_str().unwrap();
+        assert!(fix.contains("older than the schedule") && fix.contains("not enough free space"), "{fix}");
+        // A fresh backup with a failed later attempt stays a warning.
+        i.backup.newest_at = Some(i.now - 3600);
+        i.backup.last.as_mut().unwrap().at = i.now;
+        assert_eq!(status(&build(&i, &THRESHOLDS), "last_backup"), "warn");
     }
 
     #[test]

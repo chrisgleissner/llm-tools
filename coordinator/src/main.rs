@@ -244,9 +244,11 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         ["diagnostics"] => {
+            if !dir.join("config.toml").exists() {
+                return Err(format!("{} is not an initialised data directory (run `init`)", dir.display()));
+            }
             let cfg = config::Config::load(&dir)?;
-            let db = open_db(&dir)?;
-            let report = bridge_coordinator::diagnostics::collect(&dir, &cfg, &db, None)?;
+            let report = bridge_coordinator::diagnostics::collect_read_only(&dir, &cfg)?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
             } else {

@@ -298,8 +298,25 @@ pub fn setup_token(dir: &Path) -> Result<PathBuf, String> {
 // ------------------------------------------------------------------ backup and restore
 
 fn integrity_ok(path: &Path) -> Result<i64, String> {
-    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
-    let result: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    integrity_ok_cancellable(path, None)
+}
+
+/// `PRAGMA integrity_check` and the schema version of `path`. When `cancel` becomes true the check is
+/// interrupted (SQLite calls the progress handler during the check) and the error is [`BACKUP_CANCELLED`].
+pub fn integrity_ok_cancellable(path: &Path, cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<i64, String> {
+    let mut c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
+    if let Some(flag) = cancel {
+        let flag = flag.clone();
+        c.progress_handler(100, Some(move || flag.load(std::sync::atomic::Ordering::Relaxed)))
+            .map_err(|e| e.to_string())?;
+    }
+    let result: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).map_err(|e| {
+        if cancel.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            BACKUP_CANCELLED.to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     if result != "ok" {
         return Err(format!("integrity_check failed: {result}"));
     }
@@ -764,7 +781,7 @@ pub fn backup_with(dir: &Path, output: &Path, opts: &BackupOptions) -> Result<Ba
         fmt_duration(copy)
     ));
     let check_started = std::time::Instant::now();
-    let schema_version = match integrity_ok(&tmp) {
+    let schema_version = match integrity_ok_cancellable(&tmp, opts.cancel.as_ref()) {
         Ok(v) => v,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
