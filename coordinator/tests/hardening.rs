@@ -277,9 +277,11 @@ async fn buffered_large_bodies_are_bounded() {
     s.write_all(authed_post_head(&env, &api, "/api/v1/commands", 200_000).as_bytes()).await.unwrap();
     s.write_all(b"{").await.unwrap();
     let (text, closed) = read_to_close(&mut s, Duration::from_secs(2)).await;
-    // On Windows, closing with unread body data can reset the connection and discard the 503.
+    // The server refuses before reading the body and closes with unread request data. On Windows
+    // that close sends a TCP RST, which can discard the 503 the client already received, so an
+    // empty closed read is accepted on Windows only. Elsewhere the 503 is required.
     assert!(
-        text.starts_with("HTTP/1.1 503") || (closed && text.is_empty()),
+        text.starts_with("HTTP/1.1 503") || (cfg!(windows) && closed && text.is_empty()),
         "expected 503 or a reset after refusal; closed={closed}, text={text:?}"
     );
     assert_eq!(slots.available_permits(), 0, "refused request must not take a body slot");
