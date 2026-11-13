@@ -34,7 +34,7 @@ may supply that ID and takes precedence over the request body's value. If a work
 offline, the command remains queued and the response has state `pending` and a
 `Location` header for its command record.
 `GET /api/v1/commands/{request_id}` retrieves its outcome. A completed command
-can still report `uncertain`; clients must not treat that as success. Resource
+can still report `uncertain`; a repeated submission then returns `409 uncertain-outcome` with a `Location` for the stored command, and clients must not treat it as success. Resource
 endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
 remaining CLI parity operations are being added in this follow-up.
 

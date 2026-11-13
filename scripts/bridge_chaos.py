@@ -22,6 +22,7 @@ The expected outcome of each fault is in ``FAULTS`` below and in docs/distribute
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import random
@@ -336,6 +337,27 @@ def build_shim(directory: Path) -> Path:
     return target
 
 
+def _worker_last_seen(fabric: Fabric, name: str) -> float:
+    for item in fabric.coordinator.api.workers():
+        if item["name"] != name:
+            continue
+        value = item.get("last_seen")
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"worker {name} returned an invalid last_seen timestamp") from exc
+            if parsed.tzinfo is None:
+                raise ValueError(f"worker {name} returned a last_seen timestamp without a timezone")
+            return parsed.timestamp()
+        raise ValueError(f"worker {name} returned an unsupported last_seen timestamp")
+    return 0.0
+
+
 def fault_clock_jump(fabric: Fabric, offset_file: Path) -> dict[str, Any]:
     coordinator = fabric.coordinator
     fabric.submit_tasks(10)
@@ -343,12 +365,6 @@ def fault_clock_jump(fabric: Fabric, offset_file: Path) -> dict[str, Any]:
     def write_offset(seconds: int) -> None:
         offset_file.write_text(str(seconds))
         time.sleep(0.1)
-
-    def last_seen(name: str) -> float:
-        for item in coordinator.api.workers():
-            if item["name"] == name:
-                return float(item.get("last_seen") or 0)
-        return 0.0
 
     def bounce() -> None:  # a reconnect makes the coordinator stamp the worker's last_seen with its (shifted) clock
         for proxy in fabric.proxies.values():
@@ -363,7 +379,7 @@ def fault_clock_jump(fabric: Fabric, offset_file: Path) -> dict[str, Any]:
         # The worker can be reported online before its reconnect is stamped with the shifted clock, so wait for the stamp.
         deadline = time.monotonic() + 30
         while True:
-            shift = last_seen("chaos-w1") - time.time()
+            shift = _worker_last_seen(fabric, "chaos-w1") - time.time()
             if label == "restored" or abs(shift - offset) < 120 or time.monotonic() > deadline:
                 break
             time.sleep(0.5)

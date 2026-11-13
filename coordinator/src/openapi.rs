@@ -220,6 +220,14 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
         }
     });
+    op["responses"]["400"]["content"]["application/problem+json"]["example"] = json!({
+        "type":"https://llm-tools.dev/problems/invalid-request",
+        "title":"Invalid request",
+        "status":400,
+        "detail":"The request does not match the documented fields.",
+        "code":"invalid-request",
+        "error":{"code":"invalid-request","message":"The request does not match the documented fields."}
+    });
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
@@ -255,11 +263,23 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"cursor","in":"query","required":false,"description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.","schema":{"type":"string","maxLength":2048}},
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
+        op["responses"]["200"]["content"]["application/json"]["example"] = json!({
+            "missions":[],"total":0,"offset":0,"next_cursor":null,"statuses":{}
+        });
     }
     if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({
             "required": method == "POST" || method == "PUT",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
+        });
+    }
+    if path == "/api/v1/missions/{id}/tasks" && method == "POST" {
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "title":"Review API behavior",
+            "prompt":"Check the resource endpoint and report any mismatch.",
+            "priority":0,
+            "depends_on":[],
+            "acceptance":["The documented response matches the CLI contract."]
         });
     }
     if path == "/api/docs" && method == "GET" {
@@ -285,7 +305,10 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
-            "content":{"application/json":{"schema":token_create_schema()}}
+            "content":{"application/json":{
+                "schema":token_create_schema(),
+                "example":{"name":"automation-read","scopes":["read"],"expires_days":30}
+            }}
         });
     }
     if path == "/api/v1/auth/login" && method == "POST" {
@@ -301,6 +324,9 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                     "remember":{"type":"boolean"}
                 }
             }}}
+        });
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "username":"operator","password":"replace-with-your-password","remember":false
         });
     }
     if path.ends_with("/registration/start") && method == "POST" {
@@ -785,6 +811,26 @@ mod tests {
         assert_eq!(schema["properties"]["password"]["type"], "string");
         assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["properties"]["remember"]["type"], "boolean");
+    }
+
+    #[test]
+    fn openapi_documents_safe_request_and_response_examples() {
+        let doc = openapi_value();
+        let mission_list = &doc["paths"]["/api/v1/missions"]["get"]["responses"]["200"]["content"]["application/json"];
+        assert_eq!(mission_list["example"]["missions"], json!([]));
+        assert_eq!(mission_list["example"]["next_cursor"], Value::Null);
+
+        let task_add = &doc["paths"]["/api/v1/missions/{id}/tasks"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(task_add["example"]["title"], "Review API behavior");
+        assert_eq!(task_add["example"]["depends_on"], json!([]));
+
+        let token_create = &doc["paths"]["/api/v1/tokens"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(token_create["example"]["scopes"], json!(["read"]));
+        assert!(token_create["example"].get("secret").is_none());
+
+        let problem = &doc["paths"]["/api/v1/missions"]["post"]["responses"]["400"]["content"]["application/problem+json"]["example"];
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+        assert_eq!(problem["status"], 400);
     }
 
     #[test]

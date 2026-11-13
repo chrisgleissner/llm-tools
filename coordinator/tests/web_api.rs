@@ -45,6 +45,31 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api_tokens_are_never_accepted_from_query_strings() {
+    let env = boot().await;
+    let _admin = env.admin().await;
+    let secret = "secret-url-rejected";
+    env.srv
+        .state
+        .db
+        .token_create_scoped("url-rejected", &bridge_coordinator::auth::sha256_hex(secret), None, &["read".to_string()])
+        .unwrap();
+    let header = env
+        .api()
+        .bare(Method::GET, "/api/v1/missions")
+        .header("authorization", format!("Bearer {secret}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(header.status().as_u16(), 200, "the same token works in the Authorization header");
+    let response = env.api().bare(Method::GET, &format!("/api/v1/missions?token={secret}")).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 401, "URL credentials must not authenticate an API request");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["code"], "unauthorized");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn security_notifications_are_durable_scoped_and_dismissible() {
     let env = boot().await;
     let api = env.admin().await;
@@ -252,6 +277,28 @@ async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
         .await
         .unwrap();
     assert_eq!(forbidden_terminal.status().as_u16(), 403);
+    for (method, path) in [
+        (Method::GET, "/api/v1/workers/worker-b/doctor"),
+        (Method::GET, "/api/v1/workers/worker-b/agents"),
+        (Method::GET, "/api/v1/workers/worker-b/sessions"),
+        (Method::GET, "/api/v1/workers/worker-b/usage"),
+        (Method::GET, "/api/v1/workers/worker-b/audit"),
+        (Method::POST, "/api/v1/workers/worker-b/gc"),
+        (Method::POST, "/api/v1/workers/worker-b/restore"),
+        (Method::GET, "/api/v1/missions/private-mission/events?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/operations?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/agents?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/settings?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/rotation?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/proposals?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks/1?worker=worker-b"),
+    ] {
+        let response = admin.bare(method.clone(), path).bearer_auth(token).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 403, "worker-bound token must not reach {method} {path}");
+        let body = response.json::<Value>().await.unwrap();
+        assert_eq!(body["code"], "token-worker-denied", "{method} {path}: {body}");
+    }
     let forbidden_create = admin
         .bare(Method::POST, "/api/v1/missions")
         .bearer_auth(token)
@@ -800,8 +847,15 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let mut token_api = env.api();
     token_api.bearer = Some(secret.clone());
 
-    for _ in 0..30 {
-        let (status, _) = token_api.post("/api/v1/commands", json!({})).await;
+    for index in 0..30 {
+        let response = token_api
+            .rb(Method::POST, "/api/v1/commands")
+            .header("idempotency-key", if index == 0 { "audit-request-001" } else { "audit-request-002" })
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
         assert_eq!(status, 400, "malformed request should reach command validation");
     }
     let response = token_api.rb(Method::POST, "/api/v1/commands").json(&json!({})).send().await.unwrap();
@@ -821,6 +875,11 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let token_uses: Vec<_> = audit.iter().filter(|row| row["action"] == "token.use").collect();
     assert_eq!(token_uses.iter().filter(|row| row["actor"] == "token:mutator").count(), 32);
     assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
+    assert!(token_uses.iter().any(|row| {
+        row["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("scopes=admin") && detail.contains("request_id=audit-request-001"))
+    }));
     assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
     env.stop().await;
 }
@@ -1586,6 +1645,91 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
     let reopened = bridge_coordinator::db::Db::open(&path).expect("partial legacy fixture remains reopenable after migration");
     assert!(reopened.session_get("old").unwrap().is_some());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_resource_redacts_private_request_and_event_fields() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    admin.add_worker("w1").await;
+    let request = json!({
+        "schema_version": 1,
+        "request_id": "private-command-1",
+        "operation": "mission.create",
+        "mission_id": "m1",
+        "target": "w1",
+        "params": {
+            "cwd": "/srv/work",
+            "prompt": "private-request-prompt-sentinel",
+            "environment": {"PRIVATE_ENV_SENTINEL":"environment-secret-sentinel"},
+            "config": {"credential":"request-credential-sentinel"}
+        }
+    });
+    env.srv.state.db.command_insert("w1", "mission.create", true, &request).unwrap();
+    env.srv
+        .state
+        .db
+        .command_done(
+            "w1",
+            "private-command-1",
+            &json!({
+                "outcome": "ok",
+                "result": {
+                    "events": [{
+                        "id": 1,
+                        "kind": "mission-created",
+                        "data": {
+                                            "terminal_output": "raw-terminal-sentinel",
+                            "screen": "captured-terminal-screen-sentinel",
+                            "provider_api_key": "provider-secret-sentinel",
+                            "access_token": "access-token-sentinel",
+                            "stdout": "stdout-terminal-sentinel",
+                            "transcript": "transcript-terminal-sentinel",
+                            "summary": "mission created"
+                        }
+                    }]
+                },
+                "error": null
+            }),
+        )
+        .unwrap();
+
+    let secret = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped("read-only", &bridge_coordinator::auth::sha256_hex(&secret), None, &["read".to_string()])
+        .unwrap());
+    let mut reader = env.api();
+    reader.bearer = Some(secret);
+    let (status, response) = reader.get("/api/v1/commands/private-command-1").await;
+    assert_eq!(status, 200, "{response}");
+    let serialized = response.to_string();
+    for sentinel in [
+        "raw-terminal-sentinel",
+        "captured-terminal-screen-sentinel",
+        "provider-secret-sentinel",
+        "environment-secret-sentinel",
+        "request-credential-sentinel",
+        "access-token-sentinel",
+        "stdout-terminal-sentinel",
+        "transcript-terminal-sentinel",
+    ] {
+        assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
+    }
+    // API-008 lists secrets, credentials, environment variables and terminal content. Paths, objectives and
+    // mission configuration stay visible so that `--target` output matches the local CLI.
+    assert_eq!(response.pointer("/request/params/cwd").and_then(Value::as_str), Some("/srv/work"));
+    assert_eq!(
+        response.pointer("/request/params/prompt").and_then(Value::as_str),
+        Some("private-request-prompt-sentinel")
+    );
+    assert_eq!(
+        response.pointer("/result/result/events/0/data/summary").and_then(Value::as_str),
+        Some("mission created")
+    );
+    env.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
