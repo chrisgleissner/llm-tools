@@ -21,6 +21,15 @@ const PING_EVERY: Duration = Duration::from_secs(20);
 /// the stored value matters after a disconnect (written then, unthrottled) or a coordinator crash,
 /// where it is at most this stale. Ten minutes keeps an idle worker to six small commits an hour.
 const LAST_SEEN_EVERY_SECS: i64 = 600;
+/// FIND-003: how often a live connection is checked for commands that stopped making progress.
+const RESEND_EVERY: Duration = Duration::from_secs(5);
+/// A mutating command that has been `pending`, `sent` or `acked` this long without a result is sent again on the
+/// same connection (a frame was lost). It is offered again after another interval, so a command that the worker
+/// is still executing causes one duplicate delivery per interval at most; the worker answers a duplicate from the
+/// stored outcome.
+const RESEND_AFTER_SECS: i64 = 10;
+/// Most commands re-sent in one check.
+const RESEND_BATCH: i64 = 20;
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
 
 fn plain(status: StatusCode, text: &'static str) -> Response {
@@ -299,6 +308,8 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
     // ---- main loop
     let mut tick = interval(PING_EVERY);
     tick.tick().await;
+    let mut resend_tick = interval(RESEND_EVERY);
+    resend_tick.tick().await;
     let mut last_heard = Instant::now();
     let mut final_close: Option<(u16, &'static str)> = None;
     while alive {
@@ -341,6 +352,14 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
                 break;
             }
             _ = shutdown.changed() => { final_close = Some((1001, "shutting down")); break }
+            _ = resend_tick.tick() => {
+                match st.db.commands_stale(&name, RESEND_AFTER_SECS, RESEND_BATCH) {
+                    Ok(rows) => for row in rows {
+                        if !deliver_row(&st, &mut socket, &worker_id, generation, &row).await { alive = false; break }
+                    },
+                    Err(e) => eprintln!("database error: {e}"),
+                }
+            }
             _ = tick.tick() => {
                 if last_heard.elapsed() > SILENCE_LIMIT { final_close = Some((1001, "silent for 60 s")); break }
                 match st.db.worker_get(&name) {

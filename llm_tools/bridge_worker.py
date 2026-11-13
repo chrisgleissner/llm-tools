@@ -19,6 +19,7 @@ import platform
 import queue
 import random
 import re
+import sqlite3
 import ssl
 import sys
 import tempfile
@@ -93,6 +94,55 @@ class WorkerConfig:
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
     return default_state_dir(env) / "worker"
+
+
+OUTCOMES_FILE = "outcomes.sqlite3"
+OUTCOMES_KEEP = 10_000
+OUTCOMES_KEEP_SECONDS = 7 * 86_400
+
+
+class OutcomeLedger:
+    """Final result of every mutating request, by request id, in a private file of the worker directory.
+
+    The coordinator sends an unanswered command again (after a lost frame or a reconnect). A request id with a
+    recorded outcome is answered with the stored result and is not executed again, whatever the operation does
+    internally. The outcome is recorded before ``command.result`` is sent. A crash after the effect and before
+    the record can run the command once more after the restart. Bounded: the newest 10,000 rows, at most 7 days,
+    pruned on every write.
+    """
+
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time) -> None:
+        self.path = path
+        self.clock = clock
+
+    def _connect(self) -> sqlite3.Connection:
+        created = not self.path.exists()
+        if created:
+            _make_private_dir(self.path.parent)
+            os.close(os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600))
+        os.chmod(self.path, 0o600)
+        db = sqlite3.connect(self.path, timeout=10)
+        db.execute("CREATE TABLE IF NOT EXISTS outcomes(request_id TEXT PRIMARY KEY, recorded REAL NOT NULL, result TEXT NOT NULL)")
+        return db
+
+    def get(self, request_id: str) -> dict[str, Any] | None:
+        db = self._connect()
+        try:
+            row = db.execute("SELECT result FROM outcomes WHERE request_id=?", (request_id,)).fetchone()
+        finally:
+            db.close()
+        return json.loads(row[0]) if row else None
+
+    def record(self, request_id: str, result: dict[str, Any]) -> None:
+        now = self.clock()
+        db = self._connect()
+        try:
+            with db:
+                db.execute("INSERT OR REPLACE INTO outcomes(request_id, recorded, result) VALUES(?,?,?)", (request_id, now, json.dumps(result)))
+                db.execute("DELETE FROM outcomes WHERE recorded<?", (now - OUTCOMES_KEEP_SECONDS,))
+                db.execute("DELETE FROM outcomes WHERE rowid NOT IN (SELECT rowid FROM outcomes ORDER BY recorded DESC, rowid DESC LIMIT ?)", (OUTCOMES_KEEP,))
+        finally:
+            db.close()
 
 
 def _make_private_dir(path: Path) -> None:
@@ -516,8 +566,9 @@ class WorkerSession:
 
     def __init__(self, config: WorkerConfig, *, open_store: Callable[[], BridgeStore], software_version: str,
                  save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None,
-                 audit: Callable[..., None] = audit) -> None:
+                 audit: Callable[..., None] = audit, outcomes: OutcomeLedger | None = None) -> None:
         self.config = config
+        self.outcomes = outcomes if outcomes is not None else OutcomeLedger(worker_dir() / OUTCOMES_FILE)
         self.audit = audit
         self.open_store = open_store
         self.software_version = software_version
@@ -744,6 +795,13 @@ class WorkerSession:
             with self.open_store() as store:
                 duplicate = store.command_exists(request.request_id)
         ack = self.message("command.ack", {"request_id": request.request_id, "status": "duplicate" if duplicate else "received"})
+        mutating = spec is not None and spec.mutating
+        stored = self._stored_outcome(request.request_id) if mutating else None
+        if stored is not None:
+            # A repeated request id: send the first result again; the operation does not run a second time.
+            self.audit("command", operation=request.operation, request_id=request.request_id, mission_id=request.mission_id,
+                       outcome=stored.get("outcome"), error=None, duplicate=True, replayed=True)
+            return [self.message("command.ack", {"request_id": request.request_id, "status": "duplicate"}), self.message("command.result", stored)]
         policy_error = self._policy_error(request, spec)
         if policy_error is not None:
             result = commands.CommandResult(request.request_id, request.operation, "rejected", error=policy_error)
@@ -755,7 +813,22 @@ class WorkerSession:
         if spec is None or spec.mutating or result.error is not None:
             self.audit("command", operation=request.operation, request_id=request.request_id, mission_id=request.mission_id,
                        outcome=result.outcome, error=result.error.code if result.error else None, duplicate=duplicate)
+        if mutating:
+            self._record_outcome(request.request_id, result.to_json())
         return [ack, self.message("command.result", result.to_json())]
+
+    def _stored_outcome(self, request_id: str) -> dict[str, Any] | None:
+        try:
+            return self.outcomes.get(request_id)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self.audit("outcomes.unavailable", error=type(exc).__name__)
+            return None
+
+    def _record_outcome(self, request_id: str, result: dict[str, Any]) -> None:
+        try:
+            self.outcomes.record(request_id, result)
+        except (OSError, sqlite3.Error) as exc:
+            self.audit("outcomes.unavailable", error=type(exc).__name__)
 
     def _policy_error(self, request: commands.CommandRequest, spec: commands.OperationSpec | None) -> commands.CommandError | None:
         """Enforce local worker opt-ins even when the coordinator advertises a command."""

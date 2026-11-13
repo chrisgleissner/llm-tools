@@ -30,6 +30,17 @@ def mission_mode(config: dict[str, object]) -> str:
     return RunMode.HEADLESS if config.get("headless") else RunMode.BACKGROUND
 
 
+def normalize_event_data(kind: str, data: dict[str, object]) -> dict[str, object]:
+    """Reader view of a stored event payload; the stored row is never changed.
+
+    Earlier controllers recorded Background mode as ``actual_mode: "autonomous"`` in ``controller-mode``
+    events. Readers see ``background``. Replication to the coordinator sends the stored payload as it is.
+    """
+    if kind == "controller-mode" and isinstance(data, dict) and data.get("actual_mode") == "autonomous":
+        return {**data, "actual_mode": RunMode.BACKGROUND}
+    return data
+
+
 class MissionStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"

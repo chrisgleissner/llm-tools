@@ -172,6 +172,10 @@ form, `--help`, `llm-bridge help` and `status`.
 - The command line defaults to Background because it needs no terminal, so a
   script behaves the same on every machine.
 - Older documentation and saved events call Background mode "autonomous".
+  Earlier controllers stored that old name as the `actual_mode` of
+  `controller-mode` events. Bridge shows such events as `background` and leaves
+  the stored row unchanged. Copies replicated to the coordinator keep the old
+  stored name.
 - Mission JSON carries `"mode": "native|background|headless"` in `config`, next
   to the saved `headless` and `native_tui` booleans.
 

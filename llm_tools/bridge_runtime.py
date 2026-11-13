@@ -2500,7 +2500,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 except (OSError, RuntimeError, subprocess.SubprocessError):
                     pass  # without the hook a finished station is closed by `llm-bridge stop`
             _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
-            actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
+            actual_mode = "native" if native_tui else "headless" if headless else "background"
             store.record_runtime_event(mission_id, "controller-mode", {
                 "verified": True,
                 "actual_mode": actual_mode,

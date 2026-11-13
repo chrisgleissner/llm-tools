@@ -25,6 +25,7 @@ from .bridge_states import (
     AUTONOMY_ABORT_EXIT_CODE, DELETABLE_MISSION_STATUSES, HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
 )
 from .bridge_vocab import mission_mode
+from .bridge_vocab import normalize_event_data
 from .bridge_vocab import status_label
 
 
@@ -1927,7 +1928,7 @@ class BridgeStore:
             query += " LIMIT ?"
             params += (limit,)
         rows = [
-            {**dict(row), "data": json.loads(row["data_json"])}
+            {**dict(row), "data": normalize_event_data(row["kind"], json.loads(row["data_json"]))}
             for row in self.db.execute(query, params)
         ]
         return rows[::-1] if newest else rows
@@ -2369,7 +2370,7 @@ class BridgeStore:
             "SELECT * FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind=? ORDER BY id DESC LIMIT 1",
             (mission_id, kind),
         ).fetchone()
-        return None if row is None else {**dict(row), "data": json.loads(row["data_json"])}
+        return None if row is None else {**dict(row), "data": normalize_event_data(row["kind"], json.loads(row["data_json"]))}
 
     def recent_task_history(self, mission_id: str, task_id: int, limit: int = 20) -> list[sqlite3.Row]:
         """The newest ``limit`` events of a task or of its operations, newest first.
