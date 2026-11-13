@@ -506,13 +506,28 @@ pub struct EventBatch<'a> {
     pub max: u64,
 }
 
-/// Number of distinct mission ids of `worker` that the cap refused and that are still absent.
-fn refused_count(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+/// Number of refused ids of `worker` kept in the set.
+fn refused_set_count(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
     Ok(
         tx.query_row("SELECT COUNT(*) FROM worker_refused_missions WHERE worker=?", params![worker], |r| {
             r.get::<_, i64>(0)
         })? as u64,
     )
+}
+
+/// Refusals beyond `MAX_REFUSED_TRACKED` that the set could not hold. Each one is counted when it happens, so a resend of
+/// such an id counts again: the total is an upper bound of the distinct ids and never below the true number.
+fn refused_overflow(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+    Ok(tx.query_row(
+        "SELECT COALESCE(SUM(extra), 0) FROM worker_refused_overflow WHERE worker=?",
+        params![worker],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
+/// Number of mission ids of `worker` that the cap refused and that are still absent (the set plus the overflow).
+fn refused_count(tx: &rusqlite::Transaction<'_>, worker: &str) -> R<u64> {
+    Ok(refused_set_count(tx, worker)? + refused_overflow(tx, worker)?)
 }
 
 /// Keep at most `cap` mission summaries of `worker`. The finished summaries that the coordinator touched longest
@@ -536,10 +551,16 @@ fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &
                 break;
             }
             remaining -= tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])? as u64;
-            if refused_count(tx, worker)? < MAX_REFUSED_TRACKED as u64 {
+            if refused_set_count(tx, worker)? < MAX_REFUSED_TRACKED as u64 {
                 tx.execute(
                     "INSERT OR IGNORE INTO worker_refused_missions(worker, mission_id, refused_at) VALUES(?,?,?)",
                     params![worker, id, crate::now()],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO worker_refused_overflow(worker, extra, refused_at) VALUES(?1, 1, ?2) \
+                     ON CONFLICT(worker) DO UPDATE SET extra=extra+1, refused_at=excluded.refused_at",
+                    params![worker, crate::now()],
                 )?;
             }
         }
@@ -549,6 +570,10 @@ fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &
          OR mission_id IN (SELECT mission_id FROM mission_tombstones WHERE worker=?1))",
         params![worker],
     )?;
+    if count(tx)? < cap {
+        // Room again: nothing is refused now, so the overflow count no longer describes anything.
+        tx.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![worker])?;
+    }
     let after = refused_count(tx, worker)?;
     Ok((after != before).then_some(after))
 }
@@ -742,7 +767,7 @@ const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, use
 /// finished summaries over the per-worker cap. Existing rows are numbered in `updated_at` order. The index serves
 /// that eviction. `worker_refused_missions` holds the ids the cap refused, so the warning survives a restart and
 /// counts each id once.
-const MIGRATE_V18: &str = "CREATE TABLE IF NOT EXISTS worker_refused_missions(worker TEXT NOT NULL, mission_id TEXT NOT NULL, refused_at INTEGER NOT NULL, PRIMARY KEY(worker, mission_id)) WITHOUT ROWID;";
+const MIGRATE_V18: &str = "CREATE TABLE IF NOT EXISTS worker_refused_missions(worker TEXT NOT NULL, mission_id TEXT NOT NULL, refused_at INTEGER NOT NULL, PRIMARY KEY(worker, mission_id)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS worker_refused_overflow(worker TEXT PRIMARY KEY, extra INTEGER NOT NULL, refused_at INTEGER NOT NULL) WITHOUT ROWID;";
 /// Most refused ids remembered per worker.
 const MAX_REFUSED_TRACKED: i64 = 10_000;
 /// The finished summaries to drop first: the least recently touched. The index `missions_worker_touched` serves it.
@@ -952,35 +977,29 @@ impl Db {
                 found
             };
             let alter = if has_column { "" } else { "ALTER TABLE missions ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;" };
-            conn.execute_batch(&format!("BEGIN; {alter} {MIGRATE_V18} PRAGMA user_version = 18; COMMIT;"))?;
-            if !has_column {
-                // Number the existing rows per worker in `updated_at` order, so the oldest are evicted first.
-                let rows: Vec<(String, String)> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT worker, mission_id FROM missions ORDER BY worker, COALESCE(json_extract(info,'$.updated_at'),''), mission_id",
-                    )?;
-                    let collected = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<R<Vec<_>>>()?;
-                    collected
-                };
-                conn.execute_batch("BEGIN")?;
-                let mut previous = String::new();
-                let mut n = 0i64;
-                for (worker, mission_id) in rows {
-                    if worker != previous {
-                        previous = worker.clone();
-                        n = 0;
-                    }
-                    n += 1;
-                    conn.execute("UPDATE missions SET touched_at=?3 WHERE worker=?1 AND mission_id=?2", params![worker, mission_id, n])?;
-                }
-                conn.execute_batch("COMMIT")?;
-            }
+            // Number the existing rows per worker in `updated_at` order (the oldest are evicted first) with one statement,
+            // inside the transaction that sets the version, so a crash cannot leave version 18 with every value 0.
+            let backfill = if has_column {
+                ""
+            } else {
+                "UPDATE missions SET touched_at = r.rn FROM (SELECT worker AS w, mission_id AS m, \
+                 ROW_NUMBER() OVER (PARTITION BY worker ORDER BY COALESCE(json_extract(info,'$.updated_at'),''), mission_id) AS rn \
+                 FROM missions) AS r WHERE missions.worker = r.w AND missions.mission_id = r.m;"
+            };
+            conn.execute_batch(&format!("BEGIN; {alter} {MIGRATE_V18} {backfill} PRAGMA user_version = 18; COMMIT;"))?;
         }
         let has_missions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='missions')", [], |r| r.get(0))?;
         if has_missions {
             conn.execute_batch("CREATE INDEX IF NOT EXISTS missions_worker_touched ON missions(worker, touched_at);")?;
         }
         conn.execute_batch(MISSION_TOMBSTONES)?;
+        conn.execute_batch(MIGRATE_V18)?; // idempotent: a database that an earlier build of version 18 created lacks the overflow table
+        // Later touches must stay above every stored one, also when this host's clock is behind the one that wrote them.
+        let newest_touch: i64 = if has_missions {
+            conn.query_row("SELECT COALESCE(MAX(touched_at), 0) FROM missions", [], |r| r.get(0))?
+        } else {
+            0
+        };
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -990,7 +1009,7 @@ impl Db {
             stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
-            last_touch: std::sync::atomic::AtomicI64::new(0),
+            last_touch: std::sync::atomic::AtomicI64::new(newest_touch),
             audit_failed: std::sync::atomic::AtomicBool::new(false),
             audit_failures: AtomicU64::new(0),
             audit_last_attempt: std::sync::atomic::AtomicI64::new(0),
@@ -1741,6 +1760,7 @@ impl Db {
     pub fn worker_revoke(&self, name: &str) -> R<bool> {
         let c = self.c()?;
         c.execute("DELETE FROM worker_refused_missions WHERE worker=?", params![name])?;
+        c.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![name])?;
         let revoked = c.execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         Ok(revoked)
@@ -1882,6 +1902,7 @@ impl Db {
         let refused_before = refused_count(&tx, name)?;
         // A hello is the worker's whole list: ids it refused earlier are decided again below.
         tx.execute("DELETE FROM worker_refused_missions WHERE worker=?", params![name])?;
+        tx.execute("DELETE FROM worker_refused_overflow WHERE worker=?", params![name])?;
         let mut inserted = Vec::new();
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             // The worker lists the missions that matter most first, so the first one gets the newest touch.
@@ -1906,6 +1927,11 @@ impl Db {
             cursor: cursor as u64,
             mission_notice,
         })
+    }
+
+    /// The next touch value (tests check that it is above every stored `touched_at`).
+    pub fn next_touch(&self) -> i64 {
+        self.touch_n(1)
     }
 
     /// The query plan of the eviction select (tests check that it uses `missions_worker_touched`).
@@ -2589,7 +2615,7 @@ impl Db {
         }
         let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
         let mut warnings = Vec::new();
-        let mut refused = c.prepare("SELECT worker, COUNT(*), MAX(refused_at) FROM worker_refused_missions GROUP BY worker ORDER BY worker")?;
+        let mut refused = c.prepare("SELECT worker, SUM(n), MAX(at) FROM (SELECT worker, 1 AS n, refused_at AS at FROM worker_refused_missions UNION ALL SELECT worker, extra, refused_at FROM worker_refused_overflow) GROUP BY worker ORDER BY worker")?;
         for r in refused.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))? {
             let (w, n, at) = r?;
             warnings.push(json!({

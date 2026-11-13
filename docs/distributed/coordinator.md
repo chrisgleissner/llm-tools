@@ -421,7 +421,7 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Receive a complete request body once the handler reads it (slow-body limit); the connection is closed with 408 | 30 s | `request_body_timeout_secs` |
 | Browser `/stream` and `/terminal` WebSockets | server ping every 30 s; closed with 1001 `idle timeout` when nothing (pong or message) arrived for 90 s, checked at each ping | `ws_ping_interval_secs`, `ws_idle_timeout_secs` |
 | Enrolled workers | 256; the 257th enrolment gets 409 `too-many-workers` | fixed |
-| Missions indexed | 5 000 per `hello` (`invalid-message`); 10 000 summaries per worker, over which the finished ones the coordinator touched longest ago are dropped and, if all are active, the newest excess is not indexed (diagnostics warning `missions-over-cap`); a hello is never refused for this | fixed |
+| Missions indexed | 5 000 per `hello` (`invalid-message`); 10 000 summaries per worker, over which the finished ones the coordinator touched longest ago are dropped and, if all are active, the newest excess is not indexed (diagnostics warning `missions-over-cap`); a hello is never answered with an error for this | fixed |
 | Worker connections | 64; ping every 20 s; closed after 60 s of silence | fixed |
 | Terminal sessions | 16 per worker, 64 total | fixed |
 | Terminal relay queues | 256 KiB of worker output awaiting a browser and 128 KiB of browser input awaiting a worker per session; at the 64-session cap, queued frame text is at most 24 MiB total; browser input is also at most 64 KiB decoded per frame | fixed |

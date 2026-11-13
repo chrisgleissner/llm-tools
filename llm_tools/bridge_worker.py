@@ -859,8 +859,10 @@ class WorkerSession:
             if code in FATAL_COORDINATOR_CODES and self.generation == 0:
                 self.fatal = WorkerFatalError(code, str(message.payload.get("message", ""))[:200])
                 return []
-            if self.inflight is not None and self.inflight.replay and message.payload.get("in_reply_to") == self.inflight.message_id:
-                # A coordinator from before `replay` rejects the optional field: send the same summaries without it.
+            if (self.inflight is not None and self.inflight.replay and code == "invalid-message" and not self.replay_unsupported
+                    and message.payload.get("in_reply_to") == self.inflight.message_id):
+                # A coordinator from before `replay` rejects the optional field: send the same summaries without it,
+                # once. Any other error, or the same error for the unmarked resend, is dropped like one for a live batch.
                 self.replay_unsupported = True
                 self.deferred_missions = list(self.inflight.replay) + self.deferred_missions
                 return []
