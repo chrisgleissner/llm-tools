@@ -27,7 +27,10 @@ import math
 import os
 import random
 import re
-import resource
+try:
+    import resource
+except ImportError:  # Windows has no resource module; only Coordinator.limit_file_size needs it
+    resource = None  # type: ignore[assignment]
 import shlex
 import signal
 import socket
@@ -708,6 +711,8 @@ class Coordinator:
 
     def limit_file_size(self, limit: int | None) -> None:
         """Set (or with ``None`` lift) ``RLIMIT_FSIZE`` of the running process: the disk-full fault."""
+        if resource is None:
+            raise RuntimeError("file size limits need the resource module (not available on Windows)")
         if self.pid is None:
             raise RuntimeError("coordinator is not running")
         soft = resource.RLIM_INFINITY if limit is None else limit
