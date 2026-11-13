@@ -105,6 +105,26 @@ fn specs() -> Vec<Spec> {
             default: n(d.max_token_lifetime_days as u64),
         },
         Spec {
+            key: "backup_interval_hours",
+            kind: Kind::UIntRange { min: 0, max: 8760 },
+            default: n(d.backup_interval_hours),
+        },
+        Spec {
+            key: "backup_keep",
+            kind: Kind::UIntRange { min: 1, max: 365 },
+            default: n(d.backup_keep as u64),
+        },
+        Spec {
+            key: "backup_dir",
+            kind: Kind::FilePath,
+            default: None,
+        },
+        Spec {
+            key: "backup_interval_seconds",
+            kind: Kind::UInt { min: 0 },
+            default: n(d.backup_interval_seconds),
+        },
+        Spec {
             key: "min_tls",
             kind: Kind::Choice(&["1.3", "1.2"]),
             default: Some(format!("{:?}", d.min_tls)),

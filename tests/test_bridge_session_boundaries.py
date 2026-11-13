@@ -47,7 +47,7 @@ def test_capability_queries_fail_closed_for_missing_or_failing_cli(tmp_path,monk
     assert sessions.resume_argv(identity) is None
     assert sessions.codex_owned_argv(['codex','prompt']) is None
     assert sessions.new_session_argv('claude',['claude','prompt'],cwd=tmp_path) is None
-    assert observed and all(timeout==3 for _,timeout in observed)
+    assert observed and all(timeout==10 for _,timeout in observed)
     assert sessions._installed_help('unsupported',None) is None
     monkeypatch.setattr(sessions.shutil,'which',lambda _:None)
     assert sessions.resume_argv(identity) is None

@@ -10,6 +10,13 @@ Standard library only.
 Argv templates are tuples of tokens. ``{model}`` expands to the model flags (zero or more
 tokens); ``{cwd}`` and ``{prompt}`` expand to one token each.
 
+Kilo and OpenCode sessions (PROV-003/004), Kilo 7.3.45 and OpenCode 1.18.3, from ``--help`` and the
+database schema only: ``-s/--session <id>`` continues a session, ``-c/--continue`` the last one (never
+used). Sessions live in the SQLite ``session`` table of ``session_store`` under the XDG data home;
+neither CLI prints or accepts a session id. ``exit_command`` ``/exit`` and the ``idle_prompt``
+footer markers come from the upstream TUI, not from ``--help``: unverified against a live screen.
+``docs/llm-bridge/operations.md`` has the capture rule.
+
 Prompt channel (PROV-013). Kilo 7.3.45 and OpenCode 1.18.3, from ``kilo run --help`` and
 ``opencode run --help`` (read-only, 2026-11-12): ``run [message..]`` takes the prompt as positional
 words; ``--file`` attaches a file to the message but does not replace it; neither help text
@@ -76,15 +83,26 @@ class IdlePrompt:
 
     pattern: re.Pattern[str]
     required_text: str | None = None
+    busy_text: tuple[str, ...] = ()  # screen text that means the provider is working, not waiting
+    glyph_composer: bool = True  # finish also accepts any composer-glyph line (``›``, ``❯``, ``>``); False: only ``pattern`` counts
 
     def matches(self, screen: str) -> bool:
-        if self.required_text is not None and self.required_text.casefold() not in screen.casefold():
+        folded = screen.casefold()
+        if self.required_text is not None and self.required_text.casefold() not in folded:
+            return False
+        if any(text.casefold() in folded for text in self.busy_text):
             return False
         return bool(self.pattern.search(screen))
 
 
 _CODEX_IDLE = IdlePrompt(re.compile(r"(?m)^\s*›(?:\s+Ask Codex to do anything)?\s*$"), "? for shortcuts")
 _CLAUDE_IDLE = IdlePrompt(re.compile(r"(?m)^\s*❯\s*$"))
+# Copilot CLI 1.0: an empty composer line or the placeholder hint ("Type @ to mention files ...").
+_COPILOT_IDLE = IdlePrompt(re.compile(r"(?m)^[\s│┃|]*>\s+(?:Type|Enter) @ to mention files"))
+# Kilo and OpenCode share one TUI lineage. The input prompt is on screen when the footer lists the
+# command palette key and no "esc interrupt" hint (shown only while a turn runs). NOT verified
+# against a live screen (starting the TUI was out of scope); a mismatch makes finish refuse, never type.
+_OPENCODE_IDLE = IdlePrompt(re.compile(r"(?mi)\bctrl\+p\s+commands\b"), busy_text=("esc interrupt",), glyph_composer=False)
 
 
 @dataclass(frozen=True)
@@ -102,6 +120,7 @@ class ProviderSpec:
     prompt_channel: str = PROMPT_ARGV
     prompt_channel_note: str = ""
     session_sources: frozenset[str] = frozenset()
+    session_store: str | None = None  # SQLite session database, relative to the XDG data home (Kilo, OpenCode)
     resume_syntax: tuple[str, ...] = ()
     resume_help_pattern: re.Pattern[str] | None = None
     id_pattern: re.Pattern[str] = _UUID
@@ -109,10 +128,16 @@ class ProviderSpec:
     new_session_pattern: re.Pattern[str] | None = None
     exit_command: str | None = None
     idle_prompt: IdlePrompt | None = None  # how a native screen shows "waiting at the input prompt"; None: not detectable
+    finish_idle_prompt: IdlePrompt | None = None  # input prompt used only by finish when ``idle_prompt`` is None (Copilot's is not trusted for notices)
     limit_notice_pattern: re.Pattern[str] | None = None
     question_detector: str = QUESTION_NONE
     notice_delivery: bool = False
     version_flag: str = "--version"
+
+    @property
+    def finish_prompt(self) -> IdlePrompt | None:
+        """The prompt finish checks before typing its exit command; ``None`` means finish refuses."""
+        return self.idle_prompt or self.finish_idle_prompt
 
     @property
     def native_supported(self) -> bool:
@@ -147,7 +172,7 @@ REGISTRY: dict[str, ProviderSpec] = {
         session_sources=frozenset({"copilot:session.start"}),
         resume_syntax=("--resume",), resume_help_pattern=_flag("--resume"),
         new_session_syntax=("--session-id",), new_session_pattern=_flag("--session-id"),
-        exit_command="/exit", notice_delivery=True,
+        exit_command="/exit", finish_idle_prompt=_COPILOT_IDLE, notice_delivery=True,
     ),
     "kilo": ProviderSpec(
         "kilo", "Kilo", "kilo",
@@ -157,6 +182,8 @@ REGISTRY: dict[str, ProviderSpec] = {
         headless_argv=("kilo", "run", "{model}", "--dir", "{cwd}", "{prompt}"),
         prompt_channel_note="kilo 7.3.45 help: `run [message..]` positional; --file attaches, no prompt-file or stdin option documented",
         resume_syntax=("--session",), resume_help_pattern=_flag("--session"), id_pattern=_OPAQUE_ID,
+        session_sources=frozenset({"kilo:session.db"}), session_store="kilo/kilo.db",
+        exit_command="/exit", idle_prompt=_OPENCODE_IDLE,
     ),
     "opencode": ProviderSpec(
         "opencode", "OpenCode", "opencode",
@@ -164,6 +191,8 @@ REGISTRY: dict[str, ProviderSpec] = {
         headless_argv=("opencode", "run", "{model}", "--dir", "{cwd}", "{prompt}"),
         prompt_channel_note="opencode 1.18.3 help: `run [message..]` positional; --file attaches, no prompt-file or stdin option documented",
         resume_syntax=("--session",), resume_help_pattern=_flag("--session"), id_pattern=_OPAQUE_ID,
+        session_sources=frozenset({"opencode:session.db"}), session_store="opencode/opencode.db",
+        exit_command="/exit", idle_prompt=_OPENCODE_IDLE,
     ),
     "minimax": ProviderSpec(
         "minimax", "MiniMax", "mmx",

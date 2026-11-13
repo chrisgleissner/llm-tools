@@ -40,7 +40,8 @@ def test_finish_reads_exit_command_from_the_registry(monkeypatch: pytest.MonkeyP
     assert bridge_finish.exit_command("codex", {"LLM_BRIDGE_FINISH_CODEX": "/exit"}) == "/exit"
     _patch(monkeypatch, "codex", exit_command="/bye")
     assert bridge_finish.exit_command("codex", {}) == "/bye"
-    assert bridge_finish.exit_command("kilo", {}) is None
+    assert bridge_finish.exit_command("kilo", {}) == "/exit"
+    assert bridge_finish.exit_command("minimax", {}) is None
 
 
 def test_limit_notice_reads_pattern_from_the_registry(monkeypatch: pytest.MonkeyPatch) -> None:

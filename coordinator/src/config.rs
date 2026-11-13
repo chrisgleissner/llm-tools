@@ -63,6 +63,14 @@ pub struct Config {
     pub mutation_limit_per_address: usize,
     /// Maximum lifetime for a newly-created API token, in days (0/no expiry remains LAN-only).
     pub max_token_lifetime_days: u32,
+    /// Hours between automatic database backups (PRD-013). 0 turns automatic backups off.
+    pub backup_interval_hours: u64,
+    /// Number of automatic backups kept; older ones are deleted after a new one succeeds.
+    pub backup_keep: u32,
+    /// Directory for automatic backups. Unset: `backups` in the data directory.
+    pub backup_dir: Option<String>,
+    /// Test hook: when above 0, the interval in seconds, replacing `backup_interval_hours`.
+    pub backup_interval_seconds: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -118,6 +126,10 @@ impl Default for Config {
             mutation_limit_per_token: 30,
             mutation_limit_per_address: 120,
             max_token_lifetime_days: 3650,
+            backup_interval_hours: 24,
+            backup_keep: 7,
+            backup_dir: None,
+            backup_interval_seconds: 0,
         }
     }
 }
@@ -198,7 +210,12 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
     mutation_limit_per_token = {}\n\
     mutation_limit_per_address = {}\n\
     # Maximum lifetime for newly created API tokens, in days (up to ten years).\n\
-    max_token_lifetime_days = {}\n",
+    max_token_lifetime_days = {}\n\
+    # Automatic database backups: hours between backups (0 = off), how many to keep, and the\n\
+    # directory (default: backups in the data directory, mode 0700). See install.md.\n\
+    backup_interval_hours = {}\n\
+    backup_keep = {}\n\
+    # backup_dir = \"/var/backups/bridge-coordinator\"\n",
         d.min_tls,
         d.max_events_per_worker,
         d.max_connections,
@@ -210,7 +227,9 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
         d.ws_idle_timeout_secs,
         d.mutation_limit_per_token,
         d.mutation_limit_per_address,
-        d.max_token_lifetime_days
+        d.max_token_lifetime_days,
+        d.backup_interval_hours,
+        d.backup_keep
     )
 }
 
@@ -318,6 +337,24 @@ impl Config {
             text = migrated;
         }
         config_check::evaluate_env(&text, opts).map_err(|errors| errors.join("\n"))
+    }
+
+    /// Seconds between automatic backups, `None` when they are off.
+    pub fn backup_interval(&self) -> Option<u64> {
+        let secs = if self.backup_interval_seconds > 0 {
+            self.backup_interval_seconds
+        } else {
+            self.backup_interval_hours.saturating_mul(3600)
+        };
+        (secs > 0).then_some(secs)
+    }
+
+    /// Directory of the automatic backups.
+    pub fn backup_directory(&self, data_dir: &Path) -> std::path::PathBuf {
+        match &self.backup_dir {
+            Some(d) => std::path::PathBuf::from(d),
+            None => data_dir.join("backups"),
+        }
     }
 
     pub(crate) fn validate_internet_static(&self) -> Result<(), String> {
