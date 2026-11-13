@@ -136,8 +136,39 @@ impl IntoResponse for ApiError {
 
 type ApiResult = Result<Response, ApiError>;
 
-fn json_ok(status: StatusCode, v: Value) -> Response {
+fn json_ok(status: StatusCode, mut v: Value) -> Response {
+    normalize_api_timestamps(&mut v);
     (status, axum::Json(v)).into_response()
+}
+
+/// Persisted times are Unix seconds, but timestamps crossing the public JSON API use RFC 3339 UTC.
+/// The field-name allowlist also normalizes timestamps inside worker-provided resource projections.
+fn normalize_api_timestamps(value: &mut Value) {
+    const FIELDS: &[&str] = &[
+        "created_at",
+        "updated_at",
+        "last_seen",
+        "expires_at",
+        "last_used",
+        "last_used_at",
+        "occurred_at",
+        "timestamp",
+    ];
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if FIELDS.contains(&name.as_str()) {
+                    if let Some(epoch) = value.as_i64() {
+                        *value = json!(timestamp(Some(epoch)));
+                    }
+                } else {
+                    normalize_api_timestamps(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_api_timestamps),
+        _ => {}
+    }
 }
 
 fn unauthorized() -> ApiError {
@@ -1392,6 +1423,9 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 
 fn timestamp(epoch: Option<i64>) -> Option<String> {
     let epoch = epoch?;
+    if !(0..=253_402_300_799).contains(&epoch) {
+        return None;
+    }
     let days = epoch.div_euclid(86_400);
     let seconds = epoch.rem_euclid(86_400);
     let (year, month, day) = crate::certs::civil_from_days(days);
@@ -3152,11 +3186,21 @@ async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m:
             "the task changed since the supplied revision; fetch it again and retry",
         ));
     }
-    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut value = row.to_json();
-    if status == StatusCode::OK {
-        add_next_page_cursor(&st, &row, &mut value);
+    if row.state == "done" && row.result.as_ref().and_then(|result| result.get("outcome")).and_then(Value::as_str) == Some("uncertain") {
+        let mut response = err(
+            StatusCode::CONFLICT,
+            "uncertain-outcome",
+            "the worker could not determine whether this operation completed; inspect the command before retrying",
+        )
+        .into_response();
+        response.headers_mut().insert(
+            header::LOCATION,
+            format!("/api/v1/commands/{request_id}").parse().expect("validated request id"),
+        );
+        return Ok(response);
     }
+    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
+    let mut value = command_response_json(&st, &row);
     if let Some((key, extra)) = extra {
         value[key] = extra;
     }
@@ -3213,13 +3257,17 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
     result.insert("next_cursor".into(), json!(next_cursor));
 }
 
+fn command_response_json(st: &St, row: &CommandRow) -> Value {
+    let mut value = row.to_json();
+    value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
+    value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
+    add_next_page_cursor(st, row, &mut value);
+    value
+}
+
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(r) => {
-            let mut value = r.to_json();
-            add_next_page_cursor(&st, &r, &mut value);
-            Ok(json_ok(StatusCode::OK, value))
-        }
+        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row))),
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }
@@ -3946,6 +3994,21 @@ mod problem_tests {
             ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
         ]);
         assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_site));
+    }
+
+    #[test]
+    fn public_json_timestamp_normalization_is_recursive_and_bounded() {
+        let mut value = json!({
+            "session":{"expires_at":0},
+            "worker":{"last_seen":1},
+            "created_at":i64::MAX,
+            "unrelated_number":123
+        });
+        normalize_api_timestamps(&mut value);
+        assert_eq!(value["session"]["expires_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(value["worker"]["last_seen"], "1970-01-01T00:00:01Z");
+        assert!(value["created_at"].is_null(), "out-of-range epochs are never formatted");
+        assert_eq!(value["unrelated_number"], 123);
     }
 
     #[tokio::test]

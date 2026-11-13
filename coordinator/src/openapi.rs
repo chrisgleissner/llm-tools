@@ -35,8 +35,8 @@ struct CommandOutcome {
     operation: String,
     #[schema(value_type = Option<Object>)]
     result: Option<Value>,
-    created_at: i64,
-    updated_at: i64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -135,10 +135,36 @@ fn response_schema(path: &str, method: &str) -> Value {
                 "setup_required":{"type":"boolean"},
                 "authenticated":{"type":"boolean"},
                 "passkey_sign_in_available":{"type":"boolean"},
-                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"}
+                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"},
+                "session":{"type":"object","required":["remember","expires_at","idle_timeout_secs"],"properties":{
+                    "remember":{"type":"boolean"},
+                    "expires_at":{"type":"string","format":"date-time"},
+                    "idle_timeout_secs":{"type":"integer","minimum":1}
+                },"additionalProperties":false}
             },
             "additionalProperties":true
         });
+    }
+    if path == "/api/v1/workers" && method == "GET" {
+        return json!({"type":"object","required":["workers"],"properties":{"workers":{"type":"array","items":{
+            "type":"object","required":["name","state","last_seen"],"properties":{
+                "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+                "last_seen":{"type":["string","null"],"format":"date-time"}
+            },"additionalProperties":true
+        }}},"additionalProperties":false});
+    }
+    if path == "/api/v1/workers/{name}" && method == "GET" {
+        return json!({"type":"object","required":["name","state","last_seen"],"properties":{
+            "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+            "last_seen":{"type":["string","null"],"format":"date-time"}
+        },"additionalProperties":true});
+    }
+    if path == "/api/v1/security/notifications" && method == "GET" {
+        return json!({"type":"object","required":["notifications"],"properties":{"notifications":{"type":"array","items":{
+            "type":"object","required":["id","category","created_at"],"properties":{
+                "id":{"type":"string"},"category":{"type":"string"},"created_at":{"type":"string","format":"date-time"}
+            },"additionalProperties":false
+        }}},"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
@@ -183,7 +209,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
-            "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "409": {"description":"The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying","headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -594,6 +620,16 @@ pub fn openapi_value() -> Value {
         "additionalProperties":true,
         "properties":{"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor for task, event, or operation list results."}}
     });
+    for field in ["created_at", "updated_at"] {
+        doc["components"]["schemas"]["CommandOutcome"]["properties"][field] = json!({"type":"string","format":"date-time"});
+    }
+    for field in ["created_at", "last_used", "expires_at"] {
+        doc["components"]["schemas"]["TokenInfo"]["properties"][field] = if field == "created_at" {
+            json!({"type":"string","format":"date-time"})
+        } else {
+            json!({"type":["string","null"],"format":"date-time"})
+        };
+    }
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
     }
@@ -672,6 +708,10 @@ mod tests {
             assert!(ROUTES.iter().any(|(declared, _, _, _)| declared == path));
         }
         assert!(doc["components"]["schemas"]["ProblemDetails"].is_object());
+        for field in ["created_at", "updated_at"] {
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["type"], "string");
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["format"], "date-time");
+        }
         let mission_list = &doc["paths"]["/api/v1/missions"]["get"];
         let params = mission_list["parameters"].as_array().expect("mission list query parameters");
         let cursor = params
@@ -710,8 +750,15 @@ mod tests {
 
     #[test]
     fn generated_openapi_matches_committed_snapshot() {
+        let generated = openapi_value();
+        if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+            let mut bytes = serde_json::to_vec_pretty(&generated).expect("serialize generated OpenAPI");
+            bytes.push(b'\n');
+            std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"), bytes).expect("write OpenAPI snapshot");
+            return;
+        }
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");
-        assert_eq!(openapi_value(), snapshot);
+        assert_eq!(generated, snapshot);
     }
 
     #[test]
@@ -741,6 +788,25 @@ mod tests {
         assert_eq!(schema["properties"]["new"]["type"], "string");
         assert_eq!(schema["properties"]["keep_api_tokens"]["type"], "boolean");
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn public_timestamp_fields_are_declared_as_rfc3339_date_time() {
+        let auth = response_schema("/api/v1/auth/state", "GET");
+        assert_eq!(auth["properties"]["session"]["properties"]["expires_at"]["format"], "date-time");
+        let workers = response_schema("/api/v1/workers", "GET");
+        assert_eq!(workers["properties"]["workers"]["items"]["properties"]["last_seen"]["format"], "date-time");
+        let worker = response_schema("/api/v1/workers/{name}", "GET");
+        assert_eq!(worker["properties"]["last_seen"]["format"], "date-time");
+        let notifications = response_schema("/api/v1/security/notifications", "GET");
+        assert_eq!(
+            notifications["properties"]["notifications"]["items"]["properties"]["created_at"]["format"],
+            "date-time"
+        );
+        let document = openapi_value();
+        for field in ["created_at", "last_used", "expires_at"] {
+            assert_eq!(document["components"]["schemas"]["TokenInfo"]["properties"][field]["format"], "date-time");
+        }
     }
 
     #[test]

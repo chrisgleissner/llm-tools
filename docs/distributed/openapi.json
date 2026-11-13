@@ -183,8 +183,8 @@
       "CommandOutcome": {
         "properties": {
           "created_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           },
           "mutating": {
             "type": "boolean"
@@ -227,8 +227,8 @@
             "type": "string"
           },
           "updated_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [
@@ -508,9 +508,11 @@
             "type": "array"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "expires_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -530,6 +532,7 @@
             ]
           },
           "last_used": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -713,7 +716,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -941,7 +952,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1138,7 +1157,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1402,7 +1429,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1629,7 +1664,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1852,7 +1895,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2059,7 +2110,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2286,7 +2345,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2523,7 +2590,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2755,7 +2830,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2996,7 +3079,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3102,6 +3193,28 @@
                     },
                     "passkey_sign_in_available": {
                       "type": "boolean"
+                    },
+                    "session": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "expires_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "idle_timeout_secs": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "remember": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "remember",
+                        "expires_at",
+                        "idle_timeout_secs"
+                      ],
+                      "type": "object"
                     },
                     "setup_required": {
                       "type": "boolean"
@@ -3217,7 +3330,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3496,7 +3617,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3712,7 +3841,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3919,7 +4056,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4126,7 +4271,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4419,7 +4572,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4687,7 +4848,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4916,7 +5085,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5154,7 +5331,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5394,7 +5579,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5664,7 +5857,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5903,7 +6104,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6173,7 +6382,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6446,7 +6663,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6683,7 +6908,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6950,7 +7183,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7190,7 +7431,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7427,7 +7676,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7692,7 +7949,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7979,7 +8244,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8218,7 +8491,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8457,7 +8738,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8727,7 +9016,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8964,7 +9261,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9221,7 +9526,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9478,7 +9791,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9737,7 +10058,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10004,7 +10333,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10263,7 +10600,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10470,7 +10815,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10562,7 +10915,36 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "notifications": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "category",
+                          "created_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "notifications"
+                  ],
                   "type": "object"
                 }
               }
@@ -10667,7 +11049,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10884,7 +11274,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11091,7 +11489,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11298,7 +11704,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11505,7 +11919,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11773,7 +12195,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11990,7 +12420,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12197,7 +12635,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12408,7 +12854,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12504,7 +12958,43 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "workers": {
+                      "items": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "last_seen": {
+                            "format": "date-time",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "online",
+                              "offline"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "state",
+                          "last_seen"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "workers"
+                  ],
                   "type": "object"
                 }
               }
@@ -12609,7 +13099,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12859,7 +13357,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13076,7 +13582,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13187,6 +13701,30 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
+                  "properties": {
+                    "last_seen": {
+                      "format": "date-time",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "enum": [
+                        "online",
+                        "offline"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "state",
+                    "last_seen"
+                  ],
                   "type": "object"
                 }
               }
@@ -13291,7 +13829,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13527,7 +14073,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13764,7 +14318,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14000,7 +14562,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14227,7 +14797,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14454,7 +15032,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14661,7 +15247,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {

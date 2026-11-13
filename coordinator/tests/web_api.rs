@@ -58,6 +58,7 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
         .iter()
         .find(|item| item["category"] == "api_token_created")
         .expect("token creation event");
+    assert!(token_notice["created_at"].as_str().unwrap().ends_with('Z'));
     let id = token_notice["id"].as_str().unwrap();
     let (status, _) = api.send(api.rb(Method::DELETE, &format!("/api/v1/security/notifications/{id}"))).await;
     assert_eq!(status, 200);
@@ -393,7 +394,7 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     let (_, body) = api.get("/api/v1/auth/state").await;
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["username"], "admin");
-    assert!(body["session"]["expires_at"].as_i64().unwrap() > bridge_coordinator::now());
+    assert!(body["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     env.stop().await;
 }
 
@@ -465,10 +466,11 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
         let (_, s) = api.get("/api/v1/auth/state").await;
         assert_eq!(s["session"]["remember"], false);
         assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS_SHORT);
-        let expires = s["session"]["expires_at"].as_i64().unwrap();
+        assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
+        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
+        let expires = env.srv.state.db.session_get(&hash).unwrap().unwrap().expires_at;
         assert!((expires - now - SESSION_ABSOLUTE_SECS_SHORT).abs() < 30, "{expires}");
         // Idle for a little over the short idle limit: expired.
-        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
         env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
         assert_eq!(api.get("/api/v1/workers").await.0, 401, "short idle limit");
     }
@@ -479,6 +481,7 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
     let (_, s) = api.get("/api/v1/auth/state").await;
     assert_eq!(s["session"]["remember"], true);
     assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS);
+    assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
     env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
     assert_eq!(api.get("/api/v1/workers").await.0, 200, "remembered device is still signed in");
@@ -904,6 +907,7 @@ async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed()
     assert_eq!(status, 200);
     assert_eq!(workers["workers"][0]["policy"]["allow_root_count"], 1);
     assert_eq!(workers["workers"][0]["policy"]["allow_create"], true);
+    assert!(workers["workers"][0]["last_seen"].as_str().unwrap().ends_with('Z'));
     assert!(!serde_json::to_string(&workers).unwrap().contains("/srv/work"));
     let (status, worker) = api.get("/api/v1/workers/build-1").await;
     assert_eq!(status, 200);
@@ -1231,6 +1235,62 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect(&env, &token, "uncertain-worker", 0).await;
+    let request_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let request = tokio::spawn(async move {
+        request_api
+            .rb(Method::PATCH, "/api/v1/missions/m1/tasks/2?worker=w1")
+            .header("idempotency-key", "uncertain-retry-1")
+            .json(&json!({"prompt":"retry later", "wait_ms":5000}))
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "task.amend");
+    worker
+        .send(
+            "command.result",
+            json!({
+                "schema_version":1,
+                "request_id":command["payload"]["request_id"],
+                "operation":"task.amend",
+                "outcome":"uncertain",
+                "result":null,
+                "error":{"code":"uncertain","message":"worker lost confirmation"}
+            }),
+        )
+        .await;
+    let response = request.await.unwrap();
+    assert_eq!(response.status().as_u16(), 409);
+    assert_eq!(response.headers().get("content-type").unwrap(), "application/problem+json");
+    let location = response.headers().get("location").unwrap().to_str().unwrap().to_string();
+    assert_eq!(location, "/api/v1/commands/uncertain-retry-1");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/uncertain-outcome");
+    assert_eq!(problem["code"], "uncertain-outcome");
+    assert!(problem["detail"].as_str().unwrap().contains("before retrying"));
+
+    let (status, stored) = api.get(&location).await;
+    assert_eq!(status, 200);
+    assert_eq!(stored["state"], "done");
+    assert_eq!(stored["result"]["outcome"], "uncertain");
+    assert!(stored["created_at"].as_str().unwrap().ends_with('Z'));
+    assert!(stored["updated_at"].as_str().unwrap().ends_with('Z'));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;
@@ -1501,5 +1561,34 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let overlong_status = "x".repeat(257);
     let (st, e) = api.get(&format!("/api/v1/missions?status={overlong_status}")).await;
     assert_eq!(st, 400, "overlong status filter: {e}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_rejects_control_characters_in_mission_identifiers() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &token, "control-id-worker", 0).await;
+    let (status, problem) = api
+        .post(
+            "/api/v1/commands",
+            json!({
+                "target":"w1",
+                "request":{
+                    "schema_version":1,
+                    "operation":"mission.status",
+                    "params":{},
+                    "mission_id":"mission\nforged",
+                    "target":"w1",
+                    "request_id":"control-id-1"
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    assert!(problem["detail"].as_str().unwrap().contains("mission_id"));
+    assert!(env.srv.state.db.command_get("control-id-1").unwrap().is_none());
     env.stop().await;
 }
