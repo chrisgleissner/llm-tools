@@ -107,7 +107,6 @@ is documented as an accepted risk.
 | L6 An over-long integer in a message raised an unhandled exception in the worker. | Fixed: it is a protocol error. |
 | L7 The session cookie had no `__Host-` prefix, the systemd unit lacked system call filtering, and the remote CLI followed redirects with the bearer token. | Fixed: `__Host-bridge_session`, `SystemCallFilter=@system-service`, `ProtectProc=invisible`, `ProcSubset=pid`; redirects are refused. |
 
-
 ## D8 Platform support and Windows (operator addendum 4, TEST-013, TEST-016)
 
 CI runs on six GitHub-hosted platforms: Linux x86-64 (`ubuntu-latest`), Linux ARM64
@@ -622,3 +621,17 @@ A mission created through the coordinator may name only a verifier that the work
 ## D49 Rich is the only runtime dependency (FIND-017)
 
 `AGENTS.md` asks for standard-library-first code, and 1.2.0 added Rich. Rich stays, as the only runtime dependency, because writing a Markdown renderer for the document viewer would be more code to maintain than the dependency costs. It is imported only inside the Markdown and ANSI renderers of `llm_tools/bridge_documents.py`, never at module level, and both renderers fall back to plain text when it is missing, so every other command works without it. Tests in `tests/test_release_hygiene.py` hold all three rules.
+
+## D51 Soak memory gate and remaining phase-B soak items (FIND-001, FIND-005)
+
+This replaces the 1200 s warm-up recorded in D16. The controller memory slope is fitted after a 1800 s warm-up, and the nightly soak runs 2700 s so that the fit window lies between two 900 s retention passes. The recorded nightly series show no leak: the failures came from a fit window that ended on a retention peak. A 900 s window cannot resolve a controller leak below about 2 MiB/h; the long nightly run covers that range.
+
+The soak items `coordinator-task-count`, `clock-jump-native` and `stale-journal-after-restore` are deferred to 1.6.0. Each needs a coordinator change (a task count in diagnostics, a native clock source, or a query of unfinished commands per worker). Until then the thread count, the `LD_PRELOAD` clock shim and the `db-corrupt-page` restore fault cover them in part.
+
+## D53 Old mode names are normalised on read, not migrated (FIND-018)
+
+Controllers before 1.5.0 recorded Background mode as `autonomous` in `controller-mode` events. The rename is applied when events are read, in one store-level function, instead of rewriting stored rows in a schema 11 migration. A migration would make every older `llm-bridge` refuse the database for a cosmetic change, force a full backup copy and a scan of the events table under the write lock, and leave local rows different from the copies the coordinator already holds. Schema 11 stays free for the structural change of `ORCH-002`.
+
+## D54 The FINAL_REPORT count table is checked at a release, not on every pull request
+
+Every pull request that changed a register status also had to change the same lines of the `FINAL_REPORT.md` count table, so each merge made every other open pull request conflict and restarted its CI. The count table is now updated in the release commit, and the release workflow runs the count checks with `SPEC_RELEASE_CHECK=1` before a tag is built. Pull requests change only `SPEC_STATUS.md`; `scripts/spec_open.py` reports the live open IDs at any time.

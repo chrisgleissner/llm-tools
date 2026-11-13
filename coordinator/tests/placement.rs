@@ -364,3 +364,22 @@ async fn a_token_restricted_to_some_workers_only_sees_those_workers_in_placement
     assert_eq!(placed["placement"]["worker"], "alpha");
     f.env.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stored_placements_are_pruned_with_the_command_they_belong_to() {
+    let f = fleet(vec![spec("alpha", Some(&["codex"]), 0), spec("beta", Some(&["claude"]), 0)]).await;
+    let (status, kept) = post_with_key(&f, "keep-1", create_body(json!({"providers": "codex"}))).await;
+    assert_eq!(status, 202, "{kept}");
+    let (status, gone) = post_with_key(&f, "gone-1", create_body(json!({"providers": "claude"}))).await;
+    assert_eq!(status, 202, "{gone}");
+    assert_eq!(gone["placement"]["worker"], "beta");
+    let db = &f.env.srv.state.db;
+    db.maintenance().unwrap();
+    assert!(db.placement_get("keep-1").unwrap().is_some() && db.placement_get("gone-1").unwrap().is_some());
+    // Removing a worker deletes its commands, as retention does for an old or surplus finished command.
+    assert!(db.worker_revoke("beta").unwrap());
+    db.maintenance().unwrap();
+    assert!(db.placement_get("keep-1").unwrap().is_some(), "the placement of a retained command stays");
+    assert!(db.placement_get("gone-1").unwrap().is_none(), "the placement of a removed command is pruned");
+    f.env.stop().await;
+}

@@ -2178,6 +2178,19 @@ impl Db {
             drop(c);
             std::thread::sleep(MAINTENANCE_PAUSE);
         }
+        // A stored placement answer lives as long as the create command it belongs to: the age and the
+        // row cap above remove the command, and its answer goes with it.
+        loop {
+            let n = self.c()?.execute(
+                "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'placement:%' \
+                 AND substr(key, 11) NOT IN (SELECT request_id FROM commands) LIMIT ?1)",
+                params![MAINTENANCE_BATCH],
+            )?;
+            if (n as i64) < MAINTENANCE_BATCH {
+                break;
+            }
+            std::thread::sleep(MAINTENANCE_PAUSE);
+        }
         self.c()?
             .execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
         self.shrink()
