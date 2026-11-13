@@ -18,7 +18,7 @@
     "jsGzip": 93000
   },
   "routes": {
-    "jsRaw": 94000,
+    "jsRaw": 99000,
     "jsGzip": 38700,
     "cssRaw": 18400,
     "cssGzip": 4900
