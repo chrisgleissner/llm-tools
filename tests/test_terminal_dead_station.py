@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket as unix_socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -257,7 +258,22 @@ def test_failed_attach_ends_after_one_probe_when_a_listener_stays(tmp_path: Path
     socket_path = directory / "station.sock"
     listener = unix_socket.socket(unix_socket.AF_UNIX, unix_socket.SOCK_STREAM)
     listener.bind(str(socket_path))
-    listener.listen(1)
+    listener.listen(16)
+    # A listener that never accepts fills its backlog after a few probes. Linux then answers a connect
+    # with EAGAIN, macOS with ECONNREFUSED, which the probe correctly reads as "no listener". A live
+    # server accepts, so the test's listener does too.
+    stop_accepting = threading.Event()
+
+    def accept_loop() -> None:
+        listener.settimeout(0.05)
+        while not stop_accepting.is_set():
+            try:
+                listener.accept()[0].close()
+            except OSError:
+                pass
+
+    acceptor = threading.Thread(target=accept_loop, daemon=True)
+    acceptor.start()
     try:
         handle = TerminalHandle(socket_path, socket_path.with_name("station.sock.conf"), "gone", "%0", "%1", 6)
         backend = TmuxTerminalBackend()
@@ -268,6 +284,8 @@ def test_failed_attach_ends_after_one_probe_when_a_listener_stays(tmp_path: Path
         assert tmux_probes == [], "a live listener must not be probed through tmux"
         assert socket_path.exists()
     finally:
+        stop_accepting.set()
+        acceptor.join(timeout=2)
         listener.close()
 
 
