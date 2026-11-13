@@ -4,7 +4,7 @@ import * as api from "./api";
 import { h } from "./dom";
 import { missionState, store } from "./store";
 import { compactAge } from "./state";
-import { openPanel } from "./ui";
+import { announce, openPanel } from "./ui";
 
 export interface PaletteAction {
   title: string;
@@ -45,16 +45,31 @@ const STYLE = `dialog.palette{padding:var(--sp-3);inline-size:min(calc(100vw - 2
 
 const path = (worker: string, id: string): string => `/missions/${encodeURIComponent(worker)}/${encodeURIComponent(id)}`;
 
-/** The actions of the open page, each with a key as well. Only when the page has exactly one such button: on a list the palette cannot know which row is meant (select a row and press the key). */
+/**
+ * The actions of the open page, each with a key as well. Only when the page has exactly one such button: on a list the palette cannot know which
+ * row is meant (select a row and press the key). An entry keeps the action name, not the button: the page may be redrawn between the moment the
+ * palette lists the entry and the moment it runs, so `run` looks the button up again and clicks it only when exactly one enabled, attached button
+ * is still there. It is the button's own click, so the confirmation that the button asks for (Approve, Reject) is shown as it is for a mouse click.
+ */
+const PAGE_ACTIONS = [["approve", "Approve", "a"], ["reject", "Reject", "r"], ["pause", "Pause the open mission", "p"]] as const;
+const GONE = "That action is no longer available.";
+const liveButtons = (action: string): HTMLElement[] => [...(document.getElementById("main")?.querySelectorAll<HTMLElement>(`[data-action="${action}"]:not(:disabled)`) ?? [])].filter((b) => b.isConnected);
+const composerField = (): HTMLElement | null => document.getElementById("main")?.querySelector<HTMLElement>("[data-composer] textarea, [data-composer] input:not(:disabled)") ?? null;
 function pageActions(): PaletteAction[] {
-  const main = document.getElementById("main");
   const out: PaletteAction[] = [];
-  for (const [action, title, hint] of [["approve", "Approve", "a"], ["reject", "Reject", "r"], ["pause", "Pause the open mission", "p"]] as const) {
-    const buttons = main?.querySelectorAll<HTMLElement>(`[data-action="${action}"]:not(:disabled)`) ?? [];
-    if (buttons.length === 1) out.push({ title, hint, run: () => (buttons[0] as HTMLElement).click() });
+  for (const [action, title, hint] of PAGE_ACTIONS) {
+    if (liveButtons(action).length !== 1) continue;
+    out.push({
+      title,
+      hint,
+      run: () => {
+        const now = liveButtons(action);
+        if (now.length === 1) now[0]?.click();
+        else announce(GONE, "info");
+      },
+    });
   }
-  const composer = main?.querySelector<HTMLElement>("[data-composer] textarea, [data-composer] input");
-  if (composer) out.push({ title: "Write to the provider", hint: "c", run: () => composer.focus() });
+  if (composerField()) out.push({ title: "Write to the provider", hint: "c", run: () => { const f = composerField(); if (f) f.focus(); else announce(GONE, "info"); } });
   return out;
 }
 

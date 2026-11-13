@@ -229,7 +229,17 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     const done = rendered ? () => {} : deferSkeleton(body, 3);
     refreshBtn.disabled = true;
     const settled = await Promise.allSettled(online.map((n) => opts.load(n)));
+    // The answer line above the body grows when the answer arrives. A skeleton that is still in the body when that happens is counted as content that
+    // moved (layout shift, 0.16 on the Usage page at 4x CPU throttling). So the skeleton is removed first and one frame is allowed to paint before the answer
+    // and the content are set. A hidden tab paints no frame: the timer ends the wait.
+    const hadSkeleton = body.querySelector(".skeleton") !== null;
     done();
+    if (hadSkeleton) {
+      await new Promise<void>((resolve) => {
+        const timer = window.setTimeout(resolve, 80);
+        requestAnimationFrame(() => requestAnimationFrame(() => (window.clearTimeout(timer), resolve())));
+      });
+    }
     refreshBtn.disabled = false;
     if (disposed || mine !== seq) return;
     const results: Array<WorkerData<T>> = [];

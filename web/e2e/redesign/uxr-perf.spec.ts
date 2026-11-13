@@ -91,8 +91,7 @@ uxr({ t: "T36", uxr: ["UXR-033"], needs: ["WP-0", "WP-1", "WP-4"] }, "INP proxy 
   expect(failures, "palette interactions above the INP limit at 4x CPU throttling").toEqual([]);
 });
 
-// The Usage page is left out: measured at 4x throttling it shifts by 0.16 (limit 0.02), a defect recorded under PRD-020 in SPEC_STATUS.md. Add it back when it is fixed.
-for (const def of PAGES.filter((p) => p.id !== "usage")) {
+for (const def of PAGES) {
   uxr({ t: "T36", uxr: ["UXR-033", "UXR-034"], needs: needsFor(def) }, `${def.id}: CLS stays at most 0.02 through mount and live refresh`, async ({ page }, info) => {
     pw.skip(!onPixel4(page, info.project.name), "measured on the chromium-mobile (Pixel 4) project");
     await page.addInitScript(OBSERVE);

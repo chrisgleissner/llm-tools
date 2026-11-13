@@ -43,15 +43,40 @@ export function offlineLongerThan(workers: api.WorkerInfo[], minutes: number, no
 }
 
 /** Providers that waited for capacity at the previous read (`prev`, provider to waiting) and are ready now: their rate limit has lifted. Updates `prev`. */
-export function liftedLimits(prev: Map<string, boolean>, providers: Array<{ provider: string; ready?: boolean; available?: boolean }>): string[] {
+export function liftedLimits(prev: Map<string, boolean>, providers: Array<{ provider: string; ready?: boolean; available?: boolean }>, target: string): string[] {
   const lifted: string[] = [];
   for (const p of providers) {
     if (p.available === false) continue;
     const waiting = p.ready === false;
-    if (prev.get(p.provider) === true && !waiting) lifted.push(p.provider);
-    prev.set(p.provider, waiting);
+    const key = `${target}/${p.provider}`;
+    if (prev.get(key) === true && !waiting) lifted.push(p.provider);
+    prev.set(key, waiting);
   }
   return lifted;
+}
+
+const COOLDOWN_MS = 30 * 60_000;
+const CLAIM_PREFIX = "bridge-alert:";
+const memoryClaims = new Map<string, number>();
+
+/**
+ * True when this tab may announce `key` now: nothing was announced for it in the last 30 minutes, in this tab or in another tab of this browser.
+ * The claim is a `localStorage` entry (`time:token`) that is read back after it is written, so when two tabs claim at the same moment only the
+ * one whose token stayed announces. Without storage the claim is kept in memory, which still gives the cooldown for this tab.
+ */
+export function claim(key: string, now = Date.now()): boolean {
+  const mine = `${now}:${Math.random().toString(36).slice(2)}`;
+  try {
+    const seen = Number((localStorage.getItem(CLAIM_PREFIX + key) ?? "").split(":")[0]);
+    if (Number.isFinite(seen) && seen > 0 && now - seen < COOLDOWN_MS) return false;
+    localStorage.setItem(CLAIM_PREFIX + key, mine);
+    return localStorage.getItem(CLAIM_PREFIX + key) === mine;
+  } catch {
+    const seen = memoryClaims.get(key) ?? 0;
+    if (seen > 0 && now - seen < COOLDOWN_MS) return false;
+    memoryClaims.set(key, now);
+    return true;
+  }
 }
 
 export function mountAlerts(go: (path: string) => void): () => void {
@@ -59,6 +84,7 @@ export function mountAlerts(go: (path: string) => void): () => void {
   const alerted = new Set<string>();
   let baselined = false;
   const notice = (key: string, text: string, label: string, path: string): void => {
+    if (!claim(key)) return;
     announce(text, "info", "", { action: { label, run: () => go(path) } });
     if ("Notification" in window && Notification.permission === "granted" && document.hidden && Date.now() - (notified.get(key) ?? 0) >= NOTIFY_GAP_MS) {
       notified.set(key, Date.now());
@@ -86,9 +112,10 @@ export function mountAlerts(go: (path: string) => void): () => void {
       notice(`worker/${w.name}`, `Worker ${w.name} has been offline for ${minutes} min.`, "Open workers", "/workers");
     }
   };
+  // The previous state is kept per worker and provider: a read from another worker (the chips read the first online one) is not a change of the first.
   const waiting = new Map<string, boolean>();
-  const unUsage = api.onUsageSnapshot((snapshot) => {
-    for (const p of liftedLimits(waiting, snapshot.providers ?? [])) notice(`limit/${p}`, `${p.charAt(0).toUpperCase()}${p.slice(1)} has capacity again. The rate limit has lifted.`, "Open usage", "/usage");
+  const unUsage = api.onUsageSnapshot((snapshot, target) => {
+    for (const p of liftedLimits(waiting, snapshot.providers ?? [], target)) notice(`limit/${p}`, `${p.charAt(0).toUpperCase()}${p.slice(1)} has capacity again. The rate limit has lifted.`, "Open usage", "/usage");
   });
   const unStore = subscribe(check);
   const timer = window.setInterval(check, 30_000);

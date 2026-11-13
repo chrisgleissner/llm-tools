@@ -378,12 +378,12 @@ export interface UsageSnapshot {
 export async function usageSnapshot(target: string): Promise<UsageSnapshot> {
   const row = await command(target, "usage.snapshot", null, {});
   const snapshot = (row.result?.result ?? {}) as UsageSnapshot;
-  for (const l of [...usageListeners]) l(snapshot);
+  for (const l of [...usageListeners]) l(snapshot, target);
   return snapshot;
 }
-const usageListeners = new Set<(snapshot: UsageSnapshot) => void>();
-/** Called with every usage read, whoever made it (the capacity chips poll once a minute); the shell uses it to notice a lifted rate limit. */
-export function onUsageSnapshot(fn: (snapshot: UsageSnapshot) => void): () => void {
+const usageListeners = new Set<(snapshot: UsageSnapshot, target: string) => void>();
+/** Called with every usage read and the worker it came from, whoever made it (the capacity chips poll once a minute); used to notice a lifted rate limit. */
+export function onUsageSnapshot(fn: (snapshot: UsageSnapshot, target: string) => void): () => void {
   usageListeners.add(fn);
   return () => usageListeners.delete(fn);
 }

@@ -73,7 +73,7 @@ async function signOut(): Promise<void> {
   toLogin({ kind: "signed-out", text: "You signed out. Your session on this device has ended." });
 }
 
-async function route(): Promise<void> {
+async function route(navigated = true): Promise<void> {
   const generation = ++routeGeneration;
   cleanup();
   cleanup = () => {};
@@ -85,7 +85,7 @@ async function route(): Promise<void> {
     state = await api.authState();
   } catch (e) {
     await ensureRouteCss("auth");
-    app.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "Coordinator unreachable"), h("p", { role: "alert" }, e instanceof api.ApiError ? e.message : "Error"), h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => void route() }, "Retry")))));
+    app.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "Coordinator unreachable"), h("p", { role: "alert" }, e instanceof api.ApiError ? e.message : "Error"), h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => void route(false) }, "Retry")))));
     return;
   }
   if (generation !== routeGeneration) return;
@@ -165,7 +165,7 @@ async function route(): Promise<void> {
     else if (path === "/account") cleanup = await lazyView(main, generation, loadAccount, (v) => v.account(main, { me, signOut: () => void signOut(), onPasswordChanged: signedOut }));
     else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the Inbox")));
   } catch {
-    if (generation === routeGeneration) main.replaceChildren(h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => void route(), code: "chunk-load-failed" }));
+    if (generation === routeGeneration) main.replaceChildren(h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => void route(false), code: "chunk-load-failed" }));
   }
   if (generation !== routeGeneration) return;
   const reset = state.password_reset_notice;
@@ -182,8 +182,12 @@ async function route(): Promise<void> {
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;
   // A route change moves focus to the page's main heading, so a screen reader announces the new page and the next Tab starts inside it.
   // A page whose heading is drawn later (the mission page) keeps the focus on the main region until then.
-  if (heading) heading.tabIndex = -1;
-  (heading ?? main).focus({ preventScroll: true });
+  // Only a real navigation does it (not the retry of a failed load), and never while a text field has the focus: a page may have put it there itself (`?focus=composer`).
+  const typing = document.activeElement?.matches("input, textarea, select, [contenteditable='true']") ?? false;
+  if (navigated && !typing) {
+    if (heading) heading.tabIndex = -1;
+    (heading ?? main).focus({ preventScroll: true });
+  }
 }
 
 /** Fetch a route chunk (showing skeleton rows if it takes longer than 150 ms) and mount it; a newer navigation discards the result. */
@@ -201,7 +205,7 @@ async function lazyView<T>(main: HTMLElement, generation: number, load: () => Pr
 
 function showLoadError(into: HTMLElement, generation: number): void {
   void ensureRouteCss("auth");
-  into.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => generation === routeGeneration && void route(), code: "chunk-load-failed" }))));
+  into.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => generation === routeGeneration && void route(false), code: "chunk-load-failed" }))));
 }
 
 /** What this browser lacks that the console needs, or undefined. A browser that cannot parse the script never gets here. */
