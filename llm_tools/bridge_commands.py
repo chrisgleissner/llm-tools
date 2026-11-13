@@ -369,7 +369,7 @@ def _mission_delete(store: BridgeStore | None, request: CommandRequest, params: 
         )
     from .bridge_delete import delete_mission
 
-    return delete_mission(request.mission_id)
+    return delete_mission(request.mission_id, force=params["force"])
 
 
 def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -401,6 +401,10 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
     if unsupported:
         raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(unsupported),
                              details={"options": unsupported})
+    if params["isolate"] != "none":
+        # Remote acceptance of worktree isolation is ORCH-008; until then a coordinator cannot request it.
+        raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): isolate",
+                             details={"options": ["--isolate"]})
     cli = _cli()
     args = argparse.Namespace(
         name=params["name"], cwd=params["cwd"], prompt=params["prompt"], prompt_file=None,
@@ -408,8 +412,10 @@ def _mission_create(store: BridgeStore | None, request: CommandRequest, params: 
         headless=params["headless"], native_tui=params["native_tui"], teams=params["teams"],
         token_spend=params["token_spend"], command_template=None, trust_folder=params["trust_folder"],
         verifier_argv=[], verifier_files=[], log_max_bytes=4 * 1024 * 1024, log_rotations=3,
-        log_retained_runs=20, capacity_refresh_seconds=60,
+        log_retained_runs=20, capacity_refresh_seconds=60, isolate=params["isolate"],
     )
+    if args.isolate not in ("none", "worktree"):
+        raise CommandFailure("invalid-argument", "isolate must be none or worktree")
     prompt, config = cli._mission_creation_inputs(args, auto_continue=False)
     with cli.open_store() as writer:
         return cli._create_mission_with_task(writer, args, prompt, config)
@@ -726,7 +732,8 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "acceptance": Param(list, default=[], item=str), "providers": Param(str), "routes": Param(str),
                        "headless": Param(bool, default=False), "native_tui": Param(bool, default=False),
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
-                       "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
+                       "unsupported_options": Param(list, default=[], item=str),
+                       "isolate": Param(str, default="none")}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
                       {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
                        "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
@@ -779,7 +786,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.delete", "Delete a finished or never-started mission and its local state", True, True,
-                      {"confirm": Param(bool, default=False)}, _mission_delete),
+                      {"confirm": Param(bool, default=False), "force": Param(bool, default=False)}, _mission_delete),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(
             "task.list",

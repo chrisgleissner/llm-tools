@@ -337,6 +337,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--json` | Client-side output format; applies to typed command/resource responses, not a request field. |
 | `--log-max-bytes` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
+| `--isolate` | Local worktree isolation (ORCH-001); remote mission creation returns `unsupported-remote-option` until ORCH-008 maps it to the typed `isolate` field. |
 | `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
 | `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
 | `--native` | `mission.start` params or `mission.create` body `native_tui`. |

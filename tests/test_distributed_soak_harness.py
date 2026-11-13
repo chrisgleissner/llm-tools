@@ -160,7 +160,8 @@ def test_proc_stats_reads_this_process_and_none_for_a_dead_one():
 
 def test_soak_defaults_are_the_prd_scaled_run():
     args = bridge_soak.parse_args([])
-    assert (args.workers, args.missions, args.duration, args.sample_seconds) == (10, 50, 1800.0, 60.0)
+    assert (args.workers, args.missions, args.duration, args.sample_seconds) == (10, 50, 2700.0, 60.0)
+    assert bridge_soak.effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds) == 1800.0  # a default run keeps a 15-minute fit
     assert bridge_soak.validate(args) is None
 
 
@@ -278,8 +279,43 @@ def test_verify_checks_the_coordinator_audit_when_given_one():
     api = FakeApi({issued.request_id: _done("applied")})
     ok = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter({issued.request_id: 1}))  # type: ignore[arg-type]
     twice = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter({issued.request_id: 2}))  # type: ignore[arg-type]
-    missing = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    unproven = FakeNode({issued.marker: 1}, {issued.request_id: ["APPLIED", "APPLIED"]})  # a pruned audit row is accepted only with a clean worker proof
+    missing = h.verify_exactly_once(ledger, api, {"w": unproven}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    pruned = h.verify_exactly_once(ledger, api, {"w": node}, settle_seconds=0.0, audit=h.Counter())  # type: ignore[arg-type]
+    assert pruned.ok
     assert ok.ok and "2 submit audit entries" in twice.violations[0] and "0 submit audit entries" in missing.violations[0]
+
+
+def _pruned_scenario(*, effects: int, rows: int, audit: int | None = None, state: str | None = None) -> h.Verification:
+    """One accepted command that the coordinator no longer has (404), or still has in ``state``."""
+    ledger = h.Ledger("t")
+    issued, _ = ledger.add_task_request("w", "m1")
+    issued.accepted = True
+    node = FakeNode({issued.marker: effects} if effects else {}, {issued.request_id: ["APPLIED"] * rows} if rows else {})
+    entries = {issued.request_id: {"state": state, "result": None}} if state else {}
+    return h.verify_exactly_once(ledger, FakeApi(entries), {"w": node}, settle_seconds=0.0,  # type: ignore[arg-type]
+                                 audit=None if audit is None else h.Counter({issued.request_id: audit} if audit else {}))
+
+
+def test_verify_accepts_a_command_the_coordinator_pruned_when_the_worker_proves_one_effect():
+    # The coordinator deletes old finished commands and audit rows; the worker database is the proof.
+    report = _pruned_scenario(effects=1, rows=1, audit=0)
+    assert report.ok and report.pruned_by_retention == 1
+
+
+def test_verify_reports_a_pruned_command_without_an_effect_as_lost():
+    report = _pruned_scenario(effects=0, rows=0)
+    assert "lost" in report.violations[0] and report.pruned_by_retention == 0
+
+
+def test_verify_reports_a_pruned_command_with_two_worker_rows_as_a_violation():
+    assert "lost" in _pruned_scenario(effects=1, rows=2).violations[0]
+    assert "lost" in _pruned_scenario(effects=2, rows=1).violations[0]
+
+
+def test_verify_reports_an_old_command_that_is_stuck_as_unfinished_not_pruned():
+    report = _pruned_scenario(effects=0, rows=0, state="sent")
+    assert report.unfinished and not report.violations and report.pruned_by_retention == 0
 
 
 def test_verify_requires_exactly_one_command_row_on_the_worker():
@@ -745,7 +781,7 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     report_path = tmp_path / "report.json"
     started = time.monotonic()
     code = bridge_soak.main([
-        "--duration", str(int(scaled(45))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--warmup-seconds", "10", "--limit-every", "20", "--limit-seconds", "8",
+        "--duration", str(int(scaled(60))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--warmup-seconds", "30", "--limit-every", "20", "--limit-seconds", "8",
         "--settle-seconds", str(int(scaled(60))), "--count-floor-multiplier", "8", "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
     ])
     report = json.loads(report_path.read_text())
@@ -833,3 +869,40 @@ def test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per
     summed = h.check_slope("workers_rss_kib", [(s["t"], s["workers"]["rss_kib"]) for s in _worker_fleet(2048.0)],
                            h.SlopeBound(3 * 1024 * 4, 1024 * 4, "KiB"), warmup_seconds=1200.0)
     assert summed.verdict == "pass"
+
+
+# Median resident size (MiB) of the 50 controllers, one sample every 60 s from t=60 s, recorded in the 4.5-hour nightly run 43134569798
+# (GitHub-hosted runner). The jumps at 900 s and 1800 s are the 900 s retention pass of the capacity refresh worker; the
+# series is still settling until about 1800 s. The first 30 values are the same as in the 30-minute nightly run of that day.
+RECORDED_CONTROLLER_MEDIAN_MIB = [
+    32.068, 32.225, 32.377, 32.508, 32.6, 32.705, 32.828, 32.936, 33.051, 33.176, 33.271, 33.387, 33.496, 33.613, 35.551,
+    34.822, 34.896, 35.006, 35.078, 35.178, 35.551, 35.754, 35.814, 35.863, 35.887, 35.9, 35.922, 35.928, 35.943, 36.867,
+    36.035, 36.049, 36.07, 36.074, 36.088, 36.094, 36.119, 36.137, 36.145, 36.156, 36.164, 36.184, 36.188, 36.191, 36.441]
+
+
+def _recorded_controllers(samples: int, leak_kib_per_hour: float = 0.0, leak_from: float = 1800.0) -> dict[str, list[tuple[float, float]]]:
+    series = [((index + 1) * 60.0, mib * 1024.0) for index, mib in enumerate(RECORDED_CONTROLLER_MEDIAN_MIB[:samples])]
+    return {str(pid): [(t, kib + pid * 8.0 + leak_kib_per_hour / 3600.0 * max(0.0, t - leak_from)) for t, kib in series] for pid in range(5)}
+
+
+def test_recorded_nightly_series_fails_the_old_30_minute_gate_and_passes_the_45_minute_gate():
+    bound = h.SlopeBound(1536, 512, "KiB", per_process=True)
+    old = h.check_per_process_slope("controllers_rss_kib", _recorded_controllers(30), bound, warmup_seconds=1200.0)
+    assert old.verdict == "fail" and old.slope_per_hour > 4000  # the 1800 s retention pass lands on the last sample of a 10-minute fit
+    new = h.check_per_process_slope("controllers_rss_kib", _recorded_controllers(45), bound, warmup_seconds=bridge_soak.WARMUP_SECONDS)
+    assert bridge_soak.WARMUP_SECONDS == 1800.0 and new.verdict == "pass" and abs(new.slope_per_hour) < 1536
+
+
+def test_the_45_minute_gate_still_fails_a_leak_above_what_its_floor_can_resolve():
+    bound = h.SlopeBound(1536, 512, "KiB", per_process=True)
+    # A 900 s fit can only see a rise above the 512 KiB floor: 2.5 MiB per hour is 640 KiB in the window. Smaller leaks are for the long run.
+    leaking = _recorded_controllers(45, leak_kib_per_hour=2.5 * 1024)
+    assert h.check_per_process_slope("controllers_rss_kib", leaking, bound, warmup_seconds=1800.0).verdict == "fail"
+
+
+def test_a_growing_worker_command_backlog_is_reported():
+    ok = [{"t": 1.0, "queue_depths": {"w1": {"pending": 3, "sent": 1}}}, {"t": 2.0, "queue_depths": {}}, {"t": 3.0, "queue_depths": None}]
+    bad = [{"t": 61.0, "queue_depths": {"w1": {"pending": 90, "sent": 20}, "w2": {"pending": 1}}}]
+    assert h.check_command_backlog(ok) == []
+    assert h.check_command_backlog([{"t": 1.0}, {"t": 2.0, "queue_depths": None}]) is None  # no sample carries the field: inconclusive
+    assert h.check_command_backlog(bad) == ["t=61s: w1 has 110 unfinished commands (limit 100)"]
