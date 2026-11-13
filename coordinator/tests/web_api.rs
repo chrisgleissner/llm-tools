@@ -1422,6 +1422,49 @@ async fn worker_sessions_and_usage_are_readable_through_resource_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn mission_resources_keep_mission_content_that_command_records_remove() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "content-worker", 0).await;
+    let read_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let show = tokio::spawn(async move { read_api.rb(Method::GET, "/api/v1/missions/m1?worker=w1&wait_ms=5000").send().await.unwrap() });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.status");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.status","outcome":"ok",
+                "result":{"mission":{"id":"m1","cwd":"/srv/work","objective":"ship it","repo_identity":"repo-1","config":{"headless":false}}},"error":null}),
+        )
+        .await;
+    let response = show.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let request_id = body["request_id"].as_str().unwrap().to_string();
+    let mission = &body["result"]["result"]["mission"];
+    assert_eq!(mission["cwd"], "/srv/work");
+    assert_eq!(mission["objective"], "ship it");
+    assert_eq!(mission["repo_identity"], "repo-1");
+    assert_eq!(mission["config"]["headless"], false);
+
+    // The same stored command, read as a command record, has none of them.
+    let (status, record) = api.get(&format!("/api/v1/commands/{request_id}")).await;
+    assert_eq!(status, 200, "{record}");
+    let serialized = record.to_string();
+    for sentinel in ["/srv/work", "ship it", "repo-1", "headless"] {
+        assert!(!serialized.contains(sentinel), "command record leaked {sentinel}: {record}");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
     let env = boot().await;
     let api = env.admin().await;
@@ -1659,10 +1702,12 @@ async fn command_resource_redacts_private_request_and_event_fields() {
         "mission_id": "m1",
         "target": "w1",
         "params": {
-            "cwd": "/srv/work",
+            "cwd": "/private/request-path-sentinel",
+            "objective": "private-objective-sentinel",
+            "repo_identity": "private-repo-sentinel",
             "prompt": "private-request-prompt-sentinel",
             "environment": {"PRIVATE_ENV_SENTINEL":"environment-secret-sentinel"},
-            "config": {"credential":"request-credential-sentinel"}
+            "config": {"capacity_refresh_seconds":60,"note":"private-config-sentinel"}
         }
     });
     env.srv.state.db.command_insert("w1", "mission.create", true, &request).unwrap();
@@ -1707,20 +1752,22 @@ async fn command_resource_redacts_private_request_and_event_fields() {
     assert_eq!(status, 200, "{response}");
     let serialized = response.to_string();
     for sentinel in [
+        "/private/request-path-sentinel",
+        "private-objective-sentinel",
+        "private-repo-sentinel",
+        "private-config-sentinel",
         "raw-terminal-sentinel",
         "captured-terminal-screen-sentinel",
         "provider-secret-sentinel",
         "environment-secret-sentinel",
-        "request-credential-sentinel",
         "access-token-sentinel",
         "stdout-terminal-sentinel",
         "transcript-terminal-sentinel",
     ] {
         assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
     }
-    // API-008 lists secrets, credentials, environment variables and terminal content. Paths, objectives and
-    // mission configuration stay visible so that `--target` output matches the local CLI.
-    assert_eq!(response.pointer("/request/params/cwd").and_then(Value::as_str), Some("/srv/work"));
+    // The command record must not duplicate mission content (cwd, repo_identity, objective, config).
+    assert!(response.pointer("/request/params/cwd").is_none());
     assert_eq!(
         response.pointer("/request/params/prompt").and_then(Value::as_str),
         Some("private-request-prompt-sentinel")

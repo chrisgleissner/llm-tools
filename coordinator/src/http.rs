@@ -2044,8 +2044,11 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
             "request_id": format!("resource-{}", auth::random_token())
         }
     });
-    let bytes = Bytes::from(serde_json::to_vec(&command).expect("command JSON serializes"));
-    post_command(State(st), Authed(principal, ip), headers, Buffered { bytes, _permit: None }).await
+    let Value::Object(command) = command else {
+        unreachable!("the command envelope is an object")
+    };
+    // A mission read is a resource: it keeps the mission content that the generic command record removes.
+    submit_command(st, principal, ip, headers, command, None, false).await
 }
 
 async fn mission_tasks(
@@ -3166,10 +3169,18 @@ async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<S
 
 async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
-    submit_command(st, p, ip, headers, m, None).await
+    submit_command(st, p, ip, headers, m, None, true).await
 }
 
-async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m: Map<String, Value>, extra: Option<(&'static str, Value)>) -> ApiResult {
+async fn submit_command(
+    st: St,
+    p: Principal,
+    ip: String,
+    headers: HeaderMap,
+    m: Map<String, Value>,
+    extra: Option<(&'static str, Value)>,
+    redact_content: bool,
+) -> ApiResult {
     no_extra(&m, &["target", "request", "wait_ms"])?;
     let target = str_field(&m, "target")?;
     let Some(Value::Object(request)) = m.get("request") else {
@@ -3307,7 +3318,7 @@ async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m:
         return Ok(response);
     }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut value = command_response_json(&st, &row);
+    let mut value = command_response_json(&st, &row, redact_content);
     if let Some((key, extra)) = extra {
         value[key] = extra;
     }
@@ -3364,9 +3375,11 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
     result.insert("next_cursor".into(), json!(next_cursor));
 }
 
-fn command_response_json(st: &St, row: &CommandRow) -> Value {
+/// `redact_content` is true for the generic command record (`/commands`), which must not duplicate mission
+/// content, and false for the mission and worker resources, which serve it to the `read` scope.
+fn command_response_json(st: &St, row: &CommandRow, redact_content: bool) -> Value {
     let mut value = row.to_json();
-    redact_private_api_fields(&mut value);
+    redact_private_api_fields(&mut value, redact_content);
     value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
     value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
     add_next_page_cursor(st, row, &mut value);
@@ -3376,7 +3389,8 @@ fn command_response_json(st: &St, row: &CommandRow) -> Value {
 /// Command requests and worker results are durable internal records, not public API schemas.
 /// Remove known private fields recursively before exposing them through the generic command
 /// resource. Resource-specific endpoints remain the preferred, explicitly projected interface.
-fn redact_private_api_fields(value: &mut Value) {
+fn redact_private_api_fields(value: &mut Value, redact_content: bool) {
+    const MISSION_CONTENT_FIELDS: &[&str] = &["cwd", "repo_identity", "objective", "config"];
     const PRIVATE_FIELDS: &[&str] = &[
         "environment",
         "env",
@@ -3407,14 +3421,17 @@ fn redact_private_api_fields(value: &mut Value) {
     ];
     match value {
         Value::Object(fields) => {
-            fields.retain(|key, _| !PRIVATE_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private)));
+            fields.retain(|key, _| {
+                !PRIVATE_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private))
+                    && !(redact_content && MISSION_CONTENT_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private)))
+            });
             for child in fields.values_mut() {
-                redact_private_api_fields(child);
+                redact_private_api_fields(child, redact_content);
             }
         }
         Value::Array(values) => {
             for child in values {
-                redact_private_api_fields(child);
+                redact_private_api_fields(child, redact_content);
             }
         }
         _ => {}
@@ -3423,7 +3440,7 @@ fn redact_private_api_fields(value: &mut Value) {
 
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row))),
+        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row, true))),
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }
@@ -3456,7 +3473,7 @@ async fn resource_command(st: St, principal: Principal, ip: String, command: Res
     let Value::Object(envelope) = envelope else {
         unreachable!("the envelope is an object")
     };
-    submit_command(st, principal, ip, headers, envelope, command.extra).await
+    submit_command(st, principal, ip, headers, envelope, command.extra, false).await
 }
 
 fn resource_wait_ms(m: &Map<String, Value>) -> Result<u64, ApiError> {
