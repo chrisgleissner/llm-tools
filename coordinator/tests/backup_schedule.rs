@@ -393,14 +393,18 @@ fn only_exactly_named_regular_files_count_and_future_stamps_are_ignored() {
     // Rotation to one keeps the newest counted file and touches none of the others.
     assert_eq!(backups::rotate(&dir, 1), 1);
     assert_eq!(names(&dir), [ok_seq].into_iter().collect::<BTreeSet<_>>());
-    for n in ["coordinator-manual.sqlite3", "elsewhere", future.as_str()] {
+    for n in ["coordinator-manual.sqlite3", future.as_str()] {
         assert!(dir.join(n).exists(), "{n} must stay");
     }
+    // The link and its target exist only where the test could create a symbolic link.
     #[cfg(unix)]
-    assert!(
-        std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_type().unwrap().is_symlink()),
-        "the link stays"
-    );
+    {
+        assert!(dir.join("elsewhere").exists(), "the link target stays");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_type().unwrap().is_symlink()),
+            "the link stays"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
