@@ -178,16 +178,33 @@ async fn a_hello_over_the_cap_drops_the_oldest_finished_summaries_and_is_never_r
     let api = env.admin().await;
     let db = &env.srv.state.db;
     api.add_worker("a").await;
-    // 10 001 summaries: ids sort like their update times; the oldest finished one is m00000.
+    // 10 001 summaries, listed most important first like the worker does: the last one listed is dropped.
     let list = (0..=10_000)
-        .map(|i| summary(&format!("m{i:05}"), "COMPLETED", &format!("2026-01-01T{i:08}")))
+        .map(|i| summary(&format!("m{i:05}"), "COMPLETED", &format!("2026-01-01T{:08}", 10_000 - i)))
         .collect();
     let outcome = db.worker_hello("a", "wid-a", &hello_with("a", list), &caps(), "127.0.0.1").unwrap();
     assert!(matches!(outcome, HelloOutcome::Ok { .. }));
     let ids = indexed(&env, "a");
     assert_eq!(ids.len(), 10_000);
-    assert!(!ids.contains(&"m00000".to_string()) && ids.contains(&"m00001".to_string()) && ids.contains(&"m10000".to_string()));
+    assert!(!ids.contains(&"m10000".to_string()) && ids.contains(&"m09999".to_string()) && ids.contains(&"m00000".to_string()));
     assert_eq!(db.diagnostics().unwrap()["warnings"], json!([]));
+    env.stop().await;
+}
+
+/// Eviction orders by the coordinator's own `touched_at`, never by the worker's `updated_at`.
+#[tokio::test(flavor = "multi_thread")]
+async fn eviction_ignores_the_workers_updated_at() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let db = &env.srv.state.db;
+    api.add_worker("a").await;
+    // updated_at is the reverse of the list order: by `updated_at` m00000 is the oldest, by touch order m10000 is.
+    let list = (0..=10_000)
+        .map(|i| summary(&format!("m{i:05}"), "COMPLETED", &format!("2026-01-01T{i:08}")))
+        .collect();
+    db.worker_hello("a", "wid-a", &hello_with("a", list), &caps(), "127.0.0.1").unwrap();
+    let ids = indexed(&env, "a");
+    assert!(ids.contains(&"m00000".to_string()) && !ids.contains(&"m10000".to_string()));
     env.stop().await;
 }
 
@@ -253,10 +270,10 @@ async fn the_events_upsert_path_enforces_the_cap_too() {
     let ids = indexed(&env, "a");
     assert_eq!(ids.len(), 10_000, "the cap holds after an upsert");
     assert!(ids.contains(&"c0".to_string()) && ids.contains(&"c2".to_string()));
-    for gone in ["a00000", "a00001", "a00002"] {
-        assert!(!ids.contains(&gone.to_string()), "{gone} was the oldest finished summary");
+    for gone in ["a04999", "a04998", "a04997"] {
+        assert!(!ids.contains(&gone.to_string()), "{gone} was touched longest ago");
     }
-    assert!(ids.contains(&"a00003".to_string()));
+    assert!(ids.contains(&"a04996".to_string()) && ids.contains(&"a00000".to_string()));
     env.stop().await;
 }
 

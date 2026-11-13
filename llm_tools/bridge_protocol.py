@@ -41,6 +41,7 @@ MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "terminal.open": (frozenset({"session_id", "mission_id", "mode", "cols", "rows"}), frozenset()),
     "terminal.close": (frozenset({"session_id"}), frozenset()),
     "terminal.status": (frozenset({"session_id", "state", "mode", "reason"}), frozenset()),
+    "notice": (frozenset({"code", "refused", "cap", "message"}), frozenset()),
     "ping": (frozenset(), frozenset()),
     "pong": (frozenset(), frozenset()),
     "error": (frozenset({"code", "message"}), frozenset({"details", "in_reply_to"})),

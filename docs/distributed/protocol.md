@@ -63,21 +63,34 @@ whole numbers with `invalid-message`.
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
-A `hello` with more than 5000 missions gets an `error` with code `invalid-message`; the connection stays
-open until the hello deadline. With summaries of about 300 bytes, the 1 MiB message limit is reached at
-roughly 3000 missions, before the 5000 limit.
+The coordinator rejects a `hello` with more than 5000 missions (`invalid-message`; the connection stays open until
+the hello deadline), and a frame above 1 MiB closes the connection with 1009. A worker therefore sends a bounded
+hello: all active missions first, then the newest finished ones, until 2000 missions or a frame budget of 640 KiB
+(measured on the encoded frame) is reached. It sends the remaining summaries after the `welcome` in `events`
+messages with no events (`through == after`, `mission_cursor` equal to the cursor), at most 1000 summaries and
+about 384 KiB each, oldest finished last-to-first so their relative age is kept.
 
 The coordinator keeps at most 10 000 mission summaries per worker. A `hello` or an `events` upsert is never
-refused for this: when a worker exceeds the limit, the coordinator drops that worker's oldest finished
-summaries (by `updated_at`) first. If the remaining summaries are all active, it does not index the newest
-excess rows and reports the warning `missions-over-cap` (with the worker name and a fix) in
-`GET /api/v1/diagnostics`. The warning clears when a later update fits.
+refused for this. When a worker exceeds the limit, the coordinator drops the finished summaries it touched longest
+ago first (`missions.touched_at`, set by the coordinator when a row is inserted or its summary changes; the
+worker's `updated_at` is not used). In a `hello` the first mission listed counts as the newest. An update of a
+stored mission is never refused. If the remaining summaries are all active, the newest excess ids are not
+indexed. The coordinator stores the number refused and the time on the worker row (so `GET /api/v1/diagnostics`
+shows the warning `missions-over-cap` with both, also after a restart) and sends the worker a `notice` message.
+
+| Type | Direction | Payload |
+|---|---|---|
+| `notice` | coordinator to worker | `code` (`missions-over-cap`), `refused` (summaries refused so far; 0 when the warning cleared), `cap`, `message`. Sent when the count changes. |
+
+A worker that does not know `notice` answers with an `error` `unsupported-message`, which the coordinator ignores.
+The Python worker records the notice, and `llm-bridge worker status` shows "N missions refused by coordinator cap".
 
 Fatal refusals. After the error codes `worker-id-mismatch` and `unsupported-version`, or the close reason
 `worker revoked`, reconnecting cannot succeed until the operator acts. The Python worker stops, logs one error
 that names the fix and exits with status 1; `llm-bridge worker status` then shows the connection as `refused`
 with the code and the fix. Every other close or error leads to a reconnect with jittered exponential
-backoff. The backoff returns to its start value only after a `welcome`, not after any other message.
+backoff. The backoff returns to its start value only after a connection has stayed up for 30 s after its
+`welcome`; a welcome followed by an immediate close keeps backing off.
 
 ## Mission summaries
 

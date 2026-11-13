@@ -1683,6 +1683,14 @@ async fn get_worker(State(st): State<St>, Path(name): Path<String>, _a: Authed) 
     Ok(json_ok(StatusCode::OK, worker_json(&st, &worker)))
 }
 
+fn too_many_workers() -> ApiError {
+    err(
+        StatusCode::CONFLICT,
+        "too-many-workers",
+        "the coordinator already has the maximum number of enrolled workers (256); revoke one first",
+    )
+}
+
 async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name"])?;
@@ -1696,6 +1704,12 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
     }
     if st.db.worker_get(name)?.is_some() {
         return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists"));
+    }
+    // Refuse before any certificate is issued. The identity is only built in memory and only returned after the
+    // transactional insert below succeeds, so a refused or lost race leaves nothing behind and never replaces
+    // the identity of an existing worker (the insert fails for an existing name).
+    if st.db.workers_count()? >= crate::db::MAX_ENROLLED_WORKERS {
+        return Err(too_many_workers());
     }
     let token = auth::random_token();
     let identity = if st.cfg.worker_mtls {
@@ -1718,13 +1732,7 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
     match outcome {
         crate::db::EnrolOutcome::Added => {}
         crate::db::EnrolOutcome::Exists => return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists")),
-        crate::db::EnrolOutcome::Full => {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "too-many-workers",
-                "the coordinator already has the maximum number of enrolled workers (256); revoke one first",
-            ))
-        }
+        crate::db::EnrolOutcome::Full => return Err(too_many_workers()),
     }
     st.db.audit(&p.actor(), "worker.add", name, &ip);
     let mut response = json!({"name": name, "token": token, "mutual_tls": identity.is_some()});

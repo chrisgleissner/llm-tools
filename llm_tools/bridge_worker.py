@@ -77,6 +77,16 @@ FATAL_COORDINATOR_CODES: dict[str, str] = {
 _FATAL_CLOSE_REASONS = {"worker revoked": "worker-revoked", "worker id mismatch": "worker-id-mismatch", "unsupported version": "unsupported-version"}
 
 
+# A hello carries the missions that matter most and stays well under the coordinator's 1 MiB frame limit; the rest
+# follow in ordinary `events` batches after the `welcome`.
+HELLO_MAX_MISSIONS = 2000
+HELLO_FRAME_BUDGET = 640 * 1024
+DEFERRED_BATCH_MISSIONS = 1000
+DEFERRED_BATCH_BYTES = 384 * 1024
+# A connection must stay up this long after its welcome before the reconnect backoff starts over.
+BACKOFF_RESET_AFTER = 30.0
+
+
 class WorkerFatalError(RuntimeError):
     """The coordinator refused this worker for a reason that retrying cannot fix."""
 
@@ -299,8 +309,11 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
         connection_state = "last-connected"
     else:
         connection_state = "not-connected"
+    notices = [entry for entry in read_audit(200, env) if entry.get("action") == "coordinator.notice"]
+    refused = int(notices[-1].get("refused") or 0) if notices else 0
     return {
         **config.public(),
+        **({"missions_refused": refused, "missions_cap": notices[-1].get("cap")} if refused else {}),
         "connection_state": connection_state,
         "last_connected_at": last_connected,
         "service_state": service_state,
@@ -613,6 +626,7 @@ class WorkerSession:
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
         self.fatal: WorkerFatalError | None = None  # set when the coordinator refused this worker for good
+        self.deferred_missions: list[dict[str, Any]] = []  # summaries that did not fit in the hello
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
@@ -624,8 +638,11 @@ class WorkerSession:
 
     def hello(self) -> Message:
         with self.open_store() as store:
-            missions = [self._mission_summary(store, row) for row in store.list_missions()]
+            rows = store.list_missions()
+            summaries = [self._mission_summary(store, row) for row in rows]
             cursor = store.last_event_id()
+        missions: list[dict[str, Any]] = []
+        self.deferred_missions = []
         allowed = {
             spec["operation"] for spec in commands.operation_catalog()
             if (not spec["mutating"] or self.config.allow_control
@@ -652,7 +669,37 @@ class WorkerSession:
         host_name = platform.node().strip()
         if host_name and len(host_name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 for char in host_name):
             payload["host_name"] = host_name
-        return Message("hello", self.config.worker_id, 0, payload)
+        return self._bounded_hello(payload, summaries)
+
+    def _bounded_hello(self, payload: dict[str, Any], summaries: list[dict[str, Any]]) -> Message:
+        """The hello with all active missions first, then the newest finished ones, within a count and a frame budget.
+
+        The summaries that do not fit go to ``deferred_missions`` and are sent as ``events`` batches after the welcome.
+        """
+        def is_active(summary: dict[str, Any]) -> bool:
+            return summary.get("status") in LIVE_MISSION_STATUSES
+
+        newest_first = sorted(summaries, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        ordered = [item for item in newest_first if is_active(item)] + [item for item in newest_first if not is_active(item)]
+        payload["missions"] = []
+        base = len(Message("hello", self.config.worker_id, 0, payload).encode().encode("utf-8"))
+        used, taken = base, 0
+        for item in ordered:
+            size = len(json.dumps(item, separators=(",", ":"), ensure_ascii=True)) + 1
+            if taken >= HELLO_MAX_MISSIONS or used + size > HELLO_FRAME_BUDGET:
+                break
+            used += size
+            taken += 1
+        while True:
+            payload["missions"] = ordered[:taken]
+            message = Message("hello", self.config.worker_id, 0, payload)
+            if taken == 0 or len(message.encode().encode("utf-8")) <= HELLO_FRAME_BUDGET:
+                break
+            taken -= 1  # the estimate was low (escaping, separators): measure the encoded frame and shrink
+        rest = ordered[taken:]
+        # Oldest finished first, so the coordinator's own ordering of the late rows keeps their relative age.
+        self.deferred_missions = [item for item in rest if is_active(item)] + [item for item in reversed(rest) if not is_active(item)]
+        return message
 
     def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
         """The bounded status projection of one mission (the default task page), or ``None`` when it cannot be read.
@@ -791,6 +838,11 @@ class WorkerSession:
             self.tombstones_unsupported = False
             self.pending_pongs.clear()
             self.audit("connection.accepted", generation=generation)
+            return []
+        if message.type == "notice":
+            refused = int(message.payload.get("refused", 0) or 0)
+            self.audit("coordinator.notice", code=str(message.payload.get("code", ""))[:64], refused=refused,
+                       cap=int(message.payload.get("cap", 0) or 0))
             return []
         if message.type == "error":
             code = str(message.payload.get("code", ""))
@@ -1005,6 +1057,21 @@ class WorkerSession:
                 self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id, tuple(pending))
                 self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
                 return batch
+            if self.deferred_missions:
+                chunk: list[dict[str, Any]] = []
+                size = 0
+                while self.deferred_missions and len(chunk) < DEFERRED_BATCH_MISSIONS:
+                    item_size = len(json.dumps(self.deferred_missions[0], separators=(",", ":"))) + 1
+                    if chunk and size + item_size > DEFERRED_BATCH_BYTES:
+                        break
+                    size += item_size
+                    chunk.append(self.deferred_missions.pop(0))
+                batch = self.message("events", {"after": self.cursor, "through": self.cursor, "events": [],
+                                                 "mission_cursor": self.cursor, "missions": chunk})
+                self.batch_seq += 1
+                self.inflight = InFlightBatch(self.batch_seq, self.cursor, self.cursor, batch.id)
+                self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+                return batch
             events, through = self._replicable_events(store, self.cursor)
             refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
             if through == self.cursor and not refresh_questions:
@@ -1115,7 +1182,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
     fatal: WorkerFatalError | None = None
     while not stop.is_set():
         connection = None
-        welcomed = False
+        welcomed_at: float | None = None
         try:
             connection = connect(session.config)
             session.generation, session.cursor, session.close_reason = 0, None, None
@@ -1133,9 +1200,8 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                         replies = [session.error(exc.code, str(exc))]
                     if session.fatal is not None:
                         raise session.fatal
-                    if session.generation and not welcomed:
-                        welcomed = True  # a connection that was never welcomed keeps the growing backoff
-                        backoff = 1.0
+                    if session.generation and welcomed_at is None:
+                        welcomed_at = now  # the backoff starts over only if this connection then stays up
                     for reply in replies:
                         connection.send_text(reply.encode())
                     if session.close_reason:
@@ -1177,6 +1243,8 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                     pass
         if fatal is not None:
             break
+        if welcomed_at is not None and time.monotonic() - welcomed_at >= BACKOFF_RESET_AFTER:
+            backoff = 1.0
         if stop.wait(backoff * random.uniform(0.5, 1.0)):
             break
         backoff = min(max_backoff, backoff * 2)

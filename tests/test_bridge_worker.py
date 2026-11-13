@@ -1007,23 +1007,42 @@ def test_backoff_grows_across_connections_that_never_get_a_welcome(state, monkey
     assert stop.delays == [1.0, 2.0, 4.0, 8.0], "a text frame that is not a welcome must not reset the backoff"
 
 
-def test_backoff_resets_only_after_a_welcome(state, monkeypatch):
-    directory, _ = state
+def _welcome_then_close(directory, monkeypatch, uptime):
+    """Run three reconnects: two without a welcome, then one that is welcomed and lasts ``uptime`` seconds."""
     session, _ = _session(directory)
     stop = _RecordingStop(3)
+    clock = [100.0]
     ping = Message("ping", "c", 0, {}).encode()
+    welcome = Message("welcome", "c", 1, {"generation": 1, "protocol_version": 1, "event_cursor": 0}).encode()
     attempts = []
+
+    class Welcomed(FakeConnection):
+        def receive_text(self, timeout=None):
+            if self.incoming:
+                return self.incoming.pop(0)
+            clock[0] += uptime
+            raise ConnectionResetError("gone")
 
     def connect(config):
         attempts.append(1)
         if len(attempts) == 3:
-            welcome = Message("welcome", "c", 1, {"generation": 1, "protocol_version": 1, "event_cursor": 0}).encode()
-            return FakeConnection([welcome], stop, fail_after=True)
+            return Welcomed([welcome], stop)
         return FakeConnection([ping], stop, fail_after=True)
 
     monkeypatch.setattr(worker.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     worker.run(session, connect, stop=stop, idle=0.01, max_backoff=60.0)
-    assert stop.delays == [1.0, 2.0, 1.0]
+    return stop.delays
+
+
+def test_backoff_resets_after_a_welcomed_connection_that_stayed_up_30_seconds(state, monkeypatch):
+    directory, _ = state
+    assert _welcome_then_close(directory, monkeypatch, 31.0) == [1.0, 2.0, 1.0]
+
+
+def test_a_welcome_followed_by_an_immediate_close_keeps_backing_off(state, monkeypatch):
+    directory, _ = state
+    assert _welcome_then_close(directory, monkeypatch, 1.0) == [1.0, 2.0, 4.0]
 
 
 def test_a_fatal_coordinator_error_stops_the_worker_with_the_fix(state, monkeypatch):

@@ -108,6 +108,8 @@ def _format_worker_status(value: dict[str, Any]) -> str:
     last_connected = value.get("last_connected_at")
     if last_connected:
         lines.append(f"Last connected: {last_connected}")
+    if value.get("missions_refused"):
+        lines.append(f"{value['missions_refused']} missions refused by coordinator cap (at most {value.get('missions_cap')} per worker); finish or delete missions")
     if value.get("refused_code"):
         lines.append(f"Refused: {value['refused_code']}. Fix: {value.get('refused_fix')}")
     lines.append(f"Worker service: {value.get('service_state', 'unknown')}")

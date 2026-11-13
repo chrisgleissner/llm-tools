@@ -385,8 +385,8 @@ pub struct Db {
     /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
     /// which only makes the next retention pass run early and correct the figure.
     event_counts: Mutex<HashMap<String, u64>>,
-    /// Workers that have more active missions than `MAX_MISSIONS_PER_WORKER` (diagnostics warning `missions-over-cap`).
-    missions_over_cap: Mutex<std::collections::BTreeSet<String>>,
+    /// Last value handed out by [`Db::touch_n`]: a strictly increasing, coordinator-side ordering of mission rows.
+    last_touch: std::sync::atomic::AtomicI64,
     /// FIND-004: the last audit write failed and none has succeeded since. Reported by `/healthz`.
     audit_failed: std::sync::atomic::AtomicBool,
     audit_failures: AtomicU64,
@@ -490,7 +490,7 @@ pub enum InsertOutcome {
 }
 
 pub enum EventsOutcome {
-    Accepted { cursor: u64, stored: usize },
+    Accepted { cursor: u64, stored: usize, mission_notice: Option<u64> },
     Nack { expected: u64 },
 }
 
@@ -504,35 +504,49 @@ pub struct EventBatch<'a> {
     pub max: u64,
 }
 
-/// Keep at most `cap` mission summaries of `worker`. The oldest finished summaries (by `updated_at`) go first. When
-/// every remaining summary is active, the rows that `inserted` names (newest last) are refused until the count fits.
-/// Returns true when active summaries were refused.
-fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &[String], cap: u64) -> R<bool> {
+/// Keep at most `cap` mission summaries of `worker`. The finished summaries that the coordinator touched longest
+/// ago (`touched_at`, not the worker's `updated_at`) go first. When every remaining summary is active, the rows that
+/// `inserted` names (least important last) are refused until the count fits. The refused count is stored on the
+/// worker row in the same transaction. Returns the new total refused count when it changed (to tell the worker).
+fn enforce_mission_cap(tx: &rusqlite::Transaction<'_>, worker: &str, inserted: &[String], cap: u64) -> R<Option<u64>> {
     let count = |tx: &rusqlite::Transaction<'_>| -> R<u64> {
         Ok(tx.query_row("SELECT COUNT(*) FROM missions WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64)
     };
     let total = count(tx)?;
-    if total <= cap {
-        return Ok(false);
-    }
-    tx.execute(
-        &format!(
-            "DELETE FROM missions WHERE worker=?1 AND mission_id IN (SELECT mission_id FROM missions WHERE worker=?1 \
-             AND upper(COALESCE(json_extract(info,'$.status'),'')) NOT IN {LIVE_STATES} \
-             ORDER BY COALESCE(json_extract(info,'$.updated_at'),'') ASC, mission_id ASC LIMIT ?2)"
-        ),
-        params![worker, (total - cap) as i64],
-    )?;
-    let mut remaining = count(tx)?;
-    let mut refused = false;
-    for id in inserted.iter().rev() {
-        if remaining <= cap {
-            break;
+    let mut refused = 0u64;
+    if total > cap {
+        tx.execute(
+            &format!(
+                "DELETE FROM missions WHERE worker=?1 AND mission_id IN (SELECT mission_id FROM missions WHERE worker=?1 \
+                 AND upper(COALESCE(json_extract(info,'$.status'),'')) NOT IN {LIVE_STATES} \
+                 ORDER BY touched_at ASC, mission_id ASC LIMIT ?2)"
+            ),
+            params![worker, (total - cap) as i64],
+        )?;
+        let mut remaining = count(tx)?;
+        for id in inserted.iter().rev() {
+            if remaining <= cap {
+                break;
+            }
+            remaining -= tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])? as u64;
+            refused += 1;
         }
-        remaining -= tx.execute("DELETE FROM missions WHERE worker=? AND mission_id=?", params![worker, id])? as u64;
-        refused = true;
     }
-    Ok(refused || remaining > cap)
+    if refused > 0 {
+        tx.execute(
+            "UPDATE workers SET missions_refused = missions_refused + ?2, missions_refused_at = ?3 WHERE name = ?1",
+            params![worker, refused as i64, crate::now()],
+        )?;
+    } else if tx.execute(
+        "UPDATE workers SET missions_refused = 0 WHERE name = ?1 AND missions_refused > 0",
+        params![worker],
+    )? == 0
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        tx.query_row("SELECT missions_refused FROM workers WHERE name=?", params![worker], |r| r.get::<_, i64>(0))? as u64,
+    ))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -543,7 +557,12 @@ pub enum EnrolOutcome {
 }
 
 pub enum HelloOutcome {
-    Ok { generation: u64, cursor: u64 },
+    /// `mission_notice` is the worker's refused-summary count when it changed (to tell the worker), else `None`.
+    Ok {
+        generation: u64,
+        cursor: u64,
+        mission_notice: Option<u64>,
+    },
     WorkerIdMismatch,
     Unknown,
 }
@@ -646,7 +665,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -716,6 +735,14 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// Version 17: durable principal ownership for security records and reserved sender-binding
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
+/// Version 18: `missions.touched_at` is the coordinator's own ordering of mission rows (set when a row is inserted
+/// or its summary changes), used to drop the oldest finished summaries over the per-worker cap. `workers` keeps how
+/// many summaries the cap refused and when, so the diagnostics warning survives a restart.
+const MIGRATE_V18_COLUMNS: [(&str, &str, &str); 3] = [
+    ("missions", "touched_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("workers", "missions_refused", "INTEGER NOT NULL DEFAULT 0"),
+    ("workers", "missions_refused_at", "INTEGER"),
+];
 
 /// Mission tombstones (PRD-038). A tombstone says that a worker deleted a mission, so a replication that
 /// is still in flight or queued on an offline worker cannot bring the mission back. The table is created
@@ -913,6 +940,21 @@ impl Db {
             }
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
         }
+        if version < 18 {
+            let mut alter = String::new();
+            for (table, column, declaration) in MIGRATE_V18_COLUMNS {
+                let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)", [table], |r| r.get(0))?;
+                if !exists {
+                    continue;
+                }
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let present = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(Result::ok).any(|name| name == column);
+                if !present {
+                    alter.push_str(&format!("ALTER TABLE {table} ADD COLUMN {column} {declaration};\n"));
+                }
+            }
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 18; COMMIT;"))?;
+        }
         conn.execute_batch(MISSION_TOMBSTONES)?;
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -923,7 +965,7 @@ impl Db {
             stats: LockStats::default(),
             path: path.to_path_buf(),
             event_counts: Mutex::new(HashMap::new()),
-            missions_over_cap: Mutex::new(std::collections::BTreeSet::new()),
+            last_touch: std::sync::atomic::AtomicI64::new(0),
             audit_failed: std::sync::atomic::AtomicBool::new(false),
             audit_failures: AtomicU64::new(0),
             audit_last_attempt: std::sync::atomic::AtomicI64::new(0),
@@ -1812,34 +1854,41 @@ impl Db {
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
         let mut inserted = Vec::new();
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
-            for m in missions {
+            // The worker lists the missions that matter most first, so the first one gets the newest touch.
+            let touch = self.touch_n(missions.len() as i64) + missions.len() as i64 - 1;
+            for (position, m) in missions.iter().enumerate() {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
                     // The hello is the worker's own list: a mission it still has is not deleted, whatever an
                     // older tombstone says (for example after the worker restored an earlier backup).
                     tx.execute("DELETE FROM mission_tombstones WHERE worker=? AND mission_id=?", params![name, id])?;
                     tx.execute(
-                        "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
-                        params![name, id, m.to_string()],
+                        "INSERT OR REPLACE INTO missions(worker, mission_id, info, touched_at) VALUES(?,?,?,?)",
+                        params![name, id, m.to_string(), touch - position as i64],
                     )?;
                     inserted.push(id.to_string());
                 }
             }
         }
-        let over = enforce_mission_cap(&tx, name, &inserted, MAX_MISSIONS_PER_WORKER)?;
+        let mission_notice = enforce_mission_cap(&tx, name, &inserted, MAX_MISSIONS_PER_WORKER)?;
         tx.commit()?;
-        self.note_mission_cap(name, over);
         Ok(HelloOutcome::Ok {
             generation: generation as u64,
             cursor: cursor as u64,
+            mission_notice,
         })
     }
 
-    fn note_mission_cap(&self, worker: &str, over: bool) {
-        let mut set = self.missions_over_cap.lock().unwrap_or_else(|e| e.into_inner());
-        if over {
-            set.insert(worker.to_string());
-        } else {
-            set.remove(worker);
+    /// `count` consecutive values, each above every earlier one, from the clock. Returns the first.
+    fn touch_n(&self, count: i64) -> i64 {
+        use std::sync::atomic::Ordering;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64);
+        let mut previous = self.last_touch.load(Ordering::SeqCst);
+        loop {
+            let start = now.max(previous + 1);
+            match self.last_touch.compare_exchange(previous, start + count.max(1) - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return start,
+                Err(actual) => previous = actual,
+            }
         }
     }
 
@@ -1904,21 +1953,25 @@ impl Db {
             // A mission row is written only when its summary differs from the stored one: an unchanged
             // summary would otherwise dirty (and write to the log) its page on every batch.
             let mut upsert = tx.prepare_cached(
-                "INSERT INTO missions(worker, mission_id, info) VALUES(?1, ?2, ?3) \
-                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info WHERE info IS NOT excluded.info",
+                "INSERT INTO missions(worker, mission_id, info, touched_at) VALUES(?1, ?2, ?3, ?4) \
+                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info, touched_at=excluded.touched_at WHERE info IS NOT excluded.info",
             )?;
+            let mut known = tx.prepare_cached("SELECT 1 FROM missions WHERE worker=?1 AND mission_id=?2")?;
             for mission in missions {
                 if let Some(id) = mission.get("id").and_then(Value::as_str) {
                     if tombstoned.contains(id) {
                         continue;
                     }
-                    if upsert.execute(params![worker, id, mission.to_string()])? == 1 && !inserted_missions.iter().any(|i| i == id) {
+                    // Only an id that was absent before this batch is new. An update of a stored mission is never refused.
+                    let is_new = !known.exists(params![worker, id])? && !inserted_missions.iter().any(|i| i == id);
+                    upsert.execute(params![worker, id, mission.to_string(), self.touch_n(1)])?;
+                    if is_new {
                         inserted_missions.push(id.to_string());
                     }
                 }
             }
         }
-        let mission_cap_over = if missions.is_some() { Some(enforce_mission_cap(&tx, worker, &inserted_missions, MAX_MISSIONS_PER_WORKER)?) } else { None };
+        let mission_notice = if missions.is_some() { enforce_mission_cap(&tx, worker, &inserted_missions, MAX_MISSIONS_PER_WORKER)? } else { None };
         // `stale` compares the two cursors, so it must mean that mission data is really behind. A
         // batch of heartbeats from a worker that predates `mission_cursor` cannot change a mission
         // summary: when the copy was current before the batch, it stays current.
@@ -1942,11 +1995,8 @@ impl Db {
             count = tx.query_row("SELECT COUNT(*) FROM events WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64;
         }
         tx.commit()?;
-        if let Some(over) = mission_cap_over {
-            self.note_mission_cap(worker, over);
-        }
         self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(worker.to_string(), count);
-        Ok(EventsOutcome::Accepted { cursor: through, stored })
+        Ok(EventsOutcome::Accepted { cursor: through, stored, mission_notice })
     }
 
     /// Record that `worker` deleted these missions: remove the coordinator's copy (summary and stored events)
@@ -2485,17 +2535,25 @@ impl Db {
             depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
         }
         let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
+        let mut warnings = Vec::new();
+        let mut refused = c.prepare("SELECT name, missions_refused, COALESCE(missions_refused_at, 0) FROM workers WHERE missions_refused > 0 ORDER BY name")?;
+        for r in refused.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))? {
+            let (w, n, at) = r?;
+            warnings.push(json!({
+                "code": "missions-over-cap",
+                "worker": w,
+                "missions_refused": n,
+                "last_refused_at": at,
+                "message": format!("worker {w} has more than {MAX_MISSIONS_PER_WORKER} active missions; {n} newest summaries were not indexed"),
+                "fix": "finish or delete missions on that worker (llm-bridge mission delete), then reconnect it",
+            }));
+        }
         Ok(json!({
             "db_bytes": pages * size + wal as i64,
             "command_queue_depths": depths,
             "enrolled_workers": count("SELECT COUNT(*) FROM workers")?,
             "missions_indexed": count("SELECT COUNT(*) FROM missions")?,
-            "warnings": self.missions_over_cap.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|w| json!({
-                "code": "missions-over-cap",
-                "worker": w,
-                "message": format!("worker {w} has more than {MAX_MISSIONS_PER_WORKER} active missions; the newest summaries are not indexed"),
-                "fix": "finish or delete missions on that worker (llm-bridge mission delete), then reconnect it",
-            })).collect::<Vec<_>>(),
+            "warnings": warnings,
         }))
     }
     }
