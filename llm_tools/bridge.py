@@ -1299,8 +1299,8 @@ def require_launchable_rotation(config: dict[str, Any], providers: Any, routes: 
         raise ValueError(problem)
 
 
-def _read_prompt_args(parser: argparse.ArgumentParser, noun: str = "task") -> None:
-    group = parser.add_mutually_exclusive_group(required=True)
+def _read_prompt_args(parser: argparse.ArgumentParser, noun: str = "task", *, required: bool = True) -> None:
+    group = parser.add_mutually_exclusive_group(required=required)
     group.add_argument("--file", "--prompt-file", dest="prompt_file", metavar="PATH", help=f"read the {noun} prompt from PATH; '-' reads standard input")
     group.add_argument("--prompt", help=f"the {noun} prompt as literal text; use --file for long prompts")
 
@@ -1313,8 +1313,16 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
     argv = list(getattr(args, "verifier_argv", []) or [])
     command = getattr(args, "verifier_command", None)
     after_dashes = list(getattr(args, "verifier_after_dashes", []) or [])
-    if sum(bool(form) for form in (argv, command is not None, after_dashes)) > 1:
-        raise ValueError("give one verifier form: --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    name = getattr(args, "verifier_name", None)
+    if sum(bool(form) for form in (argv, command is not None, after_dashes, name)) > 1:
+        raise ValueError("give one verifier form: --verifier-name NAME, --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    named_timeout: float | None = None
+    if name:
+        from . import config as toolconfig
+
+        declared = toolconfig.named_verifier(toolconfig.load_config(), name)
+        argv, named_timeout = declared["argv"], declared["timeout_seconds"]
+        args.verifier_files = list(declared["files"])
     if command is not None:
         try:
             argv = shlex.split(command)
@@ -1326,7 +1334,9 @@ def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
         argv = after_dashes
     if not argv:
         return None
-    timeout = float(getattr(args, "verifier_timeout", 300))
+    requested = getattr(args, "verifier_timeout", None)
+    # An explicit timeout wins over the declared one, even when it equals the default.
+    timeout = float(requested) if requested is not None else (named_timeout if named_timeout is not None else 300.0)
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
     if any("\x00" in arg for arg in argv):
@@ -1565,6 +1575,9 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     Raises ``ValueError`` for conflicting modes or an unusable folder before any
     store is opened, so a rejected command leaves no database behind.
     """
+    from .bridge_templates import prepare_args
+
+    auto_continue = prepare_args(args, auto_continue)
     prompt = prompt_from(args)
     _resolve_mode_args(args)
     args.cwd = _validated_cwd(args.cwd)
@@ -1643,8 +1656,15 @@ def _orchestration_config(args: argparse.Namespace, config: dict[str, Any] | Non
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and its first task; returns ``{"mission": ..., "task": ...}``."""
     name = args.name or derive_mission_name(prompt, "LLM Bridge mission")
+    def create(cwd: str, config: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        if getattr(args, "template_tasks", None):
+            from .bridge_templates import create_template_mission
+
+            return create_template_mission(store, args, name, prompt, cwd, config, **extra)
+        return store.create_mission(name, prompt, cwd=cwd, initial_prompt=prompt, initial_acceptance=args.acceptance, config=config, **extra)
+
     if getattr(args, "isolate", "none") != "worktree":
-        mission = store.create_mission(name, prompt, cwd=args.cwd, initial_prompt=prompt, initial_acceptance=args.acceptance, config=config)
+        mission = create(args.cwd, config)
         return {"mission": mission, "task": store.get_task(int(mission["initial_task_id"]))}
     import uuid
 
@@ -1665,8 +1685,7 @@ def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prom
         if fingerprints:
             config["verifier"]["fingerprints"] = fingerprints
     try:
-        mission = store.create_mission(name, prompt, cwd=facts["cwd"], mission_id=mission_id, initial_prompt=prompt,
-                                       initial_acceptance=args.acceptance, config=config, isolation=facts)
+        mission = create(facts["cwd"], config, mission_id=mission_id, isolation=facts)
     except BaseException:
         bridge_isolation.discard(facts["origin_cwd"], facts["worktree_path"], facts["branch"])
         raise
@@ -2629,6 +2648,10 @@ def _main(argv: list[str] | None = None) -> int:
                 return _print_missions(args)
             if args.mission_action == "delete":
                 return _mission_delete_command(args)
+            if args.mission_action == "export":
+                from .bridge_templates import export_command
+
+                return export_command(args)
             with open_store(readonly=args.mission_action == "list") as store:
                 if args.mission_action == "create":
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))

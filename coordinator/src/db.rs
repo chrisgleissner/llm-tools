@@ -1921,6 +1921,45 @@ impl Db {
             .optional()
     }
 
+    /// The most recently finished command of `operation` for `worker`, if its result body is still kept.
+    pub fn latest_done_command(&self, worker: &str, operation: &str) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state='done' AND result IS NOT NULL ORDER BY updated_at DESC LIMIT 1"),
+                params![worker, operation],
+                command_row,
+            )
+            .optional()
+    }
+
+    /// An unfinished command of `operation` for `worker` created at or after `since`.
+    pub fn open_command(&self, worker: &str, operation: &str, since: i64) -> R<Option<CommandRow>> {
+        self.r_after_writes()?
+            .query_row(
+                &format!("SELECT {CCOLS} FROM commands WHERE worker=? AND operation=? AND state!='done' AND created_at>=? ORDER BY created_at DESC LIMIT 1"),
+                params![worker, operation, since],
+                command_row,
+            )
+            .optional()
+    }
+
+    /// The placement answer given to a create request with this idempotency key.
+    pub fn placement_get(&self, request_id: &str) -> R<Option<Value>> {
+        let text: Option<String> = self
+            .r_after_writes()?
+            .query_row("SELECT value FROM meta WHERE key=?", params![format!("placement:{request_id}")], |row| row.get(0))
+            .optional()?;
+        Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    pub fn placement_put(&self, request_id: &str, placement: &Value) -> R<()> {
+        self.c()?.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("placement:{request_id}"), placement.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
         self.command_insert_audited(worker, operation, mutating, request, None)
     }
@@ -2243,6 +2282,19 @@ impl Db {
                 params![excess],
             )?;
             drop(c);
+            std::thread::sleep(MAINTENANCE_PAUSE);
+        }
+        // A stored placement answer lives as long as the create command it belongs to: the age and the
+        // row cap above remove the command, and its answer goes with it.
+        loop {
+            let n = self.c()?.execute(
+                "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'placement:%' \
+                 AND substr(key, 11) NOT IN (SELECT request_id FROM commands) LIMIT ?1)",
+                params![MAINTENANCE_BATCH],
+            )?;
+            if (n as i64) < MAINTENANCE_BATCH {
+                break;
+            }
             std::thread::sleep(MAINTENANCE_PAUSE);
         }
         self.c()?

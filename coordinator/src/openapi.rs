@@ -340,11 +340,21 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         });
     }
     if path == "/api/v1/missions" && method == "POST" {
-        op["description"] = json!("JSON body includes worker and mission.create parameters. The worker's local allow-create and real-path policy remain authoritative; local-only mission options return unsupported-remote-option.");
+        op["description"] = json!("JSON body includes mission.create parameters and an optional worker. Without worker the coordinator places the mission on the online worker that allows control and creation, has a requested provider ready in its latest usage snapshot and has the fewest active missions (ties by name), and the response carries placement {worker, reason}; with no eligible worker the answer is 409 no-eligible-worker with a reason per worker in error.details.workers. A named worker always wins. The worker's local allow-create and real-path policy remain authoritative. A command template and a verifier command or file return unsupported-remote-option; verifier_name selects a verifier declared in the worker's configuration (unknown-verifier otherwise).");
         op["requestBody"]["content"]["application/json"]["schema"] = json!({
             "allOf": [
                 {"$ref":"#/components/schemas/BoundedRequestObject"},
-                {"type":"object","required":["worker"],"properties":{"worker":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}}
+                {"type":"object","properties":{
+                    "worker":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
+                    "auto_continue":{"type":"boolean"},
+                    "include_config":{"type":"boolean"},
+                    "verifier_name":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z0-9][a-z0-9_-]*$"},
+                    "verifier_timeout":{"type":"number","exclusiveMinimum":0,"maximum":3600},
+                    "log_max_bytes":{"type":"integer","minimum":1024,"maximum":1073741824},
+                    "log_rotations":{"type":"integer","minimum":0,"maximum":20},
+                    "log_retained_runs":{"type":"integer","minimum":1,"maximum":1000},
+                    "capacity_refresh_seconds":{"type":"integer","minimum":5,"maximum":3600}
+                }}
             ]
         });
     }
@@ -660,7 +670,11 @@ mod tests {
         );
         let create = &doc["paths"]["/api/v1/missions"]["post"];
         let body_schema = &create["requestBody"]["content"]["application/json"]["schema"];
-        assert_eq!(body_schema["allOf"][1]["required"], json!(["worker"]));
+        assert!(
+            body_schema["allOf"][1].get("required").is_none(),
+            "worker is optional: the coordinator places the mission"
+        );
+        assert_eq!(body_schema["allOf"][1]["properties"]["verifier_name"]["type"], "string");
         assert_eq!(body_schema["allOf"][1]["properties"]["worker"]["type"], "string");
         let settings = &doc["paths"]["/api/v1/missions/{id}/settings"];
         assert_eq!(

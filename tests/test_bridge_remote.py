@@ -96,7 +96,8 @@ def test_login_status_logout(state, tmp_path, capsys):
     [
         (["mission", "create", "--prompt", "new", "--cwd", ".", "--providers", "codex"], "mission.create",
          {"prompt": "new", "cwd": ".", "name": "", "acceptance": [], "providers": "codex", "routes": None,
-          "headless": False, "native_tui": False, "teams": None, "token_spend": None, "trust_folder": False, "unsupported_options": []}),
+          "headless": False, "native_tui": False, "teams": None, "token_spend": None, "trust_folder": False, "unsupported_options": [],
+          "auto_continue": False, "include_config": False}),
         (["mission", "settings", "--mission", "m1"], "mission.settings.get", {}),
         (["mission", "set", "--mission", "m1", "--auto-continue", "on", "--teams", "off"], "mission.settings.patch",
          {"auto_continue": True, "teams": False, "token_spend": None, "suspend_when_rate_limited": None, "colour": None}),
@@ -149,9 +150,19 @@ def test_request_mapping(argv, operation, params):
 
 
 def test_create_maps_trust_folder_and_names_unsupported_local_options():
-    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--trust-folder", "--include-config", "--verifier-arg", "true"), "ws")
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--trust-folder", "--verifier-arg", "true", "--command-template", "x"), "ws")
     assert request.params["trust_folder"] is True
-    assert request.params["unsupported_options"] == ["--include-config", "--verifier-arg"]
+    assert request.params["unsupported_options"] == ["--command-template", "--verifier-arg"]
+
+
+def test_create_maps_the_options_the_worker_now_accepts():
+    request, _ = remote.request_for(args(
+        "mission", "create", "--prompt", "new", "--cwd", ".", "--auto-continue", "--include-config", "--verifier-name", "unit",
+        "--verifier-timeout", "60", "--log-max-bytes", "2048", "--log-rotations", "1", "--log-retained-runs", "5",
+        "--capacity-refresh-seconds", "30"), "ws")
+    assert request.params["unsupported_options"] == []
+    assert (request.params["auto_continue"], request.params["include_config"], request.params["verifier_name"]) == (True, True, "unit")
+    assert [request.params[key] for key in ("verifier_timeout", "log_max_bytes", "log_rotations", "log_retained_runs", "capacity_refresh_seconds")] == [60.0, 2048, 1, 5, 30]
 
 
 def test_create_maps_the_run_mode_and_refuses_the_local_only_verifier_forms():
@@ -159,6 +170,7 @@ def test_create_maps_the_run_mode_and_refuses_the_local_only_verifier_forms():
     assert (request.params["native_tui"], request.params["headless"]) == (True, False)
     request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--verifier", "pytest -q"), "ws")
     assert request.params["unsupported_options"] == ["--verifier"]
+    assert "verifier_name" not in request.params
 
 
 @pytest.mark.parametrize("argv", [["pause", "--mission", "m1", "--after-task"], ["stop", "--mission", "m1", "--after-task", "2"]])
