@@ -427,6 +427,8 @@ export function rowSig(item: Item, o: RowOptions): string {
 
 export function missionRow(item: Item, o: RowOptions): HTMLElement {
   const e = item.entry;
+  // UXR-056: the digest of a finished mission has no provider. A failed row asks once for its activity line (which names the provider of its last run), so the cell is not blank. An answer, even without a provider, is kept and not asked for again.
+  if (o.layout === "cells" && item.state.id === "failed" && !providerLabel(e) && !hasLine(e)) void loadLines([e]);
   const name = e.mission.name || "Untitled mission";
   const reasons = reasonLines(item);
   const updated = age(e.mission.updated_at);

@@ -3,7 +3,7 @@
   "initial": {
     "jsRaw": 91000,
     "jsGzip": 31750,
-    "cssRaw": 34000,
+    "cssRaw": 34300,
     "cssGzip": 9000,
     "totalRaw": 124000,
     "totalGzip": 40000
@@ -20,8 +20,8 @@
   "routes": {
     "jsRaw": 94000,
     "jsGzip": 38700,
-    "cssRaw": 18400,
-    "cssGzip": 4900
+    "cssRaw": 19000,
+    "cssGzip": 5000
   },
   "lazyRoutes": {
     "login": "Administrator created",

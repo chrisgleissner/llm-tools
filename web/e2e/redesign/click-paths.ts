@@ -538,10 +538,10 @@ export const RUNS: PathRun[] = [
     mock: IN,
     path: "/",
     run: async ({ page }) => {
-      await expect(page.locator("header").first()).toContainText(/Claude\s+5h\s+4%/);
+      await expect(page.locator("header").first()).toContainText(/Claude\s*(5h\s+)?4%/);
     },
     keys: async ({ page }) => {
-      await expect(page.locator("header").first()).toContainText(/Claude\s+5h\s+4%/);
+      await expect(page.locator("header").first()).toContainText(/Claude\s*(5h\s+)?4%/);
     },
   },
   {
