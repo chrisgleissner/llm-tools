@@ -13,7 +13,7 @@ Team: the lead (Claude Opus) decides and reviews. Claude Sonnet supervisors desi
 diffs, run tests, commit and push. Codex `gpt-6.1-sol` implements, Codex `gpt-6-luna` does very simple
 edits, Claude Haiku does git and register work. Every agent commits and pushes after each milestone.
 
-Last updated: 2026-11-13 21:00 UTC.
+Last updated: 2026-11-13 22:20 UTC.
 
 ## Merged
 
@@ -28,12 +28,14 @@ Last updated: 2026-11-13 21:00 UTC.
 ## Open pull requests
 
 - [ ] #100 UXR-053..057: blocking-time fix + main merged (671c765e); baseline verified; Windows `hardening.rs:280` flake to rerun, then merge
-- [ ] New flake to fix: `coordinator/tests/hardening.rs:280` `buffered_large_bodies_are_bounded` (Windows, empty assertion message)
+- [ ] New flake to fix: `coordinator/tests/hardening.rs:280` `buffered_large_bodies_are_bounded` (Windows, empty assertion message); fix in progress on branch `fix/hardening-flake`
 - [ ] #101 PRD-013 diagnostics view: merge main after #100; PRD-013 must stay [~] (guided restore not done)
 - [ ] #103 batch C (PRD-017/018 close; 019/020/021/032 stay [~]): merge main after #101
 - [ ] #74 Playwright 1.65 (FIND-016): after the web PRs, regenerate baselines in the 1.65 image
 - [ ] #107 WP10a release engineering (PRD-001/002/005/006): review said fix first; finishing every criterion
-- [ ] #108 WP1 Resource API (API-001..016): in progress; needs a security review before ready
+- [ ] #108 WP1 Resource API (API-001..016): security review said fix first; fixes in progress (schema v19 command creator,
+      allow-list projection of command records, fail-closed per-operation scope table, idempotency keys
+      unique per principal with random command ids, `mission` parameter validation); then re-review
 - [ ] #64 secapi draft: source for WP1 to WP4 only; close when the last split merges
 
 - [ ] #110 WP9a coordinator operations: PRD-011 update check (off by default), PRD-012 support bundle,
