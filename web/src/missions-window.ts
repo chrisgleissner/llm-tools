@@ -22,7 +22,7 @@ export interface WindowEnv {
 }
 
 const ROW_GUESS = 48;
-const HEAD_HEIGHT = 32;
+const HEAD_HEIGHT = 24;
 
 /** `threshold`: a list of at most this many entries is built whole; a longer one is a window of rows with spacers for the rest, so the list holds a bounded number of nodes. */
 export function missionWindow({ list, specs, threshold, stopped, h, reconcile }: WindowEnv): MissionWindow {

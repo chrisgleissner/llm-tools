@@ -299,7 +299,7 @@ byte of gzip because the chunk file names, which depend on the path, compress sl
 Addendum, 2026-11-13 (PRD-014): the gzip cap of the initial JavaScript rises from 31750 to 32000 bytes
 (the raw cap stays 91000). The Missions list needs group headings and a window of rows at 500 missions.
 Both are in a lazy module (`web/src/missions-window.ts`) that the page loads when the active list has
-10 or more missions, and that receives `h` and `reconcile` from the page so that esbuild does not split
+60 or more missions, and that receives `h` and `reconcile` from the page so that esbuild does not split
 the shared modules into two chunks. The first load still grows: 31717 gzip before, 31911 after
 (+194, of which 142 is the page's own change and 111 a new 110-byte chunk for the route stylesheet
 names, less 62 from the re-split). A fully static version measured 32712. The next change to the

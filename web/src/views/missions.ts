@@ -25,8 +25,8 @@ interface Reply {
 
 /** A list of more mission rows than this is drawn as a window of rows plus spacers; every row of a shorter one is built. */
 export const VIRTUAL_FROM = 60;
-/** Group headings are drawn from this many active missions on: a short list has nothing to group. */
-export const HEADINGS_FROM = 10;
+/** Group headings are drawn from this many active missions on. A list that fits a screen or two is read by its state pills, and a heading row would push rows below the fold (T29). */
+export const HEADINGS_FROM = 60;
 
 const updatedMs = (i: Item) => Date.parse(i.entry.mission.updated_at ?? "") || 0;
 
