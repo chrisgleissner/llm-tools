@@ -5,6 +5,8 @@ import { absTime, h, relFromMs } from "./dom";
 import { store, subscribe } from "./store";
 
 const REFRESH_MS = 60_000;
+/** Below this width of the chip area (a phone) the chips start in their compact form: the full chips would only be measured, found clipped and drawn again. */
+const NARROW_REM = 30;
 
 interface Chip {
   provider: string;
@@ -42,6 +44,10 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   let timer = 0;
   let first_read = 0;
   let disposed = false;
+  let width = 0;
+  let drawn = "";
+  let paints = 0;
+  let frame = 0;
 
   // Every provider keeps its percentage left (UXR-053). When the chips do not fit they take a compact form (class "tight"): no scope, meter or the word "left", and a waiting chip puts its reset under the percentage.
   // Only when even that does not fit does the limiting provider show alone. The container clips on its start edge, where scrollWidth shows nothing, so the first chip's position tells.
@@ -54,13 +60,25 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     return h("a", { class: `cap-chip${c.waiting ? " waiting" : ""}`, href: "/usage", title: c.title }, ...parts, reset);
   };
   const clipped = (): boolean => (el.firstElementChild?.getBoundingClientRect().left ?? 0) < el.getBoundingClientRect().left - 0.5;
+  const draw = (tight: boolean): void => {
+    el.classList.toggle("tight", tight);
+    el.replaceChildren(...chips.map((c) => chip(c, tight)));
+  };
+  // The chips are drawn once per change of data or of width, in an animation frame, with one measurement (two where the compact form is tried after the full one): the width comes from the
+  // ResizeObserver, a read after a write forces a layout of the whole page, and a refresh with the same data draws nothing. `data-paints` counts the draws for the test.
   const paint = (): void => {
-    el.classList.remove("tight");
-    el.replaceChildren(...chips.map((c) => chip(c, false)));
-    if (!clipped()) return;
-    el.classList.add("tight");
-    el.replaceChildren(...chips.map((c) => chip(c, true)));
-    if (clipped()) el.replaceChildren(...Array.from(el.children).slice(0, 1));
+    const key = JSON.stringify([chips, Math.round(width)]);
+    if (key === drawn || !chips.length) return;
+    drawn = key;
+    el.dataset["paints"] = String(++paints);
+    const narrow = width < NARROW_REM * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
+    draw(narrow);
+    if (!narrow && clipped()) draw(true);
+    if (el.classList.contains("tight") && clipped()) el.replaceChildren(...Array.from(el.children).slice(0, 1));
+  };
+  const schedule = (): void => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(paint);
   };
 
   const load = async (): Promise<void> => {
@@ -70,7 +88,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
       const snapshot = await api.usageSnapshot(name);
       if (disposed || name !== worker) return;
       chips = chipsFrom(snapshot);
-      paint();
+      schedule();
     } catch {
       /* keep the last chips: a failed read is not news */
     }
@@ -91,7 +109,10 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   const unsubscribe = subscribe(sync);
   timer = window.setInterval(tick, REFRESH_MS);
   document.addEventListener("visibilitychange", tick);
-  const watch = new ResizeObserver(() => paint());
+  const watch = new ResizeObserver(([entry]) => {
+    width = entry?.contentRect.width ?? 0;
+    schedule();
+  });
   watch.observe(el);
   sync();
   return {
@@ -103,6 +124,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
       watch.disconnect();
+      cancelAnimationFrame(frame);
     },
   };
 }

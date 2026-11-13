@@ -34,6 +34,26 @@ uxr({ t: "T49", uxr: ["UXR-053"], needs: [...NEEDS] }, "UXR-053: at 360 every pr
   await evidence(page, info, ["UXR-053"], "quota-chips-360");
 });
 
+uxr({ t: "T49", uxr: ["UXR-053"], needs: [...NEEDS] }, "UXR-053: the capacity chips are drawn once per change of data or width, and a refresh with the same data draws nothing and forces no layout", async ({ page }, info) => {
+  test.skip(!only(info), "measured at the widths set here, in desktop Chromium");
+  await page.setViewportSize({ width: 360, height: 640 });
+  const app = await openApp(page, DENSE, "/");
+  await expect(page.locator("#capacity .cap-chip")).toHaveCount(2);
+  const paints = async (): Promise<number> => Number(await page.locator("#capacity").getAttribute("data-paints"));
+  const reads = (): number => app.requests().filter((r) => r.operation === "usage.snapshot").length;
+  expect(await paints(), "the first read of the data and the width draw the chips once (twice at most)").toBeLessThanOrEqual(2);
+  const before = { paints: await paints(), reads: reads() };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Performance.enable");
+  const layouts = async (): Promise<number> => ((await cdp.send("Performance.getMetrics")).metrics.find((m) => m.name === "LayoutCount")?.value ?? 0);
+  const layoutsBefore = await layouts();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); // the refresh that a tab coming back to the front makes
+  await expect.poll(() => reads(), { message: "the refresh asks the worker again" }).toBeGreaterThan(before.reads);
+  await page.waitForTimeout(400);
+  expect(await paints(), "the same data does not draw the chips again").toBe(before.paints);
+  expect((await layouts()) - layoutsBefore, "and the refresh forces no layout of the page").toBeLessThanOrEqual(1);
+});
+
 // ---- UXR-054 ------------------------------------------------------------------------------------------------------------
 async function filterIsNotClipped(page: Page, path: string, info: TestInfo): Promise<void> {
   test.skip(!only(info), "measured at the widths set here, in desktop Chromium");
