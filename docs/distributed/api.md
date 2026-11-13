@@ -40,12 +40,18 @@ remaining CLI parity operations are being added in this follow-up.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
-/api/v1/missions/{id}`, `/tasks`, `/events` and `/operations` are thin adapters over
-the typed `mission.status`, `task.list`, `mission.events` and `session.list` operations. They return
+/api/v1/missions/{id}`, `/station`, `/tasks`, `/events` and `/operations` are thin adapters over
+the typed `mission.status`, `mission.station`, `task.list`, `mission.events` and `session.list` operations. The station resource returns only the bounded station projection (configuration, observed provider, mode and current station context). They return
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+
+`GET /api/v1/workers/{name}/sessions` returns the worker's provider sessions (typed `session.list`) and
+`GET /api/v1/workers/{name}/usage` returns its provider capacity snapshot (typed `usage.snapshot`). Both
+need the `read` scope and return the durable command envelope like the mission resources. `sessions` takes
+`mission`, `limit` (1 to 1000, default 100), `offset` or an opaque `cursor` (not together with `offset`),
+and `wait_ms`; other query parameters are refused.
 
 `GET /api/v1/missions` (the mission list across workers) carries, for each mission the worker
 reports them for, `attention` (`{kind, message, tasks}` or `null`: why the operator is needed) and
@@ -335,8 +341,8 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `theme` | Exclusion: previews local terminal colors; no REST operation. |
 | `console` | Exclusion: opens local curses control station; remote web UI is the replacement. |
 | `control` | Exclusion: opens local curses control station; remote web UI is the replacement. |
-| `usage` | Exclusion: embeds local `llm-usage` data; no coordinator usage route. |
-| `station` | Exclusion: selects local station; remote terminal view is `GET /api/v1/terminal` WebSocket. |
+| `usage` | The local dashboard command is excluded. Typed `usage.snapshot` (the provider capacity `llm-usage` reports) is the read-scoped resource `GET /api/v1/workers/{name}/usage`, which the web console and `--target` use. |
+| `station` | The local interactive station selector is excluded; bounded station state is `GET /api/v1/missions/{id}/station` with `worker=NAME`, and terminal viewing remains the scoped `/api/v1/terminal` WebSocket. |
 | `rotation` | Typed `mission.rotation.get` / `mission.rotation.put`; resources `GET` / `PUT /api/v1/missions/{id}/rotation`. |
 | `steer` | Typed `mission.steer`; operate-scoped resource `POST /api/v1/missions/{id}/steer`; supports every CLI kind. Prompt files are read client-side and prompt text is sent in the typed request. |
 | `_station-gc` | Exclusion: private internal tmux cleanup command; never remote. |
@@ -471,6 +477,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/workers/{name}/doctor` |
 | `GET /api/v1/workers/{name}/agents` |
+| `GET /api/v1/workers/{name}/sessions` |
+| `GET /api/v1/workers/{name}/usage` |
 | `GET /api/v1/workers/{name}/audit` |
 | `POST /api/v1/workers/{name}/gc` |
 | `GET /api/v1/tokens` |
@@ -484,6 +492,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `DELETE /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
+| `GET /api/v1/missions/{id}/station` |
 | `GET /api/v1/missions/{id}/agents` |
 | `GET /api/v1/missions/{id}/settings` |
 | `PATCH /api/v1/missions/{id}/settings` |

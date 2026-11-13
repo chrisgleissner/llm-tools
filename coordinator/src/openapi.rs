@@ -183,6 +183,8 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
     if path == "/api/v1/commands/{id}"
         || path == "/api/v1/commands"
+        || matches!(path, "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage")
+        || path == "/api/v1/missions/{id}/station"
         || (matches!(
             path,
             "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
@@ -387,6 +389,18 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/workers/{name}/doctor" || path == "/api/v1/workers/{name}/agents" {
         op["parameters"] = json!([{"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
                                   {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/workers/{name}/sessions" {
+        op["parameters"] = json!([
+            {"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63,"description":"Optional mission selector; omitted lists sessions across the worker."}},
+            {"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":1000,"default":100}},
+            {"name":"cursor","in":"query","required":false,"schema":{"type":"string","maxLength":2048,"description":"Opaque continuation cursor; cannot be combined with offset."}},
+            {"name":"offset","in":"query","required":false,"schema":{"type":"integer","minimum":0,"default":0,"description":"Legacy numeric position; use cursor for continuation."}},
+            {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}
+        ]);
+    }
+    if path == "/api/v1/workers/{name}/usage" {
+        op["parameters"] = json!([{"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
     }
     if path == "/api/v1/workers/{name}/audit" {
         op["parameters"] = json!([{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":10000}},

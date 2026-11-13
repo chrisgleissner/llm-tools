@@ -557,3 +557,23 @@ def test_remote_delete_of_a_running_mission_reports_the_workers_refusal_without_
 def test_remote_delete_needs_the_mission_named(monkeypatch, capsys):
     code, _api = _remote_delete(monkeypatch, {}, "--yes")
     assert code == 2 and "name the mission to delete" in capsys.readouterr().err
+
+
+def test_worker_sessions_usage_and_mission_station_use_resource_routes():
+    routes = {
+        ("GET", "/api/v1/workers/ws/sessions"): (200, {"state": "done", "result": {"sessions": []}}),
+        ("GET", "/api/v1/workers/ws/usage"): (200, {"state": "done", "result": {"providers": []}}),
+        ("GET", "/api/v1/missions/m1/station"): (200, {"state": "done", "result": {"mission_id": "m1"}}),
+    }
+    api = client(routes)
+    commands = remote.commands
+    sessions = commands.CommandRequest("session.list", {"limit": 7, "offset": 3}, target="ws", request_id="req-sessions")
+    usage = commands.CommandRequest("usage.snapshot", {}, target="ws", request_id="req-usage")
+    station = commands.CommandRequest("mission.station", {}, mission_id="m1", target="ws", request_id="req-station")
+    assert api.submit_resource("ws", sessions) == {"sessions": []}
+    assert api.submit_resource("ws", usage) == {"providers": []}
+    assert api.submit_resource("ws", station) == {"mission_id": "m1"}
+    queries = [call[3].split("8443", 1)[1] for call in api.opener.calls]
+    assert queries[0].startswith("/api/v1/workers/ws/sessions?") and "limit=7" in queries[0] and "offset=3" in queries[0]
+    assert queries[1].startswith("/api/v1/workers/ws/usage?")
+    assert queries[2].startswith("/api/v1/missions/m1/station?") and "worker=ws" in queries[2]

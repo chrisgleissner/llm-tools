@@ -161,7 +161,7 @@ class Client:
         """Use the resource route when one exists; return ``None`` for legacy-only operations."""
         mission = request.mission_id
         op = request.operation
-        if mission is None and op not in {"mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc"}:
+        if mission is None and op not in {"mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc", "session.list", "usage.snapshot"}:
             return None
         base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}" if mission is not None else ""
         params = dict(request.params)
@@ -253,6 +253,15 @@ class Client:
                 return None  # the events resource pages by cursor only; these filters go through the typed command route
             query = urllib.parse.urlencode({"worker": target, "after": params.get("after", 0), "limit": params.get("limit", 50), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/events?{query}", timeout=wait + 15)
+        elif op == "session.list" and mission is None:
+            query_values = {"limit": params.get("limit", 100), "offset": params.get("offset", 0), "wait_ms": wait_ms}
+            status, body = self.call("GET", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/sessions?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
+        elif op == "usage.snapshot":
+            query = urllib.parse.urlencode({"wait_ms": wait_ms})
+            status, body = self.call("GET", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/usage?{query}", timeout=wait + 15)
+        elif op == "mission.station":
+            query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}/station?{query}", timeout=wait + 15)
         elif op == "session.list":
             query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 100), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/operations?{query}", timeout=wait + 15)

@@ -1235,6 +1235,134 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn worker_sessions_and_usage_are_readable_through_resource_routes() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "resource-read-worker", 0).await;
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, "/api/v1/workers/w1/sessions?limit=25&offset=5&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if sessions.is_finished() {
+        let response = sessions.await.unwrap();
+        panic!("sessions resource returned early: {} {}", response.status(), response.text().await.unwrap());
+    }
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "session.list");
+    assert_eq!(command["payload"]["params"]["mission"], "");
+    assert_eq!(command["payload"]["params"]["limit"], 25);
+    assert_eq!(command["payload"]["params"]["offset"], 5);
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[],"total":5,"offset":5},"error":null})).await;
+    let response = sessions.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["offset"], 5);
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, "/api/v1/workers/w1/sessions?limit=1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["params"]["offset"], 0);
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[{"operation_id":"op-1"}],"total":2,"offset":0},"error":null})).await;
+    let body: Value = sessions.await.unwrap().json().await.unwrap();
+    let cursor = body["result"]["result"]["next_cursor"].as_str().expect("next cursor").to_owned();
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, &format!("/api/v1/workers/w1/sessions?limit=1&cursor={cursor}&wait_ms=5000"))
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["params"]["offset"], 1, "cursor continues at the next stable offset");
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[{"operation_id":"op-2"}],"total":2,"offset":1},"error":null})).await;
+    assert_eq!(sessions.await.unwrap().status().as_u16(), 200);
+
+    let usage_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let usage = tokio::spawn(async move { usage_api.rb(Method::GET, "/api/v1/workers/w1/usage?wait_ms=5000").send().await.unwrap() });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "usage.snapshot");
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"usage.snapshot","outcome":"ok","result":{"providers":[],"observed_at":"2026-11-08T00:00:00Z"},"error":null})).await;
+    let response = usage.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["providers"], json!([]));
+
+    let station_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let station = tokio::spawn(async move {
+        station_api
+            .rb(Method::GET, "/api/v1/missions/mission-1/station?worker=w1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.station");
+    assert_eq!(command["payload"]["mission_id"], "mission-1");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.station","outcome":"ok","result":{"mission_id":"mission-1","stations":[{"id":"codex","status":"configured"}],"station_mode":{"actual_mode":"background"}},"error":null}),
+        )
+        .await;
+    let response = station.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["stations"][0]["id"], "codex");
+    assert!(body["result"]["result"].get("tasks").is_none(), "the station resource exposes no task prompts");
+
+    let bad_station_query = api.get("/api/v1/missions/mission-1/station?worker=w1&unknown=true").await;
+    assert_eq!(bad_station_query.0, 400);
+
+    assert_eq!(api.get("/api/v1/workers/w1/sessions?limit=1001").await.0, 400);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
     let env = boot().await;
     let api = env.admin().await;
