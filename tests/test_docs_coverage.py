@@ -181,3 +181,29 @@ def test_every_public_flag_of_the_other_tools_is_documented(module: str) -> None
     text = user_pages()
     missing = sorted(flag for flag in flags if not re.search(re.escape(flag) + r"(?![\w-])", text))
     assert not missing, f"flags of llm_tools/{module}.py that README.md and the pages it links to never mention: {missing}"
+
+
+# --------------------------------------------------------------------------- coordinator error codes (PRD-006)
+
+COORDINATOR_TROUBLESHOOTING = ROOT / "docs" / "distributed" / "troubleshooting.md"
+_RUST_CODE = re.compile(r'\b(?:err|perr)\(\s*(?:StatusCode::[A-Z_]+,\s*)?"([a-z][a-z0-9-]*)"|"code"\s*:\s*"([a-z][a-z0-9-]*)"')
+
+
+def coordinator_error_codes() -> dict[str, set[str]]:
+    """Every error code the Rust coordinator raises through err()/perr() or a literal `"code"` field."""
+    found: dict[str, set[str]] = {}
+    for path in sorted(p for p in (ROOT / "coordinator" / "src").glob("*.rs") if p.name != "config_check.rs"):  # config_check reports a field named code, not an API error
+        for match in _RUST_CODE.finditer(_read(path)):
+            code = match.group(1) or match.group(2)
+            found.setdefault(code, set()).add(path.name)
+    return found
+
+
+def test_the_coordinator_error_collector_finds_known_codes() -> None:
+    assert {"unauthorized", "rate-limited", "worker-offline", "invalid-cursor"} <= set(coordinator_error_codes())
+
+
+def test_every_coordinator_error_code_has_a_troubleshooting_anchor() -> None:
+    present = anchors(COORDINATOR_TROUBLESHOOTING)
+    missing = {code: sorted(files) for code, files in coordinator_error_codes().items() if code not in present}
+    assert not missing, f"coordinator error codes without a '### <code>' heading in docs/distributed/troubleshooting.md: {missing}"
