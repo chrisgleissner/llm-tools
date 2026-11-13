@@ -45,6 +45,31 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api_tokens_are_never_accepted_from_query_strings() {
+    let env = boot().await;
+    let _admin = env.admin().await;
+    let secret = "secret-url-rejected";
+    env.srv
+        .state
+        .db
+        .token_create_scoped("url-rejected", &bridge_coordinator::auth::sha256_hex(secret), None, &["read".to_string()])
+        .unwrap();
+    let header = env
+        .api()
+        .bare(Method::GET, "/api/v1/missions")
+        .header("authorization", format!("Bearer {secret}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(header.status().as_u16(), 200, "the same token works in the Authorization header");
+    let response = env.api().bare(Method::GET, &format!("/api/v1/missions?token={secret}")).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 401, "URL credentials must not authenticate an API request");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["code"], "unauthorized");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn security_notifications_are_durable_scoped_and_dismissible() {
     let env = boot().await;
     let api = env.admin().await;
@@ -58,6 +83,7 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
         .iter()
         .find(|item| item["category"] == "api_token_created")
         .expect("token creation event");
+    assert!(token_notice["created_at"].as_str().unwrap().ends_with('Z'));
     let id = token_notice["id"].as_str().unwrap();
     let (status, _) = api.send(api.rb(Method::DELETE, &format!("/api/v1/security/notifications/{id}"))).await;
     assert_eq!(status, 200);
@@ -251,6 +277,28 @@ async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
         .await
         .unwrap();
     assert_eq!(forbidden_terminal.status().as_u16(), 403);
+    for (method, path) in [
+        (Method::GET, "/api/v1/workers/worker-b/doctor"),
+        (Method::GET, "/api/v1/workers/worker-b/agents"),
+        (Method::GET, "/api/v1/workers/worker-b/sessions"),
+        (Method::GET, "/api/v1/workers/worker-b/usage"),
+        (Method::GET, "/api/v1/workers/worker-b/audit"),
+        (Method::POST, "/api/v1/workers/worker-b/gc"),
+        (Method::POST, "/api/v1/workers/worker-b/restore"),
+        (Method::GET, "/api/v1/missions/private-mission/events?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/operations?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/agents?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/settings?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/rotation?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/proposals?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks?worker=worker-b"),
+        (Method::GET, "/api/v1/missions/private-mission/tasks/1?worker=worker-b"),
+    ] {
+        let response = admin.bare(method.clone(), path).bearer_auth(token).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 403, "worker-bound token must not reach {method} {path}");
+        let body = response.json::<Value>().await.unwrap();
+        assert_eq!(body["code"], "token-worker-denied", "{method} {path}: {body}");
+    }
     let forbidden_create = admin
         .bare(Method::POST, "/api/v1/missions")
         .bearer_auth(token)
@@ -393,7 +441,7 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     let (_, body) = api.get("/api/v1/auth/state").await;
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["username"], "admin");
-    assert!(body["session"]["expires_at"].as_i64().unwrap() > bridge_coordinator::now());
+    assert!(body["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     env.stop().await;
 }
 
@@ -465,10 +513,11 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
         let (_, s) = api.get("/api/v1/auth/state").await;
         assert_eq!(s["session"]["remember"], false);
         assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS_SHORT);
-        let expires = s["session"]["expires_at"].as_i64().unwrap();
+        assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
+        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
+        let expires = env.srv.state.db.session_get(&hash).unwrap().unwrap().expires_at;
         assert!((expires - now - SESSION_ABSOLUTE_SECS_SHORT).abs() < 30, "{expires}");
         // Idle for a little over the short idle limit: expired.
-        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
         env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
         assert_eq!(api.get("/api/v1/workers").await.0, 401, "short idle limit");
     }
@@ -479,6 +528,7 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
     let (_, s) = api.get("/api/v1/auth/state").await;
     assert_eq!(s["session"]["remember"], true);
     assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS);
+    assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
     env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
     assert_eq!(api.get("/api/v1/workers").await.0, 200, "remembered device is still signed in");
@@ -797,8 +847,15 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let mut token_api = env.api();
     token_api.bearer = Some(secret.clone());
 
-    for _ in 0..30 {
-        let (status, _) = token_api.post("/api/v1/commands", json!({})).await;
+    for index in 0..30 {
+        let response = token_api
+            .rb(Method::POST, "/api/v1/commands")
+            .header("idempotency-key", if index == 0 { "audit-request-001" } else { "audit-request-002" })
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
         assert_eq!(status, 400, "malformed request should reach command validation");
     }
     let response = token_api.rb(Method::POST, "/api/v1/commands").json(&json!({})).send().await.unwrap();
@@ -818,6 +875,11 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let token_uses: Vec<_> = audit.iter().filter(|row| row["action"] == "token.use").collect();
     assert_eq!(token_uses.iter().filter(|row| row["actor"] == "token:mutator").count(), 32);
     assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
+    assert!(token_uses.iter().any(|row| {
+        row["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("scopes=admin") && detail.contains("request_id=audit-request-001"))
+    }));
     assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
     env.stop().await;
 }
@@ -904,6 +966,7 @@ async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed()
     assert_eq!(status, 200);
     assert_eq!(workers["workers"][0]["policy"]["allow_root_count"], 1);
     assert_eq!(workers["workers"][0]["policy"]["allow_create"], true);
+    assert!(workers["workers"][0]["last_seen"].as_str().unwrap().ends_with('Z'));
     assert!(!serde_json::to_string(&workers).unwrap().contains("/srv/work"));
     let (status, worker) = api.get("/api/v1/workers/build-1").await;
     assert_eq!(status, 200);
@@ -1231,6 +1294,276 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn worker_sessions_and_usage_are_readable_through_resource_routes() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "resource-read-worker", 0).await;
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, "/api/v1/workers/w1/sessions?limit=25&offset=5&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if sessions.is_finished() {
+        let response = sessions.await.unwrap();
+        panic!("sessions resource returned early: {} {}", response.status(), response.text().await.unwrap());
+    }
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "session.list");
+    assert_eq!(command["payload"]["params"]["mission"], "");
+    assert_eq!(command["payload"]["params"]["limit"], 25);
+    assert_eq!(command["payload"]["params"]["offset"], 5);
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[],"total":5,"offset":5},"error":null})).await;
+    let response = sessions.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["offset"], 5);
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, "/api/v1/workers/w1/sessions?limit=1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["params"]["offset"], 0);
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[{"operation_id":"op-1"}],"total":2,"offset":0},"error":null})).await;
+    let body: Value = sessions.await.unwrap().json().await.unwrap();
+    let cursor = body["result"]["result"]["next_cursor"].as_str().expect("next cursor").to_owned();
+
+    let sessions_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let sessions = tokio::spawn(async move {
+        sessions_api
+            .rb(Method::GET, &format!("/api/v1/workers/w1/sessions?limit=1&cursor={cursor}&wait_ms=5000"))
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["params"]["offset"], 1, "cursor continues at the next stable offset");
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[{"operation_id":"op-2"}],"total":2,"offset":1},"error":null})).await;
+    assert_eq!(sessions.await.unwrap().status().as_u16(), 200);
+
+    let usage_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let usage = tokio::spawn(async move { usage_api.rb(Method::GET, "/api/v1/workers/w1/usage?wait_ms=5000").send().await.unwrap() });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "usage.snapshot");
+    worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"usage.snapshot","outcome":"ok","result":{"providers":[],"observed_at":"2026-11-08T00:00:00Z"},"error":null})).await;
+    let response = usage.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["providers"], json!([]));
+
+    let station_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let station = tokio::spawn(async move {
+        station_api
+            .rb(Method::GET, "/api/v1/missions/mission-1/station?worker=w1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.station");
+    assert_eq!(command["payload"]["mission_id"], "mission-1");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.station","outcome":"ok","result":{"mission_id":"mission-1","stations":[{"id":"codex","status":"configured"}],"station_mode":{"actual_mode":"background"}},"error":null}),
+        )
+        .await;
+    let response = station.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["result"]["stations"][0]["id"], "codex");
+    assert!(body["result"]["result"].get("tasks").is_none(), "the station resource exposes no task prompts");
+
+    let bad_station_query = api.get("/api/v1/missions/mission-1/station?worker=w1&unknown=true").await;
+    assert_eq!(bad_station_query.0, 400);
+
+    assert_eq!(api.get("/api/v1/workers/w1/sessions?limit=1001").await.0, 400);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_missions_resource_preserves_content_for_read_tokens() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "missions-read-worker", 0).await;
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"mission-reader","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let secret = created["secret"].as_str().unwrap().to_owned();
+    for (query, include_config) in [("", false), ("&include_config=false", false), ("&include_config=true", true)] {
+        let mut read_api = env.api();
+        read_api.bearer = Some(secret.clone());
+        let list = tokio::spawn(async move {
+            read_api
+                .rb(Method::GET, &format!("/api/v1/workers/w1/missions?wait_ms=5000{query}"))
+                .send()
+                .await
+                .unwrap()
+        });
+        let command = worker.recv().await;
+        assert_eq!(command["payload"]["operation"], "mission.list");
+        assert_eq!(command["payload"]["params"]["include_config"], include_config);
+        let mut mission = json!({"id":"m1","cwd":"/srv/work","objective":"ship it","repo_identity":"repo-1"});
+        if include_config {
+            mission["config"] = json!({"headless":false});
+        }
+        let result = json!({"missions":[mission]});
+        worker.send("command.result", json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.list","outcome":"ok","result":result,"error":null})).await;
+        let response = list.await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["result"]["result"], result);
+    }
+    let mut read_api = env.api();
+    read_api.bearer = Some(secret);
+    for query in ["include_config=maybe", "unknown=true"] {
+        let (status, body) = read_api.get(&format!("/api/v1/workers/w1/missions?{query}")).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["type"], "https://llm-tools.dev/problems/invalid-request");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mission_resources_keep_mission_content_that_command_records_remove() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "content-worker", 0).await;
+    let read_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let show = tokio::spawn(async move { read_api.rb(Method::GET, "/api/v1/missions/m1?worker=w1&wait_ms=5000").send().await.unwrap() });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.status");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.status","outcome":"ok",
+                "result":{"mission":{"id":"m1","cwd":"/srv/work","objective":"ship it","repo_identity":"repo-1","config":{"headless":false}}},"error":null}),
+        )
+        .await;
+    let response = show.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let request_id = body["request_id"].as_str().unwrap().to_string();
+    let mission = &body["result"]["result"]["mission"];
+    assert_eq!(mission["cwd"], "/srv/work");
+    assert_eq!(mission["objective"], "ship it");
+    assert_eq!(mission["repo_identity"], "repo-1");
+    assert_eq!(mission["config"]["headless"], false);
+
+    // The same stored command, read as a command record, has none of them.
+    let (status, record) = api.get(&format!("/api/v1/commands/{request_id}")).await;
+    assert_eq!(status, 200, "{record}");
+    let serialized = record.to_string();
+    for sentinel in ["/srv/work", "ship it", "repo-1", "headless"] {
+        assert!(!serialized.contains(sentinel), "command record leaked {sentinel}: {record}");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect(&env, &token, "uncertain-worker", 0).await;
+    let request_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let request = tokio::spawn(async move {
+        request_api
+            .rb(Method::PATCH, "/api/v1/missions/m1/tasks/2?worker=w1")
+            .header("idempotency-key", "uncertain-retry-1")
+            .json(&json!({"prompt":"retry later", "wait_ms":5000}))
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "task.amend");
+    worker
+        .send(
+            "command.result",
+            json!({
+                "schema_version":1,
+                "request_id":command["payload"]["request_id"],
+                "operation":"task.amend",
+                "outcome":"uncertain",
+                "result":null,
+                "error":{"code":"uncertain","message":"worker lost confirmation"}
+            }),
+        )
+        .await;
+    let response = request.await.unwrap();
+    assert_eq!(response.status().as_u16(), 409);
+    assert_eq!(response.headers().get("content-type").unwrap(), "application/problem+json");
+    let location = response.headers().get("location").unwrap().to_str().unwrap().to_string();
+    assert_eq!(location, "/api/v1/commands/uncertain-retry-1");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/uncertain-outcome");
+    assert_eq!(problem["code"], "uncertain-outcome");
+    assert!(problem["detail"].as_str().unwrap().contains("before retrying"));
+
+    let (status, stored) = api.get(&location).await;
+    assert_eq!(status, 200);
+    assert_eq!(stored["state"], "done");
+    assert_eq!(stored["result"]["outcome"], "uncertain");
+    assert!(stored["created_at"].as_str().unwrap().ends_with('Z'));
+    assert!(stored["updated_at"].as_str().unwrap().ends_with('Z'));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;
@@ -1401,6 +1734,95 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn command_resource_redacts_private_request_and_event_fields() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    admin.add_worker("w1").await;
+    let request = json!({
+        "schema_version": 1,
+        "request_id": "private-command-1",
+        "operation": "mission.create",
+        "mission_id": "m1",
+        "target": "w1",
+        "params": {
+            "cwd": "/private/request-path-sentinel",
+            "objective": "private-objective-sentinel",
+            "repo_identity": "private-repo-sentinel",
+            "prompt": "private-request-prompt-sentinel",
+            "environment": {"PRIVATE_ENV_SENTINEL":"environment-secret-sentinel"},
+            "config": {"capacity_refresh_seconds":60,"note":"private-config-sentinel"}
+        }
+    });
+    env.srv.state.db.command_insert("w1", "mission.create", true, &request).unwrap();
+    env.srv
+        .state
+        .db
+        .command_done(
+            "w1",
+            "private-command-1",
+            &json!({
+                "outcome": "ok",
+                "result": {
+                    "events": [{
+                        "id": 1,
+                        "kind": "mission-created",
+                        "data": {
+                                            "terminal_output": "raw-terminal-sentinel",
+                            "screen": "captured-terminal-screen-sentinel",
+                            "provider_api_key": "provider-secret-sentinel",
+                            "access_token": "access-token-sentinel",
+                            "stdout": "stdout-terminal-sentinel",
+                            "transcript": "transcript-terminal-sentinel",
+                            "summary": "mission created"
+                        }
+                    }]
+                },
+                "error": null
+            }),
+        )
+        .unwrap();
+
+    let secret = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped("read-only", &bridge_coordinator::auth::sha256_hex(&secret), None, &["read".to_string()])
+        .unwrap());
+    let mut reader = env.api();
+    reader.bearer = Some(secret);
+    let (status, response) = reader.get("/api/v1/commands/private-command-1").await;
+    assert_eq!(status, 200, "{response}");
+    let serialized = response.to_string();
+    for sentinel in [
+        "/private/request-path-sentinel",
+        "private-objective-sentinel",
+        "private-repo-sentinel",
+        "private-config-sentinel",
+        "raw-terminal-sentinel",
+        "captured-terminal-screen-sentinel",
+        "provider-secret-sentinel",
+        "environment-secret-sentinel",
+        "access-token-sentinel",
+        "stdout-terminal-sentinel",
+        "transcript-terminal-sentinel",
+    ] {
+        assert!(!serialized.contains(sentinel), "private sentinel leaked: {sentinel}: {response}");
+    }
+    // The command record must not duplicate mission content (cwd, repo_identity, objective, config).
+    assert!(response.pointer("/request/params/cwd").is_none());
+    assert_eq!(
+        response.pointer("/request/params/prompt").and_then(Value::as_str),
+        Some("private-request-prompt-sentinel")
+    );
+    assert_eq!(
+        response.pointer("/result/result/events/0/data/summary").and_then(Value::as_str),
+        Some("mission created")
+    );
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let env = boot().await;
     let api = env.admin().await;
@@ -1501,5 +1923,34 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let overlong_status = "x".repeat(257);
     let (st, e) = api.get(&format!("/api/v1/missions?status={overlong_status}")).await;
     assert_eq!(st, 400, "overlong status filter: {e}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_rejects_control_characters_in_mission_identifiers() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &token, "control-id-worker", 0).await;
+    let (status, problem) = api
+        .post(
+            "/api/v1/commands",
+            json!({
+                "target":"w1",
+                "request":{
+                    "schema_version":1,
+                    "operation":"mission.status",
+                    "params":{},
+                    "mission_id":"mission\nforged",
+                    "target":"w1",
+                    "request_id":"control-id-1"
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    assert!(problem["detail"].as_str().unwrap().contains("mission_id"));
+    assert!(env.srv.state.db.command_get("control-id-1").unwrap().is_none());
     env.stop().await;
 }

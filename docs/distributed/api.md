@@ -34,18 +34,26 @@ may supply that ID and takes precedence over the request body's value. If a work
 offline, the command remains queued and the response has state `pending` and a
 `Location` header for its command record.
 `GET /api/v1/commands/{request_id}` retrieves its outcome. A completed command
-can still report `uncertain`; clients must not treat that as success. Resource
+can still report `uncertain`; a repeated submission then returns `409 uncertain-outcome` with a `Location` for the stored command, and clients must not treat it as success. Resource
 endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
 remaining CLI parity operations are being added in this follow-up.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
-/api/v1/missions/{id}`, `/tasks`, `/events` and `/operations` are thin adapters over
-the typed `mission.status`, `task.list`, `mission.events` and `session.list` operations. They return
+/api/v1/missions/{id}`, `/station`, `/tasks`, `/events` and `/operations` are thin adapters over
+the typed `mission.status`, `mission.station`, `task.list`, `mission.events` and `session.list` operations. The station resource returns only the bounded station projection (configuration, observed provider, mode and current station context). They return
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+
+`GET /api/v1/workers/{name}/missions` returns the worker’s full mission list (typed `mission.list`) with the `read` scope; it accepts `include_config` (`true` or `false`, default `false`) and `wait_ms`.
+
+`GET /api/v1/workers/{name}/sessions` returns the worker's provider sessions (typed `session.list`) and
+`GET /api/v1/workers/{name}/usage` returns its provider capacity snapshot (typed `usage.snapshot`). Both
+need the `read` scope and return the durable command envelope like the mission resources. `sessions` takes
+`mission`, `limit` (1 to 1000, default 100), `offset` or an opaque `cursor` (not together with `offset`),
+and `wait_ms`; other query parameters are refused.
 
 `GET /api/v1/missions` (the mission list across workers) carries, for each mission the worker
 reports them for, `attention` (`{kind, message, tasks}` or `null`: why the operator is needed) and
@@ -274,7 +282,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `help` | Exclusion: offline help has no state/API operation; replacement is `llm-bridge help` locally. |
 | `view` | Exclusion: opens a local filesystem artifact; replacement is local `llm-bridge view --file`. |
 | `mission create` | Typed `mission.create`; resource `POST /api/v1/missions` with `worker` in the JSON body; worker requires `--allow-create` and a cwd inside an enrolled `--allow-root`. `worker` is optional: without it the coordinator places the mission (see "Worker placement" below). Only `--command-template` and the verifier command and file options stay local and return `unsupported-remote-option`; a verifier is chosen with `verifier_name`. |
-| `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
+| `mission list` | Typed `mission.list` via the read-scoped `GET /api/v1/workers/{name}/missions`, preserving the worker’s full local mission fields; `include_config` includes mission configuration. `GET /api/v1/missions` lists replicated summaries across workers. |
 | `mission settings` | Typed `mission.settings.get`; resource `GET /api/v1/missions/{id}/settings`. |
 | `mission set` | Typed `mission.settings.patch`; resource `PATCH /api/v1/missions/{id}/settings`. |
 | `mission delete` | Typed `mission.delete` (parameter `confirm`, which must be `true`); resource `DELETE /api/v1/missions/{id}?worker=NAME` with JSON body `{"confirm": true}`, operate scope. Without `confirm: true` the resource answers `400 confirmation-required` and queues nothing; `POST /commands` with a `mission.delete` request lacking `confirm` is rejected by the worker with `confirmation-required`. Only a mission that never started or has ended or been stopped (`CREATED`, `COMPLETED`, `FAILED`, `CANCELLED`, `STOPPED`) is deleted; `RUNNING`, `PAUSED` and `STOPPING`, a live controller and a live provider station are refused with outcome `rejected`, error code `conflict`. A mission the worker no longer has is `not-found`. The coordinator removes its copy and keeps a tombstone (see `protocol.md`, Mission deletion). |
@@ -335,8 +343,8 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `theme` | Exclusion: previews local terminal colors; no REST operation. |
 | `console` | Exclusion: opens local curses control station; remote web UI is the replacement. |
 | `control` | Exclusion: opens local curses control station; remote web UI is the replacement. |
-| `usage` | Exclusion: embeds local `llm-usage` data; no coordinator usage route. |
-| `station` | Exclusion: selects local station; remote terminal view is `GET /api/v1/terminal` WebSocket. |
+| `usage` | The local dashboard command is excluded. Typed `usage.snapshot` (the provider capacity `llm-usage` reports) is the read-scoped resource `GET /api/v1/workers/{name}/usage`, which the web console and `--target` use. |
+| `station` | The local interactive station selector is excluded; bounded station state is `GET /api/v1/missions/{id}/station` with `worker=NAME`, and terminal viewing remains the scoped `/api/v1/terminal` WebSocket. |
 | `rotation` | Typed `mission.rotation.get` / `mission.rotation.put`; resources `GET` / `PUT /api/v1/missions/{id}/rotation`. |
 | `steer` | Typed `mission.steer`; operate-scoped resource `POST /api/v1/missions/{id}/steer`; supports every CLI kind. Prompt files are read client-side and prompt text is sent in the typed request. |
 | `_station-gc` | Exclusion: private internal tmux cleanup command; never remote. |
@@ -471,6 +479,9 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/workers/{name}/doctor` |
 | `GET /api/v1/workers/{name}/agents` |
+| `GET /api/v1/workers/{name}/missions` |
+| `GET /api/v1/workers/{name}/sessions` |
+| `GET /api/v1/workers/{name}/usage` |
 | `GET /api/v1/workers/{name}/audit` |
 | `POST /api/v1/workers/{name}/gc` |
 | `GET /api/v1/tokens` |
@@ -484,6 +495,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `DELETE /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
+| `GET /api/v1/missions/{id}/station` |
 | `GET /api/v1/missions/{id}/agents` |
 | `GET /api/v1/missions/{id}/settings` |
 | `PATCH /api/v1/missions/{id}/settings` |

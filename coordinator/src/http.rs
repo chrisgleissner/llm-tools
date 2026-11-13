@@ -136,8 +136,39 @@ impl IntoResponse for ApiError {
 
 type ApiResult = Result<Response, ApiError>;
 
-fn json_ok(status: StatusCode, v: Value) -> Response {
+fn json_ok(status: StatusCode, mut v: Value) -> Response {
+    normalize_api_timestamps(&mut v);
     (status, axum::Json(v)).into_response()
+}
+
+/// Persisted times are Unix seconds, but timestamps crossing the public JSON API use RFC 3339 UTC.
+/// The field-name allowlist also normalizes timestamps inside worker-provided resource projections.
+fn normalize_api_timestamps(value: &mut Value) {
+    const FIELDS: &[&str] = &[
+        "created_at",
+        "updated_at",
+        "last_seen",
+        "expires_at",
+        "last_used",
+        "last_used_at",
+        "occurred_at",
+        "timestamp",
+    ];
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if FIELDS.contains(&name.as_str()) {
+                    if let Some(epoch) = value.as_i64() {
+                        *value = json!(timestamp(Some(epoch)));
+                    }
+                } else {
+                    normalize_api_timestamps(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_api_timestamps),
+        _ => {}
+    }
 }
 
 fn unauthorized() -> ApiError {
@@ -1392,6 +1423,9 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 
 fn timestamp(epoch: Option<i64>) -> Option<String> {
     let epoch = epoch?;
+    if !(0..=253_402_300_799).contains(&epoch) {
+        return None;
+    }
     let days = epoch.div_euclid(86_400);
     let seconds = epoch.rem_euclid(86_400);
     let (year, month, day) = crate::certs::civil_from_days(days);
@@ -1924,6 +1958,7 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
     let (operation, allowed, position_key, default_limit): (&str, &[&str], Option<&str>, u64) = match resource {
         "mission" => ("mission.status", &["task_limit", "prompt_chars", "event_limit"], None, 0),
+        "station" => ("mission.station", &[], None, 0),
         "tasks" => ("task.list", &["limit", "cursor", "offset", "prompt_chars"], Some("offset"), 50),
         "events" => ("mission.events", &["limit", "cursor", "after"], Some("after"), 50),
         "operations" => ("session.list", &["limit", "cursor", "offset"], Some("offset"), 100),
@@ -2009,8 +2044,11 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
             "request_id": format!("resource-{}", auth::random_token())
         }
     });
-    let bytes = Bytes::from(serde_json::to_vec(&command).expect("command JSON serializes"));
-    post_command(State(st), Authed(principal, ip), headers, Buffered { bytes, _permit: None }).await
+    let Value::Object(command) = command else {
+        unreachable!("the command envelope is an object")
+    };
+    // A mission read is a resource: it keeps the mission content that the generic command record removes.
+    submit_command(st, principal, ip, headers, command, None, false).await
 }
 
 async fn mission_tasks(
@@ -2070,6 +2108,28 @@ const REMOTE_CREATE_REFUSED: [&str; 8] = [
     "verifier_file",
     "verifier_files",
 ];
+
+async fn mission_station_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "station",
+            query: q,
+        },
+    )
+    .await
+}
 
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let mut params = parse_body(&body.bytes)?;
@@ -2773,6 +2833,47 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
             }
             "mission.agents"
         }
+        "missions" => {
+            let include_config = match q.get("include_config").map(String::as_str) {
+                None | Some("false") => false,
+                Some("true") => true,
+                _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "include_config must be true or false")),
+            };
+            params.insert("include_config".into(), json!(include_config));
+            "mission.list"
+        }
+        "sessions" => {
+            let limit = q.get("limit").map_or(Ok(100), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| (1..=1000).contains(n))
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be an integer from 1 to 1000"))
+            })?;
+            let mut offset = q.get("offset").map_or(Ok(0), |value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "offset must be a non-negative integer"))
+            })?;
+            let mission = q.get("mission").map(String::as_str).unwrap_or("");
+            if let Some(cursor) = q.get("cursor") {
+                if q.contains_key("offset") {
+                    return Err(err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor cannot be combined with offset"));
+                }
+                let filters = format!("worker={worker};mission={mission};resource=operations;limit={limit}");
+                offset = u64::try_from(
+                    crate::cursor::read(&st.cursor_key, "missions/operations", &filters, cursor)
+                        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "invalid or mismatched page cursor"))?,
+                )
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "page cursor is out of range"))?;
+            }
+            params.insert("mission".into(), json!(mission));
+            params.insert("limit".into(), json!(limit));
+            params.insert("offset".into(), json!(offset));
+            "session.list"
+        }
+        "usage" => "usage.snapshot",
         "gc" => {
             params = parse_body(&body.bytes)?;
             no_extra(&params, &["wait_ms"])?;
@@ -2792,6 +2893,12 @@ async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResour
         &["limit", "wait_ms"][..]
     } else if matches!(action.as_str(), "doctor" | "agents") {
         &["mission", "wait_ms"][..]
+    } else if action == "missions" {
+        &["include_config", "wait_ms"][..]
+    } else if action == "sessions" {
+        &["mission", "limit", "offset", "cursor", "wait_ms"][..]
+    } else if action == "usage" {
+        &["wait_ms"][..]
     } else {
         &[][..]
     };
@@ -2853,6 +2960,78 @@ async fn worker_agents_resource(
         WorkerResourceRequest {
             worker,
             action: "agents".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_missions_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "missions".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_sessions_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "sessions".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
+        },
+    )
+    .await
+}
+async fn worker_usage_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "usage".into(),
             q,
             headers,
             body: Buffered {
@@ -3025,10 +3204,18 @@ async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<S
 
 async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
-    submit_command(st, p, ip, headers, m, None).await
+    submit_command(st, p, ip, headers, m, None, true).await
 }
 
-async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m: Map<String, Value>, extra: Option<(&'static str, Value)>) -> ApiResult {
+async fn submit_command(
+    st: St,
+    p: Principal,
+    ip: String,
+    headers: HeaderMap,
+    m: Map<String, Value>,
+    extra: Option<(&'static str, Value)>,
+    redact_content: bool,
+) -> ApiResult {
     no_extra(&m, &["target", "request", "wait_ms"])?;
     let target = str_field(&m, "target")?;
     let Some(Value::Object(request)) = m.get("request") else {
@@ -3152,11 +3339,21 @@ async fn submit_command(st: St, p: Principal, ip: String, headers: HeaderMap, m:
             "the task changed since the supplied revision; fetch it again and retry",
         ));
     }
-    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut value = row.to_json();
-    if status == StatusCode::OK {
-        add_next_page_cursor(&st, &row, &mut value);
+    if row.state == "done" && row.result.as_ref().and_then(|result| result.get("outcome")).and_then(Value::as_str) == Some("uncertain") {
+        let mut response = err(
+            StatusCode::CONFLICT,
+            "uncertain-outcome",
+            "the worker could not determine whether this operation completed; inspect the command before retrying",
+        )
+        .into_response();
+        response.headers_mut().insert(
+            header::LOCATION,
+            format!("/api/v1/commands/{request_id}").parse().expect("validated request id"),
+        );
+        return Ok(response);
     }
+    let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
+    let mut value = command_response_json(&st, &row, redact_content);
     if let Some((key, extra)) = extra {
         value[key] = extra;
     }
@@ -3213,13 +3410,72 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
     result.insert("next_cursor".into(), json!(next_cursor));
 }
 
+/// `redact_content` is true for the generic command record (`/commands`), which must not duplicate mission
+/// content, and false for the mission and worker resources, which serve it to the `read` scope.
+fn command_response_json(st: &St, row: &CommandRow, redact_content: bool) -> Value {
+    let mut value = row.to_json();
+    redact_private_api_fields(&mut value, redact_content);
+    value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
+    value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
+    add_next_page_cursor(st, row, &mut value);
+    value
+}
+
+/// Command requests and worker results are durable internal records, not public API schemas.
+/// Remove known private fields recursively before exposing them through the generic command
+/// resource. Resource-specific endpoints remain the preferred, explicitly projected interface.
+fn redact_private_api_fields(value: &mut Value, redact_content: bool) {
+    const MISSION_CONTENT_FIELDS: &[&str] = &["cwd", "repo_identity", "objective", "config"];
+    const PRIVATE_FIELDS: &[&str] = &[
+        "environment",
+        "env",
+        "terminal",
+        "terminal_content",
+        "terminal_screen",
+        "terminal_output",
+        "screen",
+        "transcript",
+        "output",
+        "raw_output",
+        "stdout",
+        "stderr",
+        "secret",
+        "api_key",
+        "provider_api_key",
+        "provider_key",
+        "provider_credentials",
+        "token",
+        "access_token",
+        "refresh_token",
+        "token_hash",
+        "password",
+        "credential",
+        "credentials",
+        "authorization",
+        "cookie",
+    ];
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, _| {
+                !PRIVATE_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private))
+                    && !(redact_content && MISSION_CONTENT_FIELDS.iter().any(|private| key.eq_ignore_ascii_case(private)))
+            });
+            for child in fields.values_mut() {
+                redact_private_api_fields(child, redact_content);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                redact_private_api_fields(child, redact_content);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(r) => {
-            let mut value = r.to_json();
-            add_next_page_cursor(&st, &r, &mut value);
-            Ok(json_ok(StatusCode::OK, value))
-        }
+        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row, true))),
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }
@@ -3252,7 +3508,7 @@ async fn resource_command(st: St, principal: Principal, ip: String, command: Res
     let Value::Object(envelope) = envelope else {
         unreachable!("the envelope is an object")
     };
-    submit_command(st, principal, ip, headers, envelope, command.extra).await
+    submit_command(st, principal, ip, headers, envelope, command.extra, false).await
 }
 
 fn resource_wait_ms(m: &Map<String, Value>) -> Result<u64, ApiError> {
@@ -3821,6 +4077,9 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/missions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/sessions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/usage", &["GET"], Access::Authed, "read"),
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
@@ -3833,6 +4092,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}", &["DELETE"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/station", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/agents", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/settings", &["PATCH"], Access::Authed, "operate"),
@@ -3948,6 +4208,21 @@ mod problem_tests {
         assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_site));
     }
 
+    #[test]
+    fn public_json_timestamp_normalization_is_recursive_and_bounded() {
+        let mut value = json!({
+            "session":{"expires_at":0},
+            "worker":{"last_seen":1},
+            "created_at":i64::MAX,
+            "unrelated_number":123
+        });
+        normalize_api_timestamps(&mut value);
+        assert_eq!(value["session"]["expires_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(value["worker"]["last_seen"], "1970-01-01T00:00:01Z");
+        assert!(value["created_at"].is_null(), "out-of-range epochs are never formatted");
+        assert_eq!(value["unrelated_number"], 123);
+    }
+
     #[tokio::test]
     async fn api_errors_use_stable_rfc9457_problem_details() {
         let response = err(StatusCode::CONFLICT, "request-id-conflict", "request id was reused").into_response();
@@ -4025,6 +4300,9 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
         .route("/api/v1/workers/{name}/doctor", get(worker_doctor_resource))
         .route("/api/v1/workers/{name}/agents", get(worker_agents_resource))
+        .route("/api/v1/workers/{name}/missions", get(worker_missions_resource))
+        .route("/api/v1/workers/{name}/sessions", get(worker_sessions_resource))
+        .route("/api/v1/workers/{name}/usage", get(worker_usage_resource))
         .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
@@ -4035,6 +4313,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/missions/{id}", get(mission_status_resource).delete(mission_delete_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/station", get(mission_station_resource))
         .route("/api/v1/missions/{id}/agents", get(mission_agents_resource))
         .route(
             "/api/v1/missions/{id}/settings",

@@ -138,6 +138,19 @@ async fn openapi_route_is_public_and_matches_the_runtime_generator() {
     assert_eq!(body["openapi"], "3.1.0");
     assert!(body["paths"]["/api/v1/openapi.json"]["get"].is_object());
     assert!(body["paths"]["/api/docs"]["get"].is_object());
+    for path in ["/api/v1/workers/{name}/sessions", "/api/v1/workers/{name}/usage"] {
+        assert_eq!(
+            body["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CommandOutcome"
+        );
+    }
+    let session_parameters = body["paths"]["/api/v1/workers/{name}/sessions"]["get"]["parameters"].as_array().unwrap();
+    assert!(session_parameters
+        .iter()
+        .any(|parameter| parameter["name"] == "cursor" && parameter["in"] == "query"));
+    assert!(session_parameters
+        .iter()
+        .any(|parameter| parameter["name"] == "limit" && parameter["schema"]["maximum"] == 1000));
     let (status, html) = api.get("/api/docs").await;
     assert_eq!(status, 200);
     assert!(html.as_str().unwrap().contains("/api/v1/openapi.json"));

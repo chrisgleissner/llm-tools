@@ -39,7 +39,8 @@ async fn worker_authentication() {
     env.srv.state.db.worker_age("w1", 1).unwrap();
     let (_, list) = api.get("/api/v1/workers").await;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    assert!(now - list["workers"][0]["last_seen"].as_i64().unwrap() <= 5, "{list}");
+    let last_seen = epoch_from_rfc3339(list["workers"][0]["last_seen"].as_str().expect("last_seen is RFC 3339 text"));
+    assert!(now - last_seen <= 5, "{list}");
     let (_, missions) = api.get("/api/v1/missions").await;
     assert_eq!(missions["missions"][0]["mission"]["id"], "m1");
     assert_eq!(missions["missions"][0]["stale"], false);
@@ -1208,4 +1209,20 @@ async fn a_replay_after_reconnect_restarts_the_idle_clock_of_sent_and_acked_comm
         "a replayed command was sent a second time within the idle time"
     );
     env.stop().await;
+}
+
+/// Seconds since the epoch of a `YYYY-MM-DDTHH:MM:SSZ` timestamp, as the API serves public times (API-004).
+fn epoch_from_rfc3339(text: &str) -> i64 {
+    let number = |range: std::ops::Range<usize>| text[range].parse::<i64>().expect("numeric timestamp field");
+    assert!(text.len() == 20 && text.ends_with('Z'), "not an RFC 3339 UTC timestamp: {text}");
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    let (hour, minute, second) = (number(11..13), number(14..16), number(17..19));
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    days * 86400 + hour * 3600 + minute * 60 + second
 }

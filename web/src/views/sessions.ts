@@ -103,7 +103,7 @@ export function sessions(root: HTMLElement, query: URLSearchParams): () => void 
     title: "Sessions",
     query,
     load: async (workerName) => {
-      const row = await api.command(workerName, "session.list", null, {});
+      const row = await api.workerResource(workerName, "sessions");
       return (row.result?.result?.["sessions"] as Session[] | undefined) ?? [];
     },
     render: (ctx) => {

@@ -371,8 +371,12 @@ For a mission or task action that creates a durable worker command, send an
 it as the durable command request ID; retrying the same key replays its stored
 outcome. An offline worker returns `202 Accepted` and a
 `Location` pointing at `/api/v1/commands/{request_id}`. Poll that resource until
-the command is terminal. If the outcome is `uncertain`, treat it as unknown and
-inspect mission state before deciding what to do next; it is not a success receipt.
+the command is terminal. If the outcome is `uncertain`, a submission returns
+`409` with problem code `uncertain-outcome` and a `Location` for the stored
+command, never a success status. Treat the outcome as unknown and inspect mission
+state before deciding what to do next; it is not a success receipt. The protocol
+accepts only the outcomes `ok`, `accepted`, `applied`, `rejected`, `failed` and
+`uncertain` in a worker's command result.
 
 Task reads return an `ETag` with the task revision when the worker answers
 synchronously. Send that value in `If-Match` on an amend or verification request.
@@ -386,6 +390,13 @@ each with a maximum of 1000. Prefer the opaque `cursor` and the returned
 filters. Cursors are authenticated and encrypted. `offset` and event `after`
 parameters are retained for compatibility where documented. All timestamps are
 RFC 3339 UTC.
+
+The generic command resource (`POST /commands`, `GET /commands/{id}`) removes fields that
+name secrets, credentials, environment variables or terminal content (for example
+`environment`, `stdout`, `terminal_output`, `screen`, `provider_api_key`, `access_token`,
+`password`) at any depth of the stored request and result. Mission paths, objectives and
+configuration are not removed, so `--target` output matches the local CLI. Terminal
+content is only available on the WebSocket and needs a terminal scope.
 
 Errors use `application/problem+json`. The stable problem `type` and `code`
 identify the existing coordinator error. Common statuses include `401` for a

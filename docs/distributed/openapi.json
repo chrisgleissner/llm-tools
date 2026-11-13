@@ -183,8 +183,8 @@
       "CommandOutcome": {
         "properties": {
           "created_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           },
           "mutating": {
             "type": "boolean"
@@ -227,8 +227,8 @@
             "type": "string"
           },
           "updated_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [
@@ -508,9 +508,11 @@
             "type": "array"
           },
           "created_at": {
+            "format": "date-time",
             "type": "string"
           },
           "expires_at": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -530,6 +532,7 @@
             ]
           },
           "last_used": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -651,6 +654,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -713,7 +727,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -803,6 +825,11 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "password": "replace-with-your-password",
+                "remember": false,
+                "username": "operator"
+              },
               "schema": {
                 "additionalProperties": false,
                 "properties": {
@@ -879,6 +906,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -941,7 +979,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1076,6 +1122,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -1138,7 +1195,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1340,6 +1405,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -1402,7 +1478,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1567,6 +1651,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -1629,7 +1724,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1790,6 +1893,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -1852,7 +1966,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -1997,6 +2119,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -2059,7 +2192,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2224,6 +2365,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -2286,7 +2438,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2461,6 +2621,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -2523,7 +2694,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2693,6 +2872,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -2755,7 +2945,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -2934,6 +3132,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -2996,7 +3205,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3103,6 +3320,28 @@
                     "passkey_sign_in_available": {
                       "type": "boolean"
                     },
+                    "session": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "expires_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "idle_timeout_secs": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "remember": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "remember",
+                        "expires_at",
+                        "idle_timeout_secs"
+                      ],
+                      "type": "object"
+                    },
                     "setup_required": {
                       "type": "boolean"
                     }
@@ -3155,6 +3394,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -3217,7 +3467,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3434,6 +3692,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -3496,7 +3765,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3650,6 +3927,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -3712,7 +4000,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -3857,6 +4153,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -3919,7 +4226,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4064,6 +4379,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -4126,7 +4452,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4314,6 +4648,13 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "missions": [],
+                  "next_cursor": null,
+                  "offset": 0,
+                  "statuses": {},
+                  "total": 0
+                },
                 "schema": {
                   "$ref": "#/components/schemas/MissionListPage"
                 }
@@ -4357,6 +4698,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -4419,7 +4771,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4625,6 +4985,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -4687,7 +5058,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -4854,6 +5233,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -4916,7 +5306,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5092,6 +5490,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -5154,7 +5563,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5332,6 +5749,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -5394,7 +5822,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5602,6 +6038,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -5664,7 +6111,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -5841,6 +6296,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -5903,7 +6369,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6111,6 +6585,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -6173,7 +6658,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6384,6 +6877,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -6446,7 +6950,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6621,6 +7133,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -6683,7 +7206,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -6888,6 +7419,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -6950,7 +7492,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7128,6 +7678,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -7190,7 +7751,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7365,6 +7934,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -7427,7 +8007,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7630,6 +8218,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -7692,7 +8291,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -7917,6 +8524,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -7979,7 +8597,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8073,6 +8699,264 @@
         ]
       }
     },
+    "/api/v1/missions/{id}/station": {
+      "get": {
+        "operationId": "get_missions_by_id_station",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Worker that owns this mission ID.",
+            "in": "query",
+            "name": "worker",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutcome"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Insufficient scope or forbidden request"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Method not allowed",
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieSession": []
+          }
+        ],
+        "summary": "GET /api/v1/missions/{id}/station",
+        "x-required-scope": [
+          "read"
+        ]
+      }
+    },
     "/api/v1/missions/{id}/steer": {
       "post": {
         "operationId": "post_missions_by_id_steer",
@@ -8156,6 +9040,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -8218,7 +9113,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8395,6 +9298,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -8457,7 +9371,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8665,6 +9587,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -8727,7 +9660,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -8847,6 +9788,15 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "acceptance": [
+                  "The documented response matches the CLI contract."
+                ],
+                "depends_on": [],
+                "priority": 0,
+                "prompt": "Check the resource endpoint and report any mismatch.",
+                "title": "Review API behavior"
+              },
               "schema": {
                 "$ref": "#/components/schemas/BoundedRequestObject"
               }
@@ -8902,6 +9852,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -8964,7 +9925,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9159,6 +10128,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -9221,7 +10201,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9416,6 +10404,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -9478,7 +10477,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9675,6 +10682,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -9737,7 +10755,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -9942,6 +10968,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -10004,7 +11041,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10201,6 +11246,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -10263,7 +11319,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10408,6 +11472,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -10470,7 +11545,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10562,7 +11645,36 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "notifications": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "category",
+                          "created_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "notifications"
+                  ],
                   "type": "object"
                 }
               }
@@ -10605,6 +11717,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -10667,7 +11790,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -10822,6 +11953,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -10884,7 +12026,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11029,6 +12179,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -11091,7 +12252,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11236,6 +12405,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -11298,7 +12478,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11443,6 +12631,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -11505,7 +12704,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11603,6 +12810,13 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "expires_days": 30,
+                "name": "automation-read",
+                "scopes": [
+                  "read"
+                ]
+              },
               "schema": {
                 "additionalProperties": false,
                 "properties": {
@@ -11711,6 +12925,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -11773,7 +12998,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -11928,6 +13161,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -11990,7 +13234,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12135,6 +13387,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -12197,7 +13460,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12346,6 +13617,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -12408,7 +13690,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12504,7 +13794,43 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
+                  "additionalProperties": false,
+                  "properties": {
+                    "workers": {
+                      "items": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "last_seen": {
+                            "format": "date-time",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "enum": [
+                              "online",
+                              "offline"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "state",
+                          "last_seen"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "workers"
+                  ],
                   "type": "object"
                 }
               }
@@ -12547,6 +13873,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -12609,7 +13946,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -12797,6 +14142,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -12859,7 +14215,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13014,6 +14378,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -13076,7 +14451,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13187,6 +14570,30 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
+                  "properties": {
+                    "last_seen": {
+                      "format": "date-time",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "enum": [
+                        "online",
+                        "offline"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "state",
+                    "last_seen"
+                  ],
                   "type": "object"
                 }
               }
@@ -13229,6 +14636,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -13291,7 +14709,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13465,6 +14891,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -13527,7 +14964,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13702,6 +15147,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -13764,7 +15220,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -13938,6 +15402,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -14000,7 +15475,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14165,6 +15648,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -14227,7 +15721,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14321,6 +15823,260 @@
         ]
       }
     },
+    "/api/v1/workers/{name}/missions": {
+      "get": {
+        "operationId": "get_workers_by_name_missions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_config",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutcome"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Insufficient scope or forbidden request"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Method not allowed",
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieSession": []
+          }
+        ],
+        "summary": "GET /api/v1/workers/{name}/missions",
+        "x-required-scope": [
+          "read"
+        ]
+      }
+    },
     "/api/v1/workers/{name}/restore": {
       "post": {
         "operationId": "post_workers_by_name_restore",
@@ -14392,6 +16148,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -14454,7 +16221,15 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {
@@ -14548,16 +16323,77 @@
         ]
       }
     },
-    "/healthz": {
+    "/api/v1/workers/{name}/sessions": {
       "get": {
-        "operationId": "get__healthz",
+        "operationId": "get_workers_by_name_sessions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mission",
+            "required": false,
+            "schema": {
+              "description": "Optional mission selector; omitted lists sessions across the worker.",
+              "maxLength": 63,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "description": "Opaque continuation cursor; cannot be combined with offset.",
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Legacy numeric position; use cursor for continuation.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CommandOutcome"
                 }
               }
             },
@@ -14599,6 +16435,17 @@
           "400": {
             "content": {
               "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ProblemDetails"
                 }
@@ -14661,7 +16508,486 @@
                 }
               }
             },
-            "description": "The requested change conflicts with current state"
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieSession": []
+          }
+        ],
+        "summary": "GET /api/v1/workers/{name}/sessions",
+        "x-required-scope": [
+          "read"
+        ]
+      }
+    },
+    "/api/v1/workers/{name}/usage": {
+      "get": {
+        "operationId": "get_workers_by_name_usage",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOutcome"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Insufficient scope or forbidden request"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Method not allowed",
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieSession": []
+          }
+        ],
+        "summary": "GET /api/v1/workers/{name}/usage",
+        "x-required-scope": [
+          "read"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "get__healthz",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "example": {
+                  "code": "invalid-request",
+                  "detail": "The request does not match the documented fields.",
+                  "error": {
+                    "code": "invalid-request",
+                    "message": "The request does not match the documented fields."
+                  },
+                  "status": 400,
+                  "title": "Invalid request",
+                  "type": "https://llm-tools.dev/problems/invalid-request"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Insufficient scope or forbidden request"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Method not allowed",
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
           },
           "412": {
             "content": {

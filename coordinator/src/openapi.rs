@@ -35,8 +35,8 @@ struct CommandOutcome {
     operation: String,
     #[schema(value_type = Option<Object>)]
     result: Option<Value>,
-    created_at: i64,
-    updated_at: i64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -111,6 +111,12 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if let Some(schema) = crate::openapi_workers::response(path, method)
+        .or_else(|| crate::openapi_missions::response(path, method))
+        .or_else(|| crate::openapi_misc::response(path, method))
+    {
+        return schema;
+    }
     if path == "/api/v1/auth/passkeys" && method == "GET" {
         return json!({
             "type":"object","required":["passkeys"],"additionalProperties":false,
@@ -135,10 +141,36 @@ fn response_schema(path: &str, method: &str) -> Value {
                 "setup_required":{"type":"boolean"},
                 "authenticated":{"type":"boolean"},
                 "passkey_sign_in_available":{"type":"boolean"},
-                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"}
+                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"},
+                "session":{"type":"object","required":["remember","expires_at","idle_timeout_secs"],"properties":{
+                    "remember":{"type":"boolean"},
+                    "expires_at":{"type":"string","format":"date-time"},
+                    "idle_timeout_secs":{"type":"integer","minimum":1}
+                },"additionalProperties":false}
             },
             "additionalProperties":true
         });
+    }
+    if path == "/api/v1/workers" && method == "GET" {
+        return json!({"type":"object","required":["workers"],"properties":{"workers":{"type":"array","items":{
+            "type":"object","required":["name","state","last_seen"],"properties":{
+                "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+                "last_seen":{"type":["string","null"],"format":"date-time"}
+            },"additionalProperties":true
+        }}},"additionalProperties":false});
+    }
+    if path == "/api/v1/workers/{name}" && method == "GET" {
+        return json!({"type":"object","required":["name","state","last_seen"],"properties":{
+            "name":{"type":"string"},"state":{"type":"string","enum":["online","offline"]},
+            "last_seen":{"type":["string","null"],"format":"date-time"}
+        },"additionalProperties":true});
+    }
+    if path == "/api/v1/security/notifications" && method == "GET" {
+        return json!({"type":"object","required":["notifications"],"properties":{"notifications":{"type":"array","items":{
+            "type":"object","required":["id","category","created_at"],"properties":{
+                "id":{"type":"string"},"category":{"type":"string"},"created_at":{"type":"string","format":"date-time"}
+            },"additionalProperties":false
+        }}},"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
@@ -157,6 +189,11 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
     if path == "/api/v1/commands/{id}"
         || path == "/api/v1/commands"
+        || matches!(
+            path,
+            "/api/v1/workers/{name}/missions" | "/api/v1/workers/{name}/sessions" | "/api/v1/workers/{name}/usage"
+        )
+        || path == "/api/v1/missions/{id}/station"
         || (matches!(
             path,
             "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
@@ -183,7 +220,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
-            "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "409": {"description":"The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying","headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -191,6 +228,14 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "500": {"description":"Internal server error","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
         }
+    });
+    op["responses"]["400"]["content"]["application/problem+json"]["example"] = json!({
+        "type":"https://llm-tools.dev/problems/invalid-request",
+        "title":"Invalid request",
+        "status":400,
+        "detail":"The request does not match the documented fields.",
+        "code":"invalid-request",
+        "error":{"code":"invalid-request","message":"The request does not match the documented fields."}
     });
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
@@ -227,11 +272,23 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"cursor","in":"query","required":false,"description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.","schema":{"type":"string","maxLength":2048}},
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
+        op["responses"]["200"]["content"]["application/json"]["example"] = json!({
+            "missions":[],"total":0,"offset":0,"next_cursor":null,"statuses":{}
+        });
     }
     if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({
             "required": method == "POST" || method == "PUT",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
+        });
+    }
+    if path == "/api/v1/missions/{id}/tasks" && method == "POST" {
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "title":"Review API behavior",
+            "prompt":"Check the resource endpoint and report any mismatch.",
+            "priority":0,
+            "depends_on":[],
+            "acceptance":["The documented response matches the CLI contract."]
         });
     }
     if path == "/api/docs" && method == "GET" {
@@ -257,7 +314,10 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
-            "content":{"application/json":{"schema":token_create_schema()}}
+            "content":{"application/json":{
+                "schema":token_create_schema(),
+                "example":{"name":"automation-read","scopes":["read"],"expires_days":30}
+            }}
         });
     }
     if path == "/api/v1/auth/login" && method == "POST" {
@@ -273,6 +333,9 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                     "remember":{"type":"boolean"}
                 }
             }}}
+        });
+        op["requestBody"]["content"]["application/json"]["example"] = json!({
+            "username":"operator","password":"replace-with-your-password","remember":false
         });
     }
     if path.ends_with("/registration/start") && method == "POST" {
@@ -361,6 +424,24 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/workers/{name}/doctor" || path == "/api/v1/workers/{name}/agents" {
         op["parameters"] = json!([{"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
                                   {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/workers/{name}/missions" {
+        op["parameters"] = json!([
+            {"name":"include_config","in":"query","required":false,"schema":{"type":"boolean","default":false}},
+            {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}
+        ]);
+    }
+    if path == "/api/v1/workers/{name}/sessions" {
+        op["parameters"] = json!([
+            {"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63,"description":"Optional mission selector; omitted lists sessions across the worker."}},
+            {"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":1000,"default":100}},
+            {"name":"cursor","in":"query","required":false,"schema":{"type":"string","maxLength":2048,"description":"Opaque continuation cursor; cannot be combined with offset."}},
+            {"name":"offset","in":"query","required":false,"schema":{"type":"integer","minimum":0,"default":0,"description":"Legacy numeric position; use cursor for continuation."}},
+            {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}
+        ]);
+    }
+    if path == "/api/v1/workers/{name}/usage" {
+        op["parameters"] = json!([{"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
     }
     if path == "/api/v1/workers/{name}/audit" {
         op["parameters"] = json!([{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":10000}},
@@ -594,6 +675,16 @@ pub fn openapi_value() -> Value {
         "additionalProperties":true,
         "properties":{"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor for task, event, or operation list results."}}
     });
+    for field in ["created_at", "updated_at"] {
+        doc["components"]["schemas"]["CommandOutcome"]["properties"][field] = json!({"type":"string","format":"date-time"});
+    }
+    for field in ["created_at", "last_used", "expires_at"] {
+        doc["components"]["schemas"]["TokenInfo"]["properties"][field] = if field == "created_at" {
+            json!({"type":"string","format":"date-time"})
+        } else {
+            json!({"type":["string","null"],"format":"date-time"})
+        };
+    }
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
     }
@@ -672,6 +763,10 @@ mod tests {
             assert!(ROUTES.iter().any(|(declared, _, _, _)| declared == path));
         }
         assert!(doc["components"]["schemas"]["ProblemDetails"].is_object());
+        for field in ["created_at", "updated_at"] {
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["type"], "string");
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["format"], "date-time");
+        }
         let mission_list = &doc["paths"]["/api/v1/missions"]["get"];
         let params = mission_list["parameters"].as_array().expect("mission list query parameters");
         let cursor = params
@@ -710,8 +805,15 @@ mod tests {
 
     #[test]
     fn generated_openapi_matches_committed_snapshot() {
+        let generated = openapi_value();
+        if std::env::var_os("UPDATE_OPENAPI_SNAPSHOT").is_some() {
+            let mut bytes = serde_json::to_vec_pretty(&generated).expect("serialize generated OpenAPI");
+            bytes.push(b'\n');
+            std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/distributed/openapi.json"), bytes).expect("write OpenAPI snapshot");
+            return;
+        }
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");
-        assert_eq!(openapi_value(), snapshot);
+        assert_eq!(generated, snapshot);
     }
 
     #[test]
@@ -724,6 +826,26 @@ mod tests {
         assert_eq!(schema["properties"]["password"]["type"], "string");
         assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["properties"]["remember"]["type"], "boolean");
+    }
+
+    #[test]
+    fn openapi_documents_safe_request_and_response_examples() {
+        let doc = openapi_value();
+        let mission_list = &doc["paths"]["/api/v1/missions"]["get"]["responses"]["200"]["content"]["application/json"];
+        assert_eq!(mission_list["example"]["missions"], json!([]));
+        assert_eq!(mission_list["example"]["next_cursor"], Value::Null);
+
+        let task_add = &doc["paths"]["/api/v1/missions/{id}/tasks"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(task_add["example"]["title"], "Review API behavior");
+        assert_eq!(task_add["example"]["depends_on"], json!([]));
+
+        let token_create = &doc["paths"]["/api/v1/tokens"]["post"]["requestBody"]["content"]["application/json"];
+        assert_eq!(token_create["example"]["scopes"], json!(["read"]));
+        assert!(token_create["example"].get("secret").is_none());
+
+        let problem = &doc["paths"]["/api/v1/missions"]["post"]["responses"]["400"]["content"]["application/problem+json"]["example"];
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+        assert_eq!(problem["status"], 400);
     }
 
     #[test]
@@ -741,6 +863,25 @@ mod tests {
         assert_eq!(schema["properties"]["new"]["type"], "string");
         assert_eq!(schema["properties"]["keep_api_tokens"]["type"], "boolean");
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn public_timestamp_fields_are_declared_as_rfc3339_date_time() {
+        let auth = response_schema("/api/v1/auth/state", "GET");
+        assert_eq!(auth["properties"]["session"]["properties"]["expires_at"]["format"], "date-time");
+        let workers = response_schema("/api/v1/workers", "GET");
+        assert_eq!(workers["properties"]["workers"]["items"]["properties"]["last_seen"]["format"], "date-time");
+        let worker = response_schema("/api/v1/workers/{name}", "GET");
+        assert_eq!(worker["properties"]["last_seen"]["format"], "date-time");
+        let notifications = response_schema("/api/v1/security/notifications", "GET");
+        assert_eq!(
+            notifications["properties"]["notifications"]["items"]["properties"]["created_at"]["format"],
+            "date-time"
+        );
+        let document = openapi_value();
+        for field in ["created_at", "last_used", "expires_at"] {
+            assert_eq!(document["components"]["schemas"]["TokenInfo"]["properties"][field]["format"], "date-time");
+        }
     }
 
     #[test]
