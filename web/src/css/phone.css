@@ -1,0 +1,59 @@
+/* Phone layouts for the on-screen keyboard and the thumb (UXR-045, UXR-046). These rules override ones in the lazy route stylesheets (auth, mission and session),
+   which load after this file, so each selector starts with `html` to win by specificity, not by order. They live in the first-load stylesheet because the
+   route stylesheets are at their size cap (budget.json). */
+
+/* The token form is a dialog now: its body is the grid. */
+.token-create .dialog-body { display: grid; gap: var(--sp-3); align-content: start; }
+.bar-btn > .icon { display: none; }
+
+/* Typing on a phone: a soft keyboard exists on touch devices only, body[data-typing] is set by shell.ts while a text field has focus, and the screen is as short as
+   it is with the keyboard open (24rem, 384 px: half of a 745 px screen is 372). The half of the screen the keyboard leaves holds the two sign-in fields, "Remember
+   this device", the error and Sign in, so the heading, the intro and the hints give way and come back when focus leaves the field (Tab reaches them). A page that
+   autofocuses its first field at load keeps its full layout. The first-run form keeps its help. In a dialog a field that shows its error does not also show its hint. */
+@media (max-width: 47.99rem) and (pointer: coarse) and (max-height: 24rem) {
+  html body[data-typing] main.auth:has(#login-form) { padding-block: var(--sp-1); align-items: flex-start; }
+  html body[data-typing] #login-form { margin: 0; padding: var(--sp-1) var(--sp-3); }
+  html body[data-typing] #login-form .field { margin: var(--sp-1) 0; }
+  html body[data-typing] #login-form > p.muted, html body[data-typing] #login-form > details.aside { display: none; }
+  html body[data-typing] #login-form .auth-head { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); } /* the heading stays for screen readers */
+  html body[data-typing] #login-form:has(#form-error:not(:empty)) #forgot-password-hint { display: none; } /* without an error the reset hint stays */
+  html body[data-typing] #login-form .actions { margin: var(--sp-1) 0; padding-block: 0; }
+  html body[data-typing] #login-form .form-error.box { margin: var(--sp-1) 0; padding: var(--sp-1) var(--sp-2); }
+  html body[data-typing] dialog .field:has(> .field-error:not(:empty)) > .hint { display: none; }
+}
+
+/* The mission page on a phone. The session pane runs edge to edge on the smallest phones: seven 44 px keys need the whole width and no gap. */
+@media (max-width: 21.99rem) {
+  html .mission-session > [data-pane] { margin-inline: calc(-1 * var(--gutter)); }
+  html body:is([data-kb], [data-session-fs]) .mission-session > [data-pane] { margin-inline: 0; } /* fixed to the screen already */
+  html .keybar, html .keybar-row { gap: 1px; padding-inline: 0; }
+}
+
+/* The state's actions (Approve, Pause, Stop, Resume, Start, Retry) are docked above the bottom bar, where the thumb of the hand that holds the phone rests, not in
+   the top third of the screen. Not on a very short screen (400% zoom, a landscape phone), where two fixed bars would leave no room. The dock gives its place back
+   while a field has the keyboard, because the screen is then below 30 rem tall. */
+@media (max-width: 47.99rem) and (min-height: 30.01rem) {
+  body:has(.mission-wrap) { --dock-h: 3.4rem; }
+  html .shell > main:has(> .mission-wrap) { padding-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom) + var(--dock-h) + var(--sp-4)); }
+  html .mission-head .head-actions { position: fixed; inset-inline: 0; inset-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom)); z-index: 27; box-sizing: border-box; block-size: var(--dock-h); padding: var(--sp-1) var(--gutter); background: var(--surface-1); border-block-start: 1px solid var(--border); }
+  html .mission-session > [data-pane] { block-size: max(var(--pane-min, 14rem), calc(100svh - var(--head-h) - var(--tab-h) - var(--dock-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; }
+}
+
+/* On a phone, at every height: keys that cannot be used (view only) give their row to the terminal; taking control brings them back. At 568 px tall and below: the session bar is one row of
+   icon buttons (the labels stay for screen readers), the terminal keeps 6 rows, and the pane is as tall as the space under the head (at least 12.5rem), so the composer ends above the dock. */
+@media (max-width: 47.99rem) { html .keybar:has(> .key:disabled) { display: none; } }
+@media (max-width: 47.99rem) and (min-height: 30.01rem) and (max-height: 36rem) {
+  html .session-bar { flex-wrap: nowrap; padding-block: 1px; }
+  html .term-status { flex: 1 1 0; min-inline-size: 0; }
+  html .bar-btn { inline-size: var(--control-h); padding-inline: 0; justify-content: center; }
+  html .bar-btn > .icon { display: inline; }
+  html .bar-btn > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  html body:not([data-kb]) .session-main { min-block-size: 6.75rem; }
+  html .mission-session { --pane-min: 12.5rem; }
+  html .head-id h1 { margin-block-end: 0; }
+  html .mission-answer { margin-block-start: 0; }
+}
+
+/* Full screen hides the mission head; its title stays as the page's level-one heading for screen readers, and the rest of the head leaves the focus order. */
+html body[data-session-fs] .shell .mission-head { display: block; position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); visibility: hidden; }
+html body[data-session-fs] .shell .mission-head h1 { visibility: visible; }

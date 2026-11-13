@@ -89,40 +89,37 @@ test("every page, menu and dialog fits the screen with large targets", async ({ 
   await audit(page, "enrolment dialog");
   await page.getByRole("button", { name: "Done" }).click();
   // Confirmation dialog, with the on-screen keyboard's worth of space not needed: it is short.
-  await page.getByRole("button", { name: "Remove worker phone-test" }).click();
-  await fits("dialog.dialog");
+  await page.getByRole("button", { name: "Actions for worker phone-test" }).click();
+  await page.getByRole("menuitem", { name: "Remove worker" }).click();
+  await fits("dialog.dialog[open]");
   await audit(page, "confirmation dialog");
   await page.locator("#dialog-cancel").click();
-  // Account menu, shortcut help and the phone's More sheet.
+  // User menu (a bottom sheet on a phone), shortcut help and the command palette.
   await page.locator("#account-button").click();
-  await audit(page, "account menu");
+  await audit(page, "user menu");
   await page.locator("#menu-shortcuts").click();
   await fits("#shortcut-help");
   await audit(page, "shortcut help");
   await page.keyboard.press("Escape");
-  if (isNarrow(page)) {
-    await page.locator("#more-button").click();
-    await fits("#more-sheet");
-    await audit(page, "more sheet");
-    expect(await page.locator("#more-sheet a").count()).toBeGreaterThanOrEqual(3);
-  }
+  await page.locator("#palette-open").click();
+  await fits("#palette");
+  await audit(page, "command palette");
 });
 
-test("on a phone the navigation is a bottom tab bar within thumb reach; on desktop it is a side bar", async ({ page, coord }) => {
+test("on a phone the navigation is a bottom bar within thumb reach; on desktop it is a rail", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  const bar = page.locator(".tabbar");
-  const side = page.locator(".side");
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link")).toHaveCount(5);
+  const box = (await nav.boundingBox())!;
+  const vp = page.viewportSize()!;
   if (isNarrow(page)) {
-    await expect(bar).toBeVisible();
-    await expect(side).toBeHidden();
-    const box = await bar.boundingBox();
-    const vp = page.viewportSize()!;
-    expect(box!.y + box!.height).toBeCloseTo(vp.height, 0);
-    expect(box!.height).toBeGreaterThanOrEqual(56);
-    await expect(bar.getByRole("link")).toHaveCount(4);
+    expect(box.y + box.height).toBeCloseTo(vp.height, 0);
+    expect(box.height).toBeGreaterThanOrEqual(56);
+    expect(box.width).toBeCloseTo(vp.width, 0);
   } else {
-    await expect(side).toBeVisible();
-    await expect(bar).toBeHidden();
+    expect(box.x).toBeLessThanOrEqual(1);
+    expect(box.height).toBeGreaterThan(vp.height / 2);
+    expect(box.width).toBeLessThan(vp.width / 4);
   }
 });
 
@@ -153,18 +150,17 @@ test.describe("terminal on a phone", () => {
         });
       });
       await setupViaUi(page, coord);
-      await expect(async () => {
-        await page.goto(`/missions/e2e-worker/${st.missionId}`);
-        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(`/missions/e2e-worker/${st.missionId}`);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       const keys = page.locator("#terminal-keys");
       const status = page.locator("#terminal-status");
-      // View mode: never a key bar (nothing could be sent).
+      // View mode: the key bar is shown on a phone but every key is disabled (nothing could be sent).
       await expect(async () => {
         if ((await status.getAttribute("data-state")) === "idle") await page.locator("#terminal-open").click({ timeout: 2000 });
         await expect(status).toHaveAttribute("data-state", "live", { timeout: 4000 });
       }).toPass({ timeout: 30_000 });
-      await expect(keys).toBeHidden();
+      if (isNarrow(page)) await expect(page.locator("#key-esc")).toBeDisabled();
+      await page.locator("#session-menu").click();
       await page.locator("#terminal-close").click();
       await expect(async () => {
         if ((await status.getAttribute("data-state")) === "idle") await page.locator("#terminal-control").click({ timeout: 2000 });
@@ -176,7 +172,9 @@ test.describe("terminal on a phone", () => {
         return;
       }
       await expect(keys).toBeVisible();
-      for (const k of ["esc", "tab", "ctrl", "up", "down", "left", "right"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
+      for (const k of ["esc", "tab", "ctrl", "up", "down"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
+      await page.locator("#key-more").click(); // Left and Right are on the second row
+      for (const k of ["left", "right"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
       expect(await smallTargets(page)).toEqual([]);
       await expectNoHorizontalScroll(page);
 
@@ -215,8 +213,9 @@ test.describe("terminal on a phone", () => {
         expect(cols, "visible terminal rows").toBeGreaterThanOrEqual(3);
       }
       // Without the writer role the keys send nothing.
+      await page.locator("#session-menu").click();
       await page.locator("#terminal-close").click();
-      await expect(keys).toBeHidden();
+      await expect(page.locator("#key-esc")).toBeDisabled();
     } finally {
       st.cleanup();
     }

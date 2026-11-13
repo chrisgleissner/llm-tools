@@ -32,10 +32,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import bridge_commands as commands
+from .bridge_format import printable
 from .bridge_protocol import MAX_DELETED_MISSIONS_PER_MESSAGE, MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
-from .bridge_store import BridgeStore, default_state_dir, store_path
-from .bridge_states import LIVE_MISSION_STATUSES
+from .bridge_states import FINISHED_MISSION_STATUSES, LIVE_MISSION_STATUSES
 from .bridge_status_bound import mission_digest
+from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
@@ -58,6 +59,13 @@ UNREPLICATED_EVENT_KINDS = frozenset({EventKind.CONTROLLER_HEARTBEAT.value})
 LATEST_ONLY_EVENT_KINDS = frozenset({EventKind.CAPACITY_REFRESH.value})
 MISSION_QUESTION_REFRESH_SECS = 5.0
 MAX_QUESTION_MISSIONS_PER_REFRESH = 64
+# Event kinds the controller writes every few seconds. They cannot change a mission summary, so a
+# batch of them needs no summary (the coordinator mirrors this list in `protocol::HEARTBEAT_KINDS`).
+HEARTBEAT_KINDS = frozenset({str(EventKind.CONTROLLER_HEARTBEAT), str(EventKind.CAPACITY_REFRESH)})
+# Bounds of the `attention` field of a mission summary (also in the coordinator's OpenAPI schema).
+ATTENTION_KINDS = frozenset({"approval", "failed", "blocked", "operator", "proposal", "capacity", "provider"})
+ATTENTION_MESSAGE_CHARS = 240
+ATTENTION_MAX_TASKS = 8
 
 
 class WorkerConfigError(ValueError):
@@ -586,6 +594,7 @@ class WorkerSession:
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
+        self.mission_attention: dict[str, dict[str, Any] | None] = {}  # native RUNNING missions only, like mission_questions
         self.tombstones_unsupported = False  # the coordinator rejected `deleted_missions` on this connection
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
@@ -624,11 +633,16 @@ class WorkerSession:
         return Message("hello", self.config.worker_id, 0, payload)
 
     def _live_projection(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
-        """The existing bounded status projection with one task, or ``None`` when it cannot be read."""
+        """The bounded status projection of one mission (the default task page), or ``None`` when it cannot be read.
+
+        ``needs_attention`` looks for a task awaiting review in the page of tasks, so the page must hold the tasks
+        of a mission, not only the first one: with a page of one, a review of task 2 was reported as "nothing needed".
+        Prompt text is not needed for the summary, so each prompt is read as one character.
+        """
         try:
             from .bridge_monitor import project_snapshot
 
-            return dict(project_snapshot(store, mission_id, task_limit=1, prompt_chars=1))
+            return dict(project_snapshot(store, mission_id, prompt_chars=1))
         except Exception:  # noqa: BLE001 - observation must never stop worker replication
             return None
 
@@ -643,6 +657,22 @@ class WorkerSession:
         if not isinstance(message, str) or not message or not isinstance(command, str) or not command:
             return None
         return {"kind": "provider", "message": message[:2048], "command": command[:512]}
+
+    @staticmethod
+    def _bounded_attention(needs: Any) -> dict[str, Any] | None:
+        """``{kind, message, tasks}`` of the projection's ``needs_you``, cut to the summary bounds, or ``None``.
+
+        The message is the one-line text the status projection already shows the operator, with control
+        characters removed and at most ``ATTENTION_MESSAGE_CHARS`` characters. The CLI command is left out.
+        """
+        if not isinstance(needs, dict) or needs.get("kind") not in ATTENTION_KINDS:
+            return None
+        text = " ".join(printable(needs.get("message") or "").split())
+        if len(text) > ATTENTION_MESSAGE_CHARS:
+            text = text[: ATTENTION_MESSAGE_CHARS - 1] + "\u2026"
+        tasks = needs.get("tasks")
+        numbers = [item for item in tasks if isinstance(item, int) and not isinstance(item, bool) and item > 0] if isinstance(tasks, list) else []
+        return {"kind": needs["kind"], "message": text, "tasks": numbers[:ATTENTION_MAX_TASKS]}
 
     @staticmethod
     def _compact_needs(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -672,26 +702,34 @@ class WorkerSession:
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }
-        config = row.get("config")
-        snapshot = self._live_projection(store, mission_id) if row.get("status") in LIVE_MISSION_STATUSES else None
+        try:
+            summary["task_counts"] = {str(key): int(value) for key, value in store.task_counters(mission_id)["status"].items() if int(value) > 0}
+        except Exception:  # noqa: BLE001 - an unreadable count is left out, not reported as zero
+            pass
+        finished = row.get("status") in FINISHED_MISSION_STATUSES
+        snapshot = None if finished else self._live_projection(store, mission_id)
         if snapshot is not None:
-            # Task counts and the current task let a console draw its lists from the replicated
-            # summary instead of asking the worker for the status of every active mission.
-            summary.update(mission_digest(snapshot))
-            compact = self._compact_needs(snapshot)
-            if compact is not None:
-                summary["needs_you"] = compact
-        else:
-            counters = store.task_counters(mission_id)
-            summary["task_counts"] = {str(key): int(value) for key, value in counters["status"].items()}
+            summary["attention"] = self._bounded_attention(snapshot.get("needs_you"))
+            if row.get("status") in LIVE_MISSION_STATUSES:
+                # Task counts and the current task let a console draw its lists from the replicated
+                # summary instead of asking the worker for the status of every active mission.
+                summary.update(mission_digest(snapshot))
+                compact = self._compact_needs(snapshot)
+                if compact is not None:
+                    summary["needs_you"] = compact
+        elif finished:
+            summary["attention"] = None  # a finished mission needs nothing; an unreadable one stays absent (unknown)
+        config = row.get("config")
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
             question = self._provider_question(snapshot)
             summary["needs_you"] = question if question is not None else summary.get("needs_you")
             self.mission_questions[mission_id] = question
+            self.mission_attention[mission_id] = summary.get("attention")
         elif mission_id in self.mission_questions:
             # Event-driven summaries clear a question when its mission leaves RUNNING.
             summary.setdefault("needs_you", None)
             self.mission_questions.pop(mission_id, None)
+            self.mission_attention.pop(mission_id, None)
         return summary
 
     def _question_refresh_batch(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -949,9 +987,11 @@ class WorkerSession:
             # Ordinary summaries remain event-scoped. A small, periodic scan of
             # active native missions catches provider questions, which can arrive
             # without a Bridge database event.
+            # A mission whose only events in the batch are heartbeats has nothing new to report.
             event_mission_ids = {
                 str(event["mission_id"]) for event in events
                 if isinstance(event.get("mission_id"), str) and event["mission_id"]
+                and event.get("kind") not in HEARTBEAT_KINDS
             }
             candidate_rows: dict[str, dict[str, Any]] = {
                 mission_id: row for mission_id in sorted(event_mission_ids)
@@ -968,9 +1008,9 @@ class WorkerSession:
                 candidate_rows.update({str(row["id"]): row for row in active_native})
             missions: list[dict[str, Any]] = []
             for mission_id, row in candidate_rows.items():
-                previous = self.mission_questions.get(mission_id)
+                previous = (self.mission_questions.get(mission_id), self.mission_attention.get(mission_id))
                 summary = self._mission_summary(store, row)
-                current = self.mission_questions.get(mission_id)
+                current = (self.mission_questions.get(mission_id), self.mission_attention.get(mission_id))
                 if mission_id in event_mission_ids or current != previous:
                     missions.append(summary)
             if through == after and not missions:

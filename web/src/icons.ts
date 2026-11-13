@@ -36,6 +36,18 @@ const PATHS = {
   lock: "M5 11h14v10H5z M8 11V7a4 4 0 0 1 8 0v4",
   caps: "M12 3l8 9h-5v6H9v-6H4z M9 21h6",
   clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 6v6l4 2",
+  // state shapes (spec 5.1); every state pill uses one of these, so state is never carried by colour alone
+  diamondCheck: "M12 2l10 10-10 10L2 12z M8.5 12l2.5 2.5 4.5-5",
+  speechBubble: "M21 12a8 8 0 0 1-8 8H4l2.5-3.2A8 8 0 1 1 21 12z M8 11h.01 M12 11h.01 M16 11h.01",
+  xOctagon: "M7.9 2h8.2L22 7.9v8.2L16.1 22H7.9L2 16.1V7.9z M9 9l6 6 M15 9l-6 6",
+  plugOff: "M9 2v4 M15 2v4 M6 6h12v4a6 6 0 0 1-12 0z M12 16v6 M3 3l18 18",
+  hourglass: "M6 2h12 M6 22h12 M7 2v4.5L12 12l-5 5.5V22 M17 2v4.5L12 12l5 5.5V22",
+  ring: "M21 12a9 9 0 1 1-9-9",
+  pauseBars: "M9 5v14 M15 5v14",
+  circle: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
+  square: "M5 5h14v14H5z",
+  plug: "M9 2v4 M15 2v4 M6 6h12v4a6 6 0 0 1-12 0z M12 16v6",
+  slashCircle: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M5 19L19 5",
   inbox: "M22 12h-6l-2 3h-4l-2-3H2 M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.2a2 2 0 0 0-1.7 1.1z",
 } as const;
 
@@ -55,6 +67,7 @@ export function icon(name: IconName, size = 20): SVGSVGElement {
   svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
+  svg.setAttribute("data-icon", name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()));
   svg.classList.add("icon");
   const path = document.createElementNS(NS, "path");
   path.setAttribute("d", PATHS[name]);

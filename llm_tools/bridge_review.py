@@ -7,9 +7,11 @@ repository it inspects.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -19,6 +21,8 @@ from .bridge_store import BridgeStore
 SCHEMA_VERSION = 1
 OUTPUT_TAIL_BYTES = 256 * 1024
 DIFF_MAX_BYTES = 1024 * 1024
+ACTIVITY_LINE_CHARS = 160
+ACTIVITY_TAIL_BYTES = 16 * 1024
 CHANGED_FILES_RECORDED = 6  # the console projection keeps at most six list items per event field
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _GIT_TIMEOUT_SECONDS = 15
@@ -117,6 +121,73 @@ def task_output(store: BridgeStore, mission_id: str, task: dict[str, Any], *, ta
     if truncated:
         text = f"[showing the last {len(data)} of {size} bytes; the full log is {found['path']}]\n" + text
     return {**found, "size_bytes": size, "truncated": truncated, "text": text}
+
+
+# ---------------------------------------------------------------- activity line
+
+_ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=-]*[ -/]*[@-~]|\x1b[()][\x20-\x7e]|\x1b[@-Z\\^_<>=78]")
+
+
+def _activity_unavailable(reason: str, message: str) -> dict[str, Any]:
+    return {"schema_version": SCHEMA_VERSION, "available": False, "reason": reason, "message": message,
+            "line": None, "at": None, "task": None, "provider": None}
+
+
+def last_log_line(data: bytes) -> str | None:
+    """The last line of ``data`` that has a letter or digit, as one plain line of at most ``ACTIVITY_LINE_CHARS``.
+
+    Terminal escape sequences are removed, every control, format and surrogate character is replaced by a
+    space or dropped, and white space is collapsed. A line made only of box-drawing characters, spinners
+    or punctuation (a redrawn terminal screen is mostly that) is skipped.
+    """
+    from .bridge_format import printable  # imported here: bridge_format is only needed once a log has text
+
+    text = _ESCAPES.sub("", data.decode("utf-8", "replace")).replace("\r\n", "\n").replace("\r", "\n")
+    for raw in reversed(text.split("\n")):
+        line = " ".join(printable(raw).split())
+        if any(char.isalnum() for char in line):
+            return line if len(line) <= ACTIVITY_LINE_CHARS else line[: ACTIVITY_LINE_CHARS - 1] + "\u2026"
+    return None
+
+
+def activity_line(store: BridgeStore, mission_id: str) -> dict[str, Any]:
+    """One bounded line of what the provider of the mission's running operation printed last, and when.
+
+    The line comes only from the operation's retained log, the file ``task output`` already returns in
+    full to the same callers; the provider's terminal screen is never captured. At most the last
+    ``ACTIVITY_TAIL_BYTES`` of the log are read and at most ``ACTIVITY_LINE_CHARS`` characters returned.
+    ``at`` is the log file's modification time (UTC), the moment the provider last wrote.
+    """
+    from .fileio import open_regular_file
+
+    row = store.db.execute(
+        f"SELECT * FROM operations WHERE mission_id=? AND status IN ({','.join('?' * len(ACTIVE_OPERATION_STATUSES))}) ORDER BY rowid DESC LIMIT 1",
+        (mission_id, *sorted(ACTIVE_OPERATION_STATUSES)),
+    ).fetchone()
+    if row is None:
+        return _activity_unavailable("not-running", "no provider run is active in this mission")
+    operation = dict(row)
+    path = operation.get("logs_path")
+    if not path:
+        return _activity_unavailable("no-log", "the provider has not written a log yet")
+    try:
+        with open_regular_file(str(path)) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            stream.seek(max(0, size - ACTIVITY_TAIL_BYTES))
+            data = stream.read(ACTIVITY_TAIL_BYTES)
+            modified = os.fstat(stream.fileno()).st_mtime
+    except OSError:
+        return _activity_unavailable("unreadable", "the provider log cannot be read")
+    line = last_log_line(data)
+    if line is None:
+        return _activity_unavailable("no-output", "the provider has not printed a line of text yet")
+    task = store.db.execute("SELECT ordinal FROM tasks WHERE id=?", (operation["task_id"],)).fetchone()
+    return {
+        "schema_version": SCHEMA_VERSION, "available": True, "reason": None, "message": "", "line": line,
+        "at": datetime.fromtimestamp(modified, timezone.utc).isoformat(timespec="seconds"),
+        "task": None if task is None else task[0],
+        "provider": operation.get("route_id") or operation.get("station"),
+    }
 
 
 # ---------------------------------------------------------------- workspace change

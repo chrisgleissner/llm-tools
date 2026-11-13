@@ -60,6 +60,47 @@ async fn serves_index_and_assets_publicly_with_security_headers() {
     let _ = std::fs::remove_dir_all(web);
 }
 
+/// The build writes `name.ext.gz` next to the text assets; a client that accepts gzip gets that copy, any other client the plain file.
+#[tokio::test]
+async fn text_assets_are_served_gzipped_to_clients_that_accept_it() {
+    let (env, web) = boot_web().await;
+    std::fs::write(web.join("app-ABCD1234.js.gz"), b"GZIP-BYTES").unwrap();
+    std::fs::write(web.join("index.html.gz"), b"GZIP-INDEX").unwrap();
+    let ask = |path: &'static str, encoding: Option<&'static str>| {
+        let mut r = env.client.get(format!("{}{path}", env.base()));
+        if let Some(e) = encoding {
+            r = r.header("accept-encoding", e);
+        }
+        r.send()
+    };
+    let r = ask("/app-ABCD1234.js", Some("gzip, br")).await.unwrap();
+    assert_eq!(r.headers()["content-encoding"], "gzip");
+    assert_eq!(r.headers()["vary"], "accept-encoding");
+    assert_eq!(r.headers()["content-type"], "text/javascript; charset=utf-8");
+    assert!(r.headers()["cache-control"].to_str().unwrap().contains("immutable"));
+    assert_eq!(r.bytes().await.unwrap().as_ref(), b"GZIP-BYTES");
+    // The application shell too, also for an unknown route.
+    for path in ["/", "/missions/abc"] {
+        let r = ask(path, Some("gzip")).await.unwrap();
+        assert_eq!(r.headers()["content-encoding"], "gzip", "{path}");
+        assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
+        assert_eq!(r.bytes().await.unwrap().as_ref(), b"GZIP-INDEX");
+    }
+    // No Accept-Encoding, or gzip refused: the plain file, still marked as varying.
+    for encoding in [None, Some("gzip;q=0"), Some("br")] {
+        let r = ask("/app-ABCD1234.js", encoding).await.unwrap();
+        assert!(r.headers().get("content-encoding").is_none(), "{encoding:?}");
+        assert_eq!(r.headers()["vary"], "accept-encoding");
+        assert_eq!(r.text().await.unwrap(), "console.log(1)");
+    }
+    // A file without a gzip copy is served as it is, and a type that is not text never varies.
+    let r = ask("/assets/app.css", Some("gzip")).await.unwrap();
+    assert!(r.headers().get("content-encoding").is_none());
+    assert_eq!(r.text().await.unwrap(), "body{}");
+    env.stop().await;
+    let _ = std::fs::remove_dir_all(web);
+}
+
 #[tokio::test]
 async fn unknown_paths_get_the_app_shell_but_api_paths_do_not() {
     let (env, web) = boot_web().await;

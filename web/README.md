@@ -22,12 +22,29 @@ Every spec runs on all four projects. `mobile.spec.ts` asserts no horizontal scr
 44x44 CSS px, input font size of at least 16 px, dialogs inside the viewport and the terminal key bar (Esc, Tab, Ctrl,
 arrows; the test captures the bytes sent on the WebSocket) in portrait and landscape.
 
+The `typing-flood` project holds one test, T36 "typing under a 200 lines per second terminal stream" (`e2e/redesign/uxr-typing.spec.ts`). It measures
+wall-clock key-to-paint latency at 4x CPU throttling, which is only meaningful when no other test competes for the cores, so every other project
+depends on it: Playwright runs it first and alone, then the parallel workers start. Selecting any project therefore runs it once first (about 6 s);
+pass `--no-deps` to skip it. It does not take part in `--repeat-each` multiples of the other projects or in file and `-g` filters.
+
+## Click paths, the on-screen keyboard and thumb reach (UXR-043 to UXR-046)
+
+`e2e/redesign/click-paths-data.ts` lists every operator task with its interaction count at 1440x900 and at phone widths; `docs/distributed/ux-audit.md`
+holds the table generated from it. After changing a row run `node scripts/click-paths-doc.mjs` (with `--check` it only verifies). The specs
+`uxr-paths` (interaction counts, equal to the table), `uxr-keyboard` (typing above a keyboard that covers half the screen), `uxr-reach` (primary
+control in the lower 60% of the screen on phones) and `uxr-keyboard-only` (every task with the keyboard alone on a desktop) run on the four standard
+projects and, with `uxr-keyboard` and `uxr-reach`, also on `paths-320x568` and `paths-360x640`.
+
 ## Visual baselines
 
 `e2e/screenshots.spec.ts` renders every page and state (first-run setup and its errors, sign-in and its error
 states, overview, workers, missions, mission detail, dialogs, menus, usage, diagnostics, account) in light and dark
 on fixed data (`e2e/mock.ts`) with a fixed clock and animations disabled. The same states are scanned with axe-core
 in both themes on all four projects and must have no violations of any impact.
+
+The screens are listed per work package in `e2e/screens/<package>.ts` (`auth`, `shell`, `session`, `mission`, `inbox`,
+`fleet`), aggregated by `e2e/screens/index.ts`. A package adds or changes screens only in its own file, and a screen's
+name is its baseline file name, so names stay unique across packages.
 
 Baselines (`e2e/__screenshots__/<project>/`) exist for `chromium-desktop` and `chromium-mobile` only. Firefox
 renders text with different anti-aliasing and the runs would need a loose threshold; the Firefox projects run the
@@ -45,9 +62,20 @@ docker run --rm --ipc=host -e CI=1 -e CARGO_TARGET_DIR=/work/coordinator/target 
 CI compares against the committed files in the same image. On any other machine set `BRIDGE_SKIP_VISUAL=1` to skip
 the pixel comparison and keep the axe checks. Update the image tag together with `@playwright/test`.
 
+## Load time
+
+`e2e/redesign/uxr-lighthouse.spec.ts` (T37, `npx playwright test --project=lighthouse`; the other projects leave it out, because the measurement needs a machine without other load) runs Lighthouse (mobile preset, simulated 4x CPU and slow 4G) on the Inbox, Missions and a mission page of a seeded
+coordinator and worker: performance 90 or more, accessibility 100, best practices 95 or more, LCP 2.5 s or less, TBT 200 ms or less. The build writes a gzip copy
+of every text asset that the coordinator sends to a client that accepts gzip, and `index.html` preloads the first-load chunks and the sign-in check; the page
+modules do their part: a text that arrives late (the verifier result) has its place from the first paint, the terminal chunk is fetched after the first paint,
+and a route imports its page module directly. `scripts/lighthouse.mjs` repeats a measurement that Lighthouse itself could not record (`NO_NAVSTART`), never one
+that missed a budget. The result varies by about 100 ms between runs, and the run needs a machine without other load.
+
 ## Bundle budget and load time
 
-`e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load, and counts
-chunks reachable only through dynamic imports as lazy load. It fails when either group or CSS exceeds `budget.json`,
-or when the terminal chunk is imported statically. It also measures the
+`e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load. Chunks reachable
+only through dynamic imports are counted twice: the xterm.js chunk against the `terminal` cap and all other lazy chunks
+(login, reset, account, workers, sessions, usage, diagnostics) against the `routes` cap. It fails when a group or the CSS
+exceeds `budget.json`, when the terminal chunk is imported statically, or when a route listed under `lazyRoutes` is found in
+the initial graph. The xterm.js stylesheet is a separate file loaded by the terminal chunk, not part of the first-load CSS. It also measures the
 first-run page on Pixel 4 emulation with and without 4x CPU throttling and writes `test-results/load-metrics.json`.

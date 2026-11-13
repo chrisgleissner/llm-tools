@@ -136,35 +136,26 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await page.getByRole("button", { name: "Create administrator" }).click();
   const response = await setupResponse;
   expect(response.ok(), `first-run setup returned HTTP ${response.status()}`).toBe(true);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 /** Open the account menu and sign out. */
 export async function signOutViaUi(page: Page): Promise<void> {
   await page.locator("#account-button").click();
-  await page.locator("#account-panel").getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 }
 
-/** Go to a page through the navigation that the current viewport shows (side bar, tab bar or the More sheet). */
-export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions" | "Sessions" | "Usage" | "Diagnostics" | "Account"): Promise<void> {
-  if (name === "Account") {
+/** Go to a page through the navigation the current viewport shows (rail, bottom bar or header links); Account and Diagnostics are in the user menu. */
+export async function navTo(page: Page, name: "Overview" | "Inbox" | "Workers" | "Missions" | "Sessions" | "Usage" | "Diagnostics" | "Account"): Promise<void> {
+  if (name === "Account" || name === "Diagnostics") {
     await page.locator("#account-button").click();
-    await page.locator("#account-panel").getByRole("button", { name: "Change password" }).click();
+    await page.getByRole("menuitem", { name }).click();
     return;
   }
-  // The shell (side bar, tab bar and More button) is built only after the page's auth-state request returns, which
-  // can be after the load event of a goto. isVisible() does not wait, so without this the check below can run before
-  // any navigation exists and fall through to a More button that is not there yet (or is hidden on desktop).
-  await page.locator("#more-button").waitFor({ state: "attached" });
-  const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
-  const more = page.locator("#more-button");
-  await expect.poll(async () => (await link.isVisible()) || (await more.isVisible()), {
-    message: `navigation for ${name} should render before choosing its responsive control`,
-  }).toBe(true);
-  if (await link.isVisible()) return link.click();
-  await more.click();
-  await page.locator("#more-sheet").getByRole("link", { name, exact: true }).click();
+  // The navigation is one element that the stylesheet lays out as rail, bottom bar or header links, so the link is always the same one;
+  // click() waits until the shell has been built after the page's auth-state request returned.
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: name === "Overview" ? "Inbox" : name, exact: true }).click();
 }
 
 export async function loginViaUi(page: Page, username = "admin", password = PASSWORD): Promise<void> {
@@ -172,7 +163,7 @@ export async function loginViaUi(page: Page, username = "admin", password = PASS
   await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
 }
 
 /** WCAG 2.x A/AA axe scan in both colour schemes; fails on any violation and prints the details. */

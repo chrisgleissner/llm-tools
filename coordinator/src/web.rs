@@ -112,6 +112,40 @@ fn with_headers(mut r: Response, ctype: &'static str, cache: &'static str, heade
     r
 }
 
+/// Whether the client accepts gzip (`Accept-Encoding: gzip`, not `gzip;q=0`).
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| {
+        v.split(',').any(|item| {
+            let mut parts = item.split(';');
+            let coding = parts.next().unwrap_or("").trim();
+            let refused = parts.any(|p| p.trim().strip_prefix("q=").and_then(|q| q.trim().parse::<f32>().ok()).is_some_and(|q| q <= 0.0));
+            coding.eq_ignore_ascii_case("gzip") && !refused
+        })
+    })
+}
+
+/// Text assets that the build stores next to a gzip copy (`app-HASH.js.gz`).
+fn compressible(rel: &Path) -> bool {
+    matches!(
+        rel.extension().and_then(|e| e.to_str()),
+        Some("html" | "js" | "mjs" | "css" | "svg" | "json" | "webmanifest")
+    )
+}
+
+/// The file at `rel` for a client that accepts gzip: the build's `.gz` copy when it exists (smaller by about 75% on a slow link), else the file itself.
+/// The copy goes through the same root check as any file. The `bool` says that the bytes are gzip.
+async fn read_asset(root: &Path, rel: &Path, gzip: bool) -> Option<(Vec<u8>, PathBuf, bool)> {
+    if gzip && compressible(rel) {
+        let mut name = rel.as_os_str().to_os_string();
+        name.push(".gz");
+        if let Some((bytes, _)) = read_file(root, Path::new(&name)).await {
+            return Some((bytes, rel.to_path_buf(), true));
+        }
+    }
+    let (bytes, full) = read_file(root, rel).await?;
+    Some((bytes, full, false))
+}
+
 async fn read_file(root: &Path, rel: &Path) -> Option<(Vec<u8>, PathBuf)> {
     let (root, rel) = (root.to_path_buf(), rel.to_path_buf());
     tokio::task::spawn_blocking(move || {
@@ -136,18 +170,19 @@ pub async fn serve(root: Option<PathBuf>, method: Method, uri: Uri, headers: Hea
         return with_headers((StatusCode::OK, PLACEHOLDER).into_response(), "text/html; charset=utf-8", "no-store", &headers);
     };
     let looks_like_file = path.rsplit('/').next().is_some_and(|s| s.contains('.'));
-    let (bytes, full, immutable) = match safe_relative(path) {
-        Some(rel) if path != "/" => match read_file(&root, &rel).await {
-            Some((b, f)) => (b, f, hashed_name(&rel)),
+    let gzip = accepts_gzip(&headers);
+    let (bytes, full, zipped, immutable) = match safe_relative(path) {
+        Some(rel) if path != "/" => match read_asset(&root, &rel, gzip).await {
+            Some((b, f, z)) => (b, f, z, hashed_name(&rel)),
             None if looks_like_file => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            None => match read_file(&root, Path::new("index.html")).await {
-                Some((b, f)) => (b, f, false),
+            None => match read_asset(&root, Path::new("index.html"), gzip).await {
+                Some((b, f, z)) => (b, f, z, false),
                 None => return (StatusCode::NOT_FOUND, "not found").into_response(),
             },
         },
         // "/" and malformed paths both get the application shell; the shell does its own routing.
-        _ if path == "/" || !looks_like_file => match read_file(&root, Path::new("index.html")).await {
-            Some((b, f)) => (b, f, false),
+        _ if path == "/" || !looks_like_file => match read_asset(&root, Path::new("index.html"), gzip).await {
+            Some((b, f, z)) => (b, f, z, false),
             None => return (StatusCode::NOT_FOUND, "not found").into_response(),
         },
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -155,7 +190,14 @@ pub async fn serve(root: Option<PathBuf>, method: Method, uri: Uri, headers: Hea
     let ctype = content_type(&full);
     let cache = if immutable { "public, max-age=31536000, immutable" } else { "no-cache" };
     let body = if method == Method::HEAD { Body::empty() } else { Body::from(bytes) };
-    with_headers(Response::new(body), ctype, cache, &headers)
+    let mut response = with_headers(Response::new(body), ctype, cache, &headers);
+    if compressible(&full) {
+        response.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    }
+    if zipped {
+        response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    response
 }
 
 const PLACEHOLDER: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Bridge coordinator</title></head><body><h1>Bridge coordinator</h1><p>The web interface is not installed. The API is under <code>/api/v1</code>.</p></body></html>";
@@ -181,6 +223,21 @@ mod tests {
         ] {
             assert!(safe_relative(bad).is_none(), "{bad} must be rejected");
         }
+    }
+
+    #[test]
+    fn gzip_is_used_only_when_the_client_accepts_it() {
+        let with = |v: &'static str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(v));
+            h
+        };
+        assert!(accepts_gzip(&with("gzip")));
+        assert!(accepts_gzip(&with("br, gzip;q=0.5, deflate")));
+        assert!(accepts_gzip(&with("GZIP")));
+        assert!(!accepts_gzip(&with("br, deflate")));
+        assert!(!accepts_gzip(&with("gzip;q=0")));
+        assert!(!accepts_gzip(&HeaderMap::new()));
     }
 
     #[test]
