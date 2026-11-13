@@ -20,7 +20,7 @@ from llm_tools import bridge_worker as worker
 from llm_tools.bridge import main
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled, wait_for
-from tests.test_distributed_integration import BINARY, Coordinator, _online
+from tests.test_distributed_integration import BINARY, Coordinator, _online, read_listening_line
 
 requires_coordinator = pytest.mark.skipif(BINARY is None, reason="bridge-coordinator is not built")
 
@@ -66,7 +66,7 @@ def restart(coordinator: Coordinator) -> None:
     config.write_text(re.sub(r'bind = ".*"', f'bind = "127.0.0.1:{coordinator.port}"', config.read_text()))
     coordinator.process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(coordinator.data)], stderr=subprocess.PIPE, text=True,
                                            start_new_session=True)
-    assert "https://" in coordinator.process.stderr.readline()
+    read_listening_line(coordinator.process)
 
 
 @contextmanager
