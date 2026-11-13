@@ -165,7 +165,9 @@ class Target:
     def stop(self) -> None:
         if self.coordinator:
             self.coordinator.stop()
-        if self.data:
+        if self.data and os.environ.get("CAPACITY_KEEP"):
+            print(f"kept {self.data}", file=sys.stderr)
+        elif self.data:
             subprocess.run(["rm", "-rf", str(self.data)], check=False)
 
 
@@ -184,6 +186,8 @@ class FakeWorker(threading.Thread):
         self.seq = 0
         self.cursor = 0
         self.on_send: Any = None
+        self.born = time.monotonic()
+        self.close_at = 0.0
         self.errors: list[str] = []
         self.nacks = 0
         self.events_sent = 0
@@ -246,6 +250,7 @@ class FakeWorker(threading.Thread):
                 text = self.ws.receive_text(timeout=1.0)
             except bridge_ws.WebSocketClosed as exc:
                 self.close = (exc.code, exc.reason)
+                self.close_at = time.monotonic() - self.born
                 return
             except (OSError, bridge_ws.WebSocketError) as exc:
                 self.errors.append(f"read: {exc}")
@@ -471,6 +476,8 @@ def step_events(target: Target, args: argparse.Namespace) -> dict[str, Any]:
     result["nacks"] = sum(w.nacks for w in workers)
     result["worker_errors"] = sum(len(w.errors) for w in workers)
     result["closed"] = sum(1 for w in workers if w.close)
+    result["close_reasons"] = sorted({f"{w.close[0]} {w.close[1]} after {w.close_at:.0f}s ({w.name_})" for w in workers if w.close})
+    result["worker_error_kinds"] = sorted({e for w in workers for e in w.errors})[:3]
     diag = target.api.diagnostics()
     result["db_bytes_mib"] = round(diag.get("db_bytes", 0) / 1048576, 1)
     result["diagnostics"] = diag.get("resources")
