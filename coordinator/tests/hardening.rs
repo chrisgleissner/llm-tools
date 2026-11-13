@@ -276,8 +276,15 @@ async fn buffered_large_bodies_are_bounded() {
     let mut s = tls_connect(&env).await;
     s.write_all(authed_post_head(&env, &api, "/api/v1/commands", 200_000).as_bytes()).await.unwrap();
     s.write_all(b"{").await.unwrap();
-    let (text, _) = read_to_close(&mut s, Duration::from_secs(2)).await;
-    assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+    let (text, closed) = read_to_close(&mut s, Duration::from_secs(2)).await;
+    // The server refuses before reading the body and closes with unread request data. On Windows
+    // that close sends a TCP RST, which can discard the 503 the client already received, so an
+    // empty closed read is accepted on Windows only. Elsewhere the 503 is required.
+    assert!(
+        text.starts_with("HTTP/1.1 503") || (cfg!(windows) && closed && text.is_empty()),
+        "expected 503 or a reset after refusal; closed={closed}, text={text:?}"
+    );
+    assert_eq!(slots.available_permits(), 0, "refused request must not take a body slot");
     // Small requests are unaffected.
     assert_eq!(api.get("/api/v1/workers").await.0, 200);
     // The stalled bodies time out and release their permits.
