@@ -1,4 +1,4 @@
-import { expect, test, PASSWORD } from "./fixtures";
+import { expect, test, FIRST_RENDER, PASSWORD } from "./fixtures";
 import { mockApp } from "./mock";
 import { supportsPasskeysOnHost } from "../src/passkeys";
 
@@ -91,8 +91,9 @@ test("no passkey control appears when browser WebAuthn support is unavailable", 
   await mockApp(page, { auth: "login", passkeySignInAvailable: true });
   await page.goto("/login");
 
+  // Wait for the form first: a button that is absent because nothing has rendered yet is also "hidden".
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible(FIRST_RENDER);
   await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeHidden();
-  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
 });
 
@@ -101,8 +102,8 @@ test("another hostname keeps password sign-in and links to the canonical passkey
   await mockApp(page, { auth: "login", passkeySignInAvailable: false, passkeyCanonicalOrigin: "https://bridge.example.test:8443" });
   await page.goto("/login");
 
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible(FIRST_RENDER);
   await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeHidden();
-  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
   await expect(page.locator("#passkey-canonical-link")).toContainText("Passkeys are available at");
   await expect(page.locator("#passkey-canonical-link a")).toHaveAttribute("href", "https://bridge.example.test:8443");
