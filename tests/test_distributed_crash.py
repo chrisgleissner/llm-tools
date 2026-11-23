@@ -91,7 +91,11 @@ def test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect(tm
         # Reported once: a repeat lookup and a repeated submission return the identical outcome.
         assert coordinator.request("GET", f"/api/v1/commands/{REQUEST_ID}")[1]["result"] == result
         status, again = coordinator.request("POST", "/api/v1/commands", {"target": "ws", "request": request.to_json(), "wait_ms": 0})
-        assert status == 200 and again["result"] == result
+        if storage_failures:
+            # A stored uncertain outcome is never returned as a successful mutation.
+            assert status == 409 and again["error"]["code"] == "uncertain-outcome", again
+        else:
+            assert status == 200 and again["result"] == result
 
         tasks = _task_count(system.state, system.mission_id) - before
         if storage_failures == 0:

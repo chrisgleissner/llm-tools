@@ -125,7 +125,7 @@ export function openPalette(ctx: PaletteContext, initial = ""): void {
   // Provider sessions come from the online workers; they join the results when they arrive.
   for (const w of store.workers.filter((x) => x.state === "online").slice(0, 4)) {
     void api
-      .command(w.name, "session.list", null, {})
+      .workerResource(w.name, "sessions")
       .then((row) => {
         const rows = (row.result?.result?.["sessions"] as Array<Record<string, string | number | null>> | undefined) ?? [];
         for (const s of rows) {

@@ -538,6 +538,12 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       if (i >= 0) tokens.splice(i, 1);
       return json(route, i >= 0 ? 200 : 404, { ok: i >= 0 });
     }
+    const workerRead = /^\/workers\/([^/]+)\/(sessions|usage)$/.exec(path);
+    if (workerRead && method === "GET") {
+      const [, worker, resource] = workerRead;
+      const result = resource === "sessions" ? { sessions: opts.sessions === "none" ? [] : SESSIONS } : opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : USAGE;
+      return json(route, 200, { request_id: `mock-${resource}`, target: decodeURIComponent(worker ?? "alpha"), operation: resource === "sessions" ? "session.list" : "usage.snapshot", state: "done", result: { outcome: "ok", result, error: null } });
+    }
     if (path === "/commands" && method === "POST") {
       const request = (body?.["request"] ?? {}) as { operation: string; request_id: string; mission_id?: string; params?: Record<string, unknown> };
       const op = request.operation;

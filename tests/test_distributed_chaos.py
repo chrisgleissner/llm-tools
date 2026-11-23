@@ -101,6 +101,18 @@ def test_page_search_finds_every_occurrence():
     assert bridge_chaos._occurrences(b"xxabxxabx", b"ab") == [2, 6]
 
 
+def test_clock_jump_accepts_numeric_and_rfc3339_last_seen_values(monkeypatch):
+    coordinator = type("Coordinator", (), {"api": type("Api", (), {"workers": staticmethod(lambda: [
+        {"name": "numeric", "last_seen": 1_800_000_000},
+        {"name": "rfc3339", "last_seen": "2026-11-08T04:09:10Z"},
+        {"name": "missing", "last_seen": None},
+    ])})})()
+    fabric = type("Fabric", (), {"coordinator": coordinator})()
+    assert bridge_chaos._worker_last_seen(fabric, "numeric") == 1_800_000_000
+    assert bridge_chaos._worker_last_seen(fabric, "rfc3339") == 1_794_110_950
+    assert bridge_chaos._worker_last_seen(fabric, "missing") == 0
+
+
 @pytest.mark.skipif(shutil.which("cc") is None and shutil.which("gcc") is None, reason="a C compiler is required to build the clock shim")
 def test_clock_shim_shifts_wall_time_forward_and_backward_while_the_process_runs(tmp_path):
     shim = bridge_chaos.build_shim(tmp_path)
